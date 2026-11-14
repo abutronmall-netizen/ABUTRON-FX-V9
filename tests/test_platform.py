@@ -367,7 +367,7 @@ class TestReconciliation:
             ticket=5001, login=6207, symbol="GBPUSD.r", volume=1.0,
             price=1.2500, stop_loss=1.2450, take_profit=1.2600,
             state="OPEN", realized_pnl=0.0, commission=7.0, swap=0.0,
-            balance=10000.0)]
+            balance=10000.0, deal_id="d1", direction="BUY")]
         report = rec.reconcile_account("conn1", history)
         assert report["matched"] == 1
 
