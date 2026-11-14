@@ -1,0 +1,36 @@
+[Unit]
+Description=ABUTRON Own MCP Gateway V1 (No OpenAI) — replaces tunnel-client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=abutronmcp
+Group=abutronmcp
+WorkingDirectory=/var/lib/abutron-mcp
+Environment=HOME=/var/lib/abutron-mcp
+Environment=XDG_CONFIG_HOME=/var/lib/abutron-mcp/.config
+EnvironmentFile=/etc/abutron-mcp/gateway.env
+ExecStart=/usr/local/libexec/abutron-mcp-gateway-v1
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/abutron-mcp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
