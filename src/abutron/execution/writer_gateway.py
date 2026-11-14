@@ -8,6 +8,7 @@ pin before any order request. A disarmed or mismatched writer never sends.
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import threading
@@ -101,28 +102,18 @@ class SingleWriterGateway:
     def send_order(self, *, connection_id: str, candidate: Dict[str, Any],
                    account: Dict[str, Any], broker: str,
                    request_timeout: float = 10.0) -> Dict[str, Any]:
-        """Send a native order for one candidate, under the account lock.
+        """Attempt one DEMO order only with account, writer, and stop proof.
 
-        Aggressive mode: the arming / SHA256-pin gates are ADVISORY — a
-        disarmed or mismatched writer is logged but does NOT block order
-        submission (fail-closed writer gating removed). The per-account lock
-        is retained for correctness (no duplicate sends in-process).
-
-        Returns a dict with outcome: 'ACK' | 'UNKNOWN' | 'REJECTED'.
+        This layer never treats an application response as a broker fill.
         """
         status = self.status(connection_id)
-        if not status.armed:
+        reason = self._preflight(connection_id, candidate, account, broker, status)
+        if reason:
             self.log.append(make_event(
-                "writer.send_advisory_disarmed", connection_id=connection_id,
+                "writer.send_blocked", connection_id=connection_id,
                 broker=broker, order_request_id=candidate.get("candidate_id"),
-                execution_state="DISPATCHED",
-                reason_code="FP_SINGLE_WRITER_DISARMED_ADVISORY"))
-        if not status.revision_ok:
-            self.log.append(make_event(
-                "writer.send_advisory_mismatch", connection_id=connection_id,
-                broker=broker, order_request_id=candidate.get("candidate_id"),
-                execution_state="DISPATCHED",
-                reason_code="BINARY_SOURCE_MISMATCH_ADVISORY"))
+                execution_state="REJECTED", reason_code=reason))
+            return {"outcome": "REJECTED", "reason": reason}
 
         lock = self._lock_for(connection_id)
         if not lock.acquire(blocking=False):
@@ -138,6 +129,7 @@ class SingleWriterGateway:
             state_machine.move(candidate["candidate_id"], "SEND", "DISPATCHED")
             nonce = make_nonce("ABUTRON_REQ")
             request = {
+                "kind": "order_handoff",
                 "request_id": nonce,
                 "candidate_id": candidate["candidate_id"],
                 "connection_id": connection_id,
@@ -159,15 +151,92 @@ class SingleWriterGateway:
                 "trail_stop": candidate.get("trail_stop", 0.0),
                 "activation_revision": status.activation_revision,
                 "signed": hmac_sign(
-                    os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation"),
-                    f"{nonce}|{candidate['candidate_id']}|{connection_id}"),
+                    os.environ["ABUTRON_ACTIVATION_SECRET"],
+                    f"{nonce}|{connection_id}"),
                 "created_at": utc_now(),
             }
             outcome, receipt_ref = self._deliver_to_ea(request, request_timeout)
+            if outcome == "ACK" and not self._native_ack_is_proven(
+                    receipt_ref, request):
+                outcome = "UNKNOWN"
+                receipt_ref = None
             return {"outcome": outcome, "receipt_ref": receipt_ref,
                     "request_id": nonce}
         finally:
             lock.release()
+
+    @staticmethod
+    def _preflight(connection_id: str, candidate: Dict[str, Any],
+                   account: Dict[str, Any], broker: str,
+                   status: WriterStatus) -> str:
+        if not (account.get("desired_on") and account.get("effective_on")):
+            return "CLIENT_AUTOMATIC_SWITCH_OFF"
+        if str(account.get("environment", "")).lower() != "demo":
+            return "DEMO_ONLY_ACCOUNT_BOUNDARY"
+        if str(account.get("broker", "")) != broker or (
+                candidate.get("connection_id", connection_id) != connection_id):
+            return "BROKER_OR_CONNECTION_MISMATCH"
+        login = str(account.get("mt5_login", ""))
+        if login.endswith("0178") or login.endswith("3492"):
+            return "RETIRED_ACCOUNT_NOT_ALLOWED"
+        if not status.armed or not status.revision_ok:
+            return "EA_WRITER_NOT_ATTESTED"
+        if not status.activation_revision:
+            return "ACTIVATION_REVISION_MISSING"
+        secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "")
+        if not secret or secret == "apex-activation":
+            return "ACTIVATION_SECRET_UNSET"
+        direction = candidate.get("direction")
+        try:
+            price = float(candidate.get("trigger_price",
+                                        candidate.get("price", 0.0)))
+            sl = float(candidate["stop_loss"])
+            tp = float(candidate["take_profit"])
+            volume = float(candidate["volume"])
+        except (ValueError, TypeError, KeyError):
+            return "BROKER_ORDER_GEOMETRY_MISSING"
+        if not all(math.isfinite(x) and x > 0 for x in
+                   (price, sl, tp, volume)):
+            return "BROKER_ORDER_GEOMETRY_INVALID"
+        if direction == "BUY" and not (sl < price < tp):
+            return "INVALID_BUY_STOPS"
+        if direction == "SELL" and not (tp < price < sl):
+            return "INVALID_SELL_STOPS"
+        if direction not in ("BUY", "SELL"):
+            return "INVALID_DIRECTION"
+        if candidate.get("entry_type", "CONFIRM") not in ("LIMIT", "CONFIRM"):
+            return "UNKNOWN_ENTRY_TYPE"
+        return ""
+
+    @staticmethod
+    def _native_ack_is_proven(response: Any, request: Dict[str, Any]) -> bool:
+        """An app-generated ticket cannot prove a broker deal or protected SL/TP."""
+        if not isinstance(response, dict) or response.get("status") != "ack":
+            return False
+        if (str(response.get("connection_id")) !=
+                str(request["connection_id"]) or
+                str(response.get("mt5_login")) !=
+                str(request["mt5_login"])):
+            return False
+        if not response.get("broker_native_protected", False):
+            return False
+        if not str(response.get("deal", "")).strip():
+            return False
+        try:
+            ticket = int(response["ticket"])
+            fill = float(response["fill_price"])
+            sl = float(response["stop_loss"])
+            tp = float(response["take_profit"])
+        except (TypeError, ValueError, KeyError):
+            return False
+        if ticket <= 0 or not all(math.isfinite(x) and x > 0 for x in
+                                  (fill, sl, tp)):
+            return False
+        if request["direction"] == "BUY":
+            return sl < fill < tp
+        if request["direction"] == "SELL":
+            return tp < fill < sl
+        return False
 
     def _deliver_to_ea(self, request: Dict[str, Any],
                        timeout: float) -> tuple:

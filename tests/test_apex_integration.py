@@ -95,10 +95,30 @@ def test_bridge_rejects_unknown_symbol(apex_int):
     assert "unknown" in (r.get("reason") or "").lower()
 
 
+def _brain_result(side):
+    """Deterministic explicitly trained brain signal for contract tests."""
+    class StubAuthority:
+        def decide(self, **kwargs):
+            return {"status": side, "reason": "TEST_MODEL",
+                    "model_sha256": "a" * 64,
+                    "proposal": {"direction": side, "trained": True}}
+    return StubAuthority()
+
+
 def test_full_pipeline_produces_ready_candidate(apex_int):
     """Closed candles -> APEX signal -> fail-closed review -> READY candidate."""
+    apex_int.authority = _brain_result("BUY")
     manifest = build_instrument_manifest([_deriv_account()])
     acct = _deriv_account()
+    # Force legacy APEX to SELL while the V9 Brain says BUY.
+    # The final signal must follow V9, not the APEX research vote.
+    bridge = apex_int._bridge_for("conn1", acct, manifest)
+    previous = bridge.on_closed_candle
+    def apex_says_sell(raw, *, observed_at=None):
+        result = previous(raw, observed_at=observed_at)
+        result["status"] = "SELL"
+        return result
+    bridge.on_closed_candle = apex_says_sell
     ready = None
     for i in range(130):
         candle = _closed_candle("Volatility 100 Index.0", i, 100.0)
@@ -121,6 +141,10 @@ def test_full_pipeline_produces_ready_candidate(apex_int):
             ready = r
             break
     assert ready is not None, "expected at least one READY candidate"
+    assert ready["decision"]["apex_context_status"] == "SELL"
+    assert ready["decision"]["status"] == "BUY"
+    assert ready["decision"]["signal_authority"] == "V9_NEXUS_V1"
+    assert ready["decision"]["brain_model_sha256"] == "a" * 64
     cand = ready["candidate"]
     assert cand["side"] in ("BUY", "SELL")
     assert cand["broker"] == "deriv"
@@ -131,6 +155,7 @@ def test_full_pipeline_produces_ready_candidate(apex_int):
 
 def test_fail_closed_blocks_without_attestation(apex_int):
     """Without native attestation gates, a candidate is BLOCKED (fail-closed)."""
+    apex_int.authority = _brain_result("BUY")
     manifest = build_instrument_manifest([_deriv_account()])
     acct = _deriv_account()
     blocked = False
@@ -158,6 +183,7 @@ def test_fail_closed_blocks_without_attestation(apex_int):
 
 
 def test_hold_produces_no_candidate(apex_int):
+    apex_int.authority = _brain_result("HOLD")
     manifest = build_instrument_manifest([_deriv_account()])
     acct = _deriv_account()
     holds = 0
@@ -180,7 +206,8 @@ def test_service_starts_without_vendored_apex(monkeypatch):
     monkeypatch.setattr(integration, '_load_apex', missing_vendor)
     ai = ApexIntegration(log, warmup_bars=0)
     # Constructing must never raise regardless of vendor presence.
-    assert ai.brain is not None
+    assert ai.authority is not None
+    assert ai.brain is None  # no trained model checkpoint, no executable signals
     # If the vendor is absent, process_candle reports a clear non-trading
     # status instead of crashing.
     out = ai.process_candle(

@@ -241,17 +241,40 @@ class TestSniperEngineIntegration:
 # Execution path — the sniper entry geometry reaches the order request
 # ---------------------------------------------------------------------------
 class TestSniperExecutionPath:
-    def test_gateway_sends_sniper_entry_geometry(self):
+    """Unit fixtures emulate broker ACKs; they are not execution certification."""
+
+    @staticmethod
+    def _arm_stub(gw, connection_id):
+        from abutron.execution.writer_gateway import WriterStatus
+        gw._armed[connection_id] = WriterStatus(
+            connection_id=connection_id, armed=True,
+            ea_sha256="test-ea", expected_sha256="test-ea",
+            activation_revision="test-revision", revision_ok=True,
+            lock_held=False, last_heartbeat="test-only")
+
+    @staticmethod
+    def _broker_fixture(request, *, fill=1.2542, ticket=4242):
+        return {"status": "ack", "ticket": ticket,
+                "deal": "native-deal-fixture", "mt5_login": request["mt5_login"],
+                "connection_id": request["connection_id"],
+                "fill_price": fill,
+                "stop_loss": 1.2532, "take_profit": 1.2560,
+                "broker_native_protected": True,
+                "commission": 0.2, "swap": 0.0}
+
+    def test_gateway_sends_sniper_entry_geometry(self, monkeypatch):
         from abutron.events import EventLog
         from abutron.execution.writer_gateway import SingleWriterGateway
 
+        monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "fixture-only-activation-key")
         log = EventLog(os.path.join(DATA_ROOT, "t_sniper_gw.jsonl"))
         gw = SingleWriterGateway(log)
+        self._arm_stub(gw, "c1")
         captured = {}
 
         def _fake_deliver(request, timeout):
             captured.update(request)
-            return "ACK", {"status": "ack", "ticket": 4242}
+            return "ACK", self._broker_fixture(request)
 
         gw._deliver_to_ea = _fake_deliver
         cand = {
@@ -261,39 +284,44 @@ class TestSniperExecutionPath:
             "stop_loss": 1.2532, "take_profit": 1.2560,
             "price": 1.2550,
         }
+        account = {"connection_id": "c1", "mt5_login": 6207,
+                   "broker": "fpmarkets", "environment": "demo",
+                   "desired_on": 1, "effective_on": 1}
         res = gw.send_order(connection_id="c1", candidate=cand,
-                            account={"mt5_login": 6207}, broker="fpmarkets")
+                            account=account, broker="fpmarkets")
         assert res["outcome"] == "ACK"
-        # the sniper entry geometry is carried into the native order request
+        assert captured["kind"] == "order_handoff"
         assert captured["entry_type"] == "LIMIT"
         assert captured["trigger_price"] == 1.2540
         assert captured["stop_loss"] == 1.2532
         assert captured["take_profit"] == 1.2560
 
-    def test_dispatcher_receipt_uses_trigger_price(self):
+    def test_dispatcher_receipt_uses_native_fill_not_trigger(self, monkeypatch):
         from abutron.events import EventLog
         from abutron.execution.dispatcher import NativeDispatcher
         from abutron.execution.writer_gateway import SingleWriterGateway
         from abutron.execution.receipts import ReceiptManager
         from abutron import db as dbmod
 
+        monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "fixture-only-activation-key")
         _clear_candidates()
         log = EventLog(os.path.join(DATA_ROOT, "t_sniper_disp.jsonl"))
         gw = SingleWriterGateway(log)
+        self._arm_stub(gw, "snip_disp")
 
         def _fake_deliver(request, timeout):
-            return "ACK", {"status": "ack", "ticket": 7007}
+            return "ACK", self._broker_fixture(request, fill=1.2542,
+                                                ticket=7007)
 
         gw._deliver_to_ea = _fake_deliver
         rm = ReceiptManager(log)
         disp = NativeDispatcher(log, gw, rm)
 
-        # seed an account + a reserved candidate with sniper geometry
         dbmod.engine_db.upsert_account({
             "connection_id": "snip_disp", "broker": "fpmarkets",
             "mt5_login": 6207, "owner_id": "owner1",
             "environment": "demo", "desired_on": 1, "effective_on": 1,
-            "per_trade_risk_pct": 0.5, "portfolio_cap_pct": 1.0,
+            "per_trade_risk_pct": 0.15, "portfolio_cap_pct": 0.20,
             "ea_sha256": "", "activation_revision": "", "symbols": "GBPUSD.r"})
         dbmod.engine_db.add_candidate({
             "candidate_id": "cand_disp1", "connection_id": "snip_disp",
@@ -302,7 +330,7 @@ class TestSniperExecutionPath:
             "bar_open": "2026-11-13T08:00:00Z", "replay_key":
             "snip_disp|GBPUSD.r|M5|2026-11-13T08:00:00Z|BUY",
             "direction": "BUY", "conviction": 0.7, "regime": "trend_up",
-            "agent_votes": "{}", "risk_fraction": 0.5,
+            "agent_votes": "{}", "risk_fraction": 0.001,
             "stop_risk_usd": 0.0, "volume": 0.5,
             "stop_loss": 1.2532, "take_profit": 1.2560, "price": 1.2550,
             "entry_type": "LIMIT", "trigger_price": 1.2540,
@@ -312,6 +340,8 @@ class TestSniperExecutionPath:
         res = disp.dispatch_account("snip_disp")
         assert res["ack"] == 1
         receipts = dbmod.engine_db.list_receipts("snip_disp")
-        receipt = next(r for r in receipts if r.get("candidate_id") == "cand_disp1")
-        # the recorded fill price is the sniper trigger, not the close
-        assert receipt["fill_price"] == 1.2540
+        receipt = next(r for r in receipts
+                       if r.get("candidate_id") == "cand_disp1")
+        assert receipt["fill_price"] == 1.2542
+        assert receipt["stop_loss"] == 1.2532
+        assert receipt["take_profit"] == 1.2560

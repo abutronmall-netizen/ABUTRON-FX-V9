@@ -34,6 +34,9 @@ class NativeDispatcher:
         if account is None:
             return {"connection_id": connection_id, "sent": 0,
                     "error": "ACCOUNT_NOT_FOUND"}
+        if not (account.get("desired_on") and account.get("effective_on")):
+            return {"connection_id": connection_id, "sent": 0,
+                    "error": "CLIENT_AUTOMATIC_SWITCH_OFF"}
 
         # Collect reserved (RESERVED state) candidates
         candidates = [self._load_candidate(cid)
@@ -76,11 +79,11 @@ class NativeDispatcher:
                 native_ticket=sent["receipt_ref"].get("ticket", 0),
                 broker_deal_id=sent["receipt_ref"].get("deal", ""),
                 volume=candidate["volume"],
-                fill_price=candidate.get("trigger_price",
-                                         candidate.get("price", 0.0)),
-                stop_loss=candidate["stop_loss"],
-                take_profit=candidate["take_profit"],
-                commission=0.0, swap=0.0,
+                fill_price=sent["receipt_ref"]["fill_price"],
+                stop_loss=sent["receipt_ref"]["stop_loss"],
+                take_profit=sent["receipt_ref"]["take_profit"],
+                commission=float(sent["receipt_ref"].get("commission", 0.0)),
+                swap=float(sent["receipt_ref"].get("swap", 0.0)),
                 execution_state="ACK", reason_code="NATIVE_ACK")
             db.engine_db.set_candidate_state(candidate["candidate_id"], "ACK")
             return {"candidate_id": candidate["candidate_id"],
