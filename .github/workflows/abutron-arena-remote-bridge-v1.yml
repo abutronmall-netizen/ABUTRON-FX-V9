@@ -1,0 +1,62 @@
+name: ABUTRON Arena Remote Bridge V1
+
+# Arena --(api.github.com)--> Issue "ABUTRON ARENA REMOTE <tool> <path>" 
+# → Prod Runner (self-hosted OR demo github-hosted) runs ONLY allowlisted MCP tools
+# → Prod --(api.github.com)--> posts sanitized JSON as Issue Comment
+# → Arena --(api.github.com)--> reads comment
+#
+# This workflow is the ABUTRON-FX-V9 demo version (runs on ubuntu-latest).
+# For abutron-ops prod, copy ops/bridge/abutron-ops-arena-remote-v1.yml (self-hosted).
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: abutron-arena-remote-bridge
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    if: >-
+      github.repository == 'abutronmall-netizen/ABUTRON-FX-V9' &&
+      github.event.issue.user.login == 'abutronmall-netizen' &&
+      startsWith(github.event.issue.title, 'ABUTRON ARENA REMOTE')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate and run allowlisted MCP tool (no OpenAI)
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "=== ABUTRON ARENA REMOTE BRIDGE V1 (FX-V9 Demo) ==="
+          echo "Title: $ISSUE_TITLE"
+          echo "From: Arena via api.github.com (allowed)"
+          python3 mcp/bridge/prod_handler.py
+          echo "BRIDGE_DONE"
+
+      - name: Post sanitized result as issue comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -f /tmp/abutron-bridge-result.json ]]; then
+            echo "Posting result to issue #$ISSUE_NUMBER..."
+            gh issue comment "$ISSUE_NUMBER" --repo "abutronmall-netizen/ABUTRON-FX-V9" --body-file /tmp/abutron-bridge-comment.md
+            echo "ARENA_BRIDGE_POSTED=YES"
+          else
+            echo "No result file — handler failed"
+            exit 1
+          fi
