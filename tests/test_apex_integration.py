@@ -25,7 +25,14 @@ from abutron.apex_integration import ApexIntegration, build_instrument_manifest
 @pytest.fixture
 def apex_int():
     log = EventLog(os.path.join(DATA_ROOT, "t_apex_int_events.jsonl"))
-    return ApexIntegration(log, warmup_bars=0)
+    ai = ApexIntegration(log, warmup_bars=0)
+    # The vendored APEX source is an optional dependency. These bridge-behaviour
+    # tests require it; skip (not fail) when the platform runs without it.
+    if not ai.apex_available():
+        pytest.skip(
+            f"vendored APEX source unavailable on this checkout: "
+            f"{ai._apex_error}")
+    return ai
 
 
 def _deriv_account():
@@ -161,3 +168,32 @@ def test_hold_produces_no_candidate(apex_int):
         if r["status"] == "HOLD":
             holds += 1
     assert holds > 0
+
+
+def test_service_starts_without_vendored_apex():
+    """The platform must boot and serve on the NexusBrain even when the
+    vendored APEX source is absent — no runtime crash at startup."""
+    log = EventLog(os.path.join(DATA_ROOT, "t_apex_optional_events.jsonl"))
+    ai = ApexIntegration(log, warmup_bars=0)
+    # Constructing must never raise regardless of vendor presence.
+    assert ai.brain is not None
+    # If the vendor is absent, process_candle reports a clear non-trading
+    # status instead of crashing.
+    out = ai.process_candle(
+        connection_id="conn1",
+        account={"broker": "deriv", "connection_id": "conn1"},
+        candle={"symbol": "Volatility 100 Index.0",
+                "open_time": "2026-11-14T08:00:00Z",
+                "close_time": "2026-11-14T08:05:00Z",
+                "close_time_epoch": 1781000000.0,
+                "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05,
+                "volume": 10.0},
+        manifest=[{"broker": "deriv", "symbol": "Volatility 100 Index.0"}],
+        equity=10000.0)
+    if not ai.apex_available():
+        assert out["status"] == "APEX_VENDOR_MISSING"
+        assert out["candidate"] is None
+    else:
+        # vendor present: the bridge path is exercised by the other tests
+        assert out["status"] in ("HOLD", "REJECTED", "BLOCKED", "READY",
+                                 "APEX_VENDOR_MISSING")

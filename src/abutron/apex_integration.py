@@ -56,6 +56,13 @@ def _load_apex():
     }
 
 
+class ApexVendorMissing(RuntimeError):
+    """The vendored APEX bridge source is not available on this checkout.
+
+    The platform still runs on the NexusBrain + its own apex engine; only the
+    vendored reference bridge is unavailable."""
+
+
 # ---------------------------------------------------------------------------
 # Instrument manifest builder
 # ---------------------------------------------------------------------------
@@ -108,7 +115,16 @@ class ApexIntegration:
 
     def __init__(self, event_log: EventLog, *, warmup_bars: int = 0):
         self.log = event_log
-        self._apex = _load_apex()
+        # The vendored APEX bridge is an OPTIONAL dependency. Load it here but
+        # never let a missing vendor crash startup: the platform runs on the
+        # NexusBrain + its own apex engine when the vendored source is absent,
+        # and only uses the vendored bridge when it is actually present.
+        try:
+            self._apex_cache: Optional[Dict[str, Any]] = _load_apex()
+            self._apex_error: str = ""
+        except Exception as exc:
+            self._apex_cache = None
+            self._apex_error = str(exc)
         self._bridges: Dict[str, Any] = {}
         # Self-learning AI: online model + skill learner, bounded by guardrails
         self.selflearn = SelfLearningEngine(
@@ -127,12 +143,26 @@ class ApexIntegration:
         self._pending: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
+    # Optional vendored-APEX access
+    # ------------------------------------------------------------------
+    @property
+    def _apex(self) -> Optional[Dict[str, Any]]:
+        return self._apex_cache
+
+    def apex_available(self) -> bool:
+        """True if the vendored APEX bridge source is loadable."""
+        return self._apex_cache is not None
+
+    # ------------------------------------------------------------------
     def selflearn_health(self) -> Dict[str, Any]:
         return self.selflearn.health()
 
     # ------------------------------------------------------------------
     def _bridge_for(self, connection_id: str, account: Dict[str, Any],
                     manifest: List[Dict[str, Any]]) -> Any:
+        if not self.apex_available():
+            raise ApexVendorMissing(
+                f"vendored APEX source unavailable: {self._apex_error}")
         if connection_id not in self._bridges:
             inst = [m for m in manifest if m["broker"] ==
                     ("deriv" if account["broker"] == "deriv" else "fp_markets")]
@@ -163,6 +193,16 @@ class ApexIntegration:
         The `candidate` is only present when all engineering gates pass; it
         is NOT an order — it must go through the single-writer dispatcher.
         """
+        # If the vendored APEX source is absent, do not crash: report a clear
+        # non-trading status so the runtime keeps ticking on the NexusBrain.
+        if not self.apex_available():
+            self._record(connection_id, account, candle, "APEX_VENDOR_MISSING",
+                         reason=self._apex_error)
+            return {"status": "APEX_VENDOR_MISSING",
+                    "reason": self._apex_error, "decision": None,
+                    "candidate": None,
+                    "blockers": [f"APEX_VENDOR_MISSING:{self._apex_error}"]}
+
         bridge = self._bridge_for(connection_id, account, manifest)
 
         # APEX expects closing-time ts, is_closed + authenticated provenance.
