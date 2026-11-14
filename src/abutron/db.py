@@ -15,7 +15,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import (Column, Float, Integer, String, Text, DateTime,
                         UniqueConstraint, create_engine, func, select)
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.orm import (DeclarativeBase, Mapped, Session, mapped_column,
+                            scoped_session, sessionmaker)
 
 from .config import ENGINE_DB, PORTAL_DB
 
@@ -287,8 +288,11 @@ def _migrate_columns(engine, table: str, columns: Dict[str, str]) -> None:
 class EngineDB:
     def __init__(self, path: str = ENGINE_DB):
         self._engine = create_engine(f"sqlite:///{path}", future=True)
-        self._session: Optional[Session] = None
-        self._thread = threading.current_thread()
+        # A registry provides one persistent Session per thread; the old
+        # single mutable Session slot leaked pooled connections whenever
+        # requests and engine/dispatch workers alternated threads.
+        self._session_factory = scoped_session(
+            sessionmaker(bind=self._engine, expire_on_commit=False))
         with _lock:
             Base.metadata.create_all(self._engine)
             _migrate_columns(self._engine, "accounts", {
@@ -312,16 +316,10 @@ class EngineDB:
 
     @property
     def session(self) -> Session:
-        if self._session is None or self._thread is not threading.current_thread():
-            self._session = Session(self._engine, expire_on_commit=False)
-            self._thread = threading.current_thread()
-        return self._session
+        return self._session_factory()
 
     def _reset(self) -> None:
-        if self._session is not None:
-            self._session.close()
-            self._session = None
-            self._thread = threading.current_thread()
+        self._session_factory.remove()
 
     # -- generic helpers -------------------------------------------------
     def upsert_account(self, acct: Dict[str, Any]) -> None:
@@ -555,13 +553,12 @@ class PortalDB:
         self._engine = create_engine(f"sqlite:///{path}", future=True)
         with _lock:
             Base.metadata.create_all(self._engine)
-        self._session: Optional[Session] = None
+        self._session_factory = scoped_session(
+            sessionmaker(bind=self._engine, expire_on_commit=False))
 
     @property
     def session(self) -> Session:
-        if self._session is None:
-            self._session = Session(self._engine, expire_on_commit=False)
-        return self._session
+        return self._session_factory()
 
     def add_user(self, u: Dict[str, Any]) -> bool:
         with _lock:
