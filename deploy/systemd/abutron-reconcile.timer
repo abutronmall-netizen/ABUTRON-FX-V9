@@ -1,0 +1,9 @@
+[Unit]
+Description=ABUTRON broker-native reconciliation (read-only timer)
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

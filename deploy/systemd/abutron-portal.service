@@ -1,0 +1,23 @@
+[Unit]
+Description=ABUTRON FX V9 Portal + APEX engine runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=abutron
+Group=abutron
+WorkingDirectory=/opt/abutron-fx-v9
+Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-fx-v9/data
+Environment=ABUTRON_ENV=demo
+ExecStart=/usr/bin/python3 -m abutron.main
+Restart=always
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/abutron-fx-v9/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

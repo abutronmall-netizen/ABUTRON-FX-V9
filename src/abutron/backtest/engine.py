@@ -1,0 +1,396 @@
+"""Backtest + forward-test engine.
+
+Drives the full AI pipeline — NexusBrain decision -> sniper entry ->
+trailing stop -> brain lot sizing — over historical market data, simulating
+execution and computing P&L and performance metrics. The brain is the sole
+calculation authority; the engine only simulates the fills the EA would
+make.
+
+- **Backtest**: walk the whole series, execute every signal, report metrics.
+- **Forward test**: split into train (first 1-f) / test (last f). The brain
+  learns from train-window trades, then only trades executed in the test
+  window are reported — a realistic walk-forward deployment simulation.
+
+Entry fill logic mirrors the sniper plan:
+- LIMIT BUY fills at the trigger when the candle's low reaches it.
+- LIMIT SELL fills at the trigger when the candle's high reaches it.
+- CONFIRM fills at the candle close (market).
+SL / TP / trailing are checked on subsequent candles (conservative: a
+candle that hits both SL and TP is treated as SL-first).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+from ..brain import NexusBrain
+from ..brain.trainer import prepare_samples, walk_forward_train
+from ..apex.sniper import SniperEntryEngine, sniper_engine
+from ..apex.trailing import TrailingStop, trailing_stop
+from ..apex.indicators import atr
+from ..feeds.feed_quality import Candle, Quote
+
+
+@dataclass
+class Position:
+    symbol: str
+    timeframe: str
+    direction: str          # BUY | SELL
+    entry_price: float
+    lots: float
+    sl: float               # initial invalidation
+    tp: float
+    trail_k: float
+    trail_atr: float
+    trail_stop: float       # current trail stop (tightens in favour)
+    entry_type: str
+    entry_quality: float
+    open_time: str
+    highest_high: float
+    lowest_low: float
+    point: float = 0.0
+    pnl_usd: float = 0.0
+    closed: bool = False
+    close_price: float = 0.0
+    close_reason: str = ""
+
+
+@dataclass
+class BacktestResult:
+    equity_start: float
+    equity_end: float
+    total_pnl: float
+    return_pct: float
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float
+    profit_factor: float
+    avg_win: float
+    avg_loss: float
+    avg_trade_pnl: float
+    max_drawdown: float
+    max_consecutive_losses: int
+    max_open_drawdown: float
+    trades_reported: int
+    symbol: str = ""
+    timeframe: str = ""
+    mode: str = "backtest"
+    details: List[Dict] = field(default_factory=list)
+
+    def to_dict(self) -> Dict:
+        return {k: v for k, v in self.__dict__.items()}
+
+
+class BacktestEngine:
+    def __init__(self, brain: NexusBrain, *,
+                 sniper: Optional[SniperEntryEngine] = None,
+                 trailing: Optional[TrailingStop] = None,
+                 equity: float = 10000.0,
+                 risk_pct: float = 0.05,
+                 point: float = 0.0,
+                 point_value: float = 1.0,
+                 lot_step: float = 0.01,
+                 lot_min: float = 0.01,
+                 lot_max: float = 50.0,
+                 commission_per_lot: float = 0.0,
+                 history_len: int = 120,
+                 warmup: int = 30,
+                 compound: bool = False):
+        self.brain = brain
+        self.sniper = sniper or sniper_engine
+        self.trailing = trailing or trailing_stop
+        self.equity = equity
+        self.risk_pct = risk_pct
+        self.point = point
+        self.point_value = point_value
+        self.lot_step = lot_step
+        self.lot_min = lot_min
+        self.lot_max = lot_max
+        self.commission_per_lot = commission_per_lot
+        self.history_len = history_len
+        self.warmup = warmup
+        self.compound = compound
+        self.train_epochs = 60
+        self.train_batch = 32
+        self.train_seed = 0
+        self._train_report = None
+        self._train_error = ""
+
+    # ------------------------------------------------------------------
+    def _point(self, c: "Candle") -> float:
+        """Point size for a candle: prefer the instrument's auto-detected
+        point, fall back to the engine default (never 0)."""
+        p = c.point or self.point
+        return p if p > 0 else 1e-9
+
+    def _point_for(self, pos: "Position") -> float:
+        p = pos.point or self.point
+        return p if p > 0 else 1e-9
+
+    def _train_on(self, train_candles: List[Candle]) -> None:
+        """Train the brain's ensemble on a window of candles (walk-forward)."""
+        try:
+            closes = [c.close for c in train_candles]
+            highs = [c.high for c in train_candles]
+            lows = [c.low for c in train_candles]
+            samples = prepare_samples(closes, highs, lows, horizon=1)
+            if len(samples) < 50:
+                return
+            report = walk_forward_train(
+                self.brain.ensemble, samples,
+                epochs=self.train_epochs, batch_size=self.train_batch,
+                val_fraction=0.2, seed=self.train_seed)
+            # surface accuracy on the train window
+            self._train_report = report
+        except Exception as exc:  # training must never break the run
+            self._train_report = None
+            self._train_error = str(exc)
+
+    def run(self, candles: List[Candle], quotes: Optional[List[Quote]] = None,
+            *, symbol: str = "", timeframe: str = "",
+            forward_test: bool = False, forward_frac: float = 0.2
+            ) -> BacktestResult:
+        if not candles:
+            return BacktestResult(self.equity, self.equity, 0.0, 0.0, 0, 0,
+                                  0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0,
+                                  0, symbol=symbol, timeframe=timeframe,
+                                  mode="empty")
+        candles = sorted(candles, key=lambda c: c.open_time)
+        quotes_by_sym = {}
+        if quotes:
+            for q in quotes:
+                if symbol and q.symbol != symbol:
+                    continue
+                quotes_by_sym.setdefault(q.symbol, []).append(q)
+
+        # forward-test: train the brain on the first (1-f) window, then
+        # evaluate on the held-out last f window (clean walk-forward).
+        report_from = 0
+        mode = "backtest"
+        run_candles = candles
+        if forward_test and forward_frac > 0:
+            split = max(1, int(len(candles) * (1.0 - forward_frac)))
+            train_candles = candles[:split]
+            run_candles = candles[split:]
+            self._train_on(train_candles)
+            report_from = 0
+            mode = "forward_test"
+
+        equity = self.equity
+        max_equity = equity
+        max_dd = 0.0
+        max_consec_losses = 0
+        consec_losses = 0
+        wins = losses = 0
+        total_win = total_loss = 0.0
+        reported_trades = 0
+        reported_wins = reported_losses = 0
+        reported_pnl = 0.0
+        details: List[Dict] = []
+
+        history: List[Candle] = []
+        position: Optional[Position] = None
+        idx = 0
+        last_a: Optional[float] = None
+
+        for c in run_candles:
+            idx += 1
+            history.append(c)
+            if len(history) > self.history_len:
+                history = history[-self.history_len:]
+
+            closes = [x.close for x in history]
+            highs = [x.high for x in history]
+            lows = [x.low for x in history]
+            _a = atr(highs, lows, closes, 14)
+            if _a is None:
+                _a = last_a
+            else:
+                last_a = _a
+            a = _a if _a else (self._point(c) * 10)
+
+            # --- manage an open position against this candle -------------
+            if position is not None:
+                position.highest_high = max(position.highest_high, c.high)
+                position.lowest_low = min(position.lowest_low, c.low)
+                # update trail (Chandelier) from the position's own history
+                trail = self.trailing.plan(
+                    direction=position.direction,
+                    highs=[position.highest_high],
+                    lows=[position.lowest_low],
+                    atr_val=a, entry_price=position.entry_price,
+                    trail_k=position.trail_k)
+                # tighten SL to the trail only when it improves it
+                if position.direction == "BUY":
+                    if trail.trail_stop > position.sl:
+                        position.sl = trail.trail_stop
+                else:
+                    if trail.trail_stop < position.sl:
+                        position.sl = trail.trail_stop
+
+                closed = self._check_exit(position, c)
+                if closed is not None:
+                    pnl = self._settle(position, closed[0], closed[1], equity)
+                    equity += pnl
+                    self.brain.learn_from_trade(
+                        symbol=position.symbol, regime="",
+                        direction=position.direction,
+                        entry_type=position.entry_type,
+                        entry_quality=position.entry_quality, pnl=pnl)
+                    if pnl > 0:
+                        wins += 1; total_win += pnl; consec_losses = 0
+                    else:
+                        losses += 1; total_loss += -pnl
+                        consec_losses += 1
+                        max_consec_losses = max(max_consec_losses,
+                                                consec_losses)
+                    if idx > report_from:
+                        reported_trades += 1
+                        reported_pnl += pnl
+                        if pnl > 0:
+                            reported_wins += 1
+                        else:
+                            reported_losses += 1
+                    if closed[2]:
+                        details.append({
+                            "symbol": position.symbol,
+                            "direction": position.direction,
+                            "entry": position.entry_price,
+                            "exit": closed[0], "pnl": round(pnl, 2),
+                            "reason": closed[1], "closed_at": c.open_time})
+                    position = None
+
+            max_equity = max(max_equity, equity)
+            max_dd = max(max_dd, (max_equity - equity) / max_equity)
+
+            # --- new entry on this closed candle -------------------------
+            # require a warmup of history (for ATR + features) before the
+            # brain/sniper are trusted to generate entries
+            warmed = idx > self.warmup and last_a is not None
+            if warmed and ((position is None and idx > report_from) or
+                           (position is None and not forward_test)):
+                prop = self.brain.decide(
+                    symbol=c.symbol, closes=closes, highs=highs, lows=lows,
+                    orderflow={}, footprint={}, agent_scores={},
+                    regime="")
+                if prop.direction in ("BUY", "SELL"):
+                    bias = self.brain.get_entry_bias(c.symbol, "")
+                    snip = self.sniper.plan(
+                        symbol=c.symbol, direction=prop.direction,
+                        closes=closes, highs=highs, lows=lows, atr_val=a,
+                        of_features={}, fp_features={}, regime="",
+                        uncertainty=prop.uncertainty,
+                        conviction=prop.conviction,
+                        confirm_bias=bias.get("confirm_bias", 0.0),
+                        quality_floor=bias.get("quality_floor", 0.0))
+                    fill = self._entry_fill(snip, c, prop.direction)
+                    if fill is not None:
+                        sizing_equity = equity if self.compound else self.equity
+                        position = self._open_position(
+                            c, snip, fill, prop, a, sizing_equity)
+
+        # --- close any position left open at end of data -------------------
+        if position is not None:
+            last = candles[-1]
+            pnl = self._settle(position, last.close, "END_OF_DATA", equity)
+            equity += pnl
+            if last and idx > report_from:
+                reported_trades += 1
+                reported_pnl += pnl
+
+        trades = wins + losses
+        avg_win = (total_win / wins) if wins else 0.0
+        avg_loss = (total_loss / losses) if losses else 0.0
+        pf = (total_win / total_loss) if total_loss > 0 else (
+            float("inf") if total_win > 0 else 0.0)
+        avg_trade = (reported_pnl / reported_trades) if reported_trades else 0.0
+
+        return BacktestResult(
+            equity_start=self.equity, equity_end=equity,
+            total_pnl=equity - self.equity,
+            return_pct=((equity - self.equity) / self.equity * 100.0)
+            if self.equity else 0.0,
+            trades=trades, wins=wins, losses=losses,
+            win_rate=(wins / trades * 100.0) if trades else 0.0,
+            profit_factor=pf, avg_win=avg_win, avg_loss=avg_loss,
+            avg_trade_pnl=avg_trade, max_drawdown=max_dd * 100.0,
+            max_consecutive_losses=max_consec_losses,
+            max_open_drawdown=0.0, trades_reported=reported_trades,
+            symbol=symbol or (candles[0].symbol if candles else ""),
+            timeframe=timeframe or (candles[0].timeframe if candles else ""),
+            mode=mode, details=details)
+
+    # ------------------------------------------------------------------
+    def _entry_fill(self, snip, c: Candle, direction: str):
+        """Determine the fill price for a sniper entry on candle c.
+
+        LIMIT fills at the trigger when price reaches it; CONFIRM fills at
+        the close. Returns (fill_price, filled) or None if not filled.
+        """
+        if snip.entry_type == "LIMIT":
+            return self._limit_fill(snip, c, direction)
+        return c.close, True
+
+    def _limit_fill(self, snip, c: Candle, direction: str):
+        # BUY limit fills when low <= trigger; SELL when high >= trigger.
+        is_buy = direction == "BUY"
+        if is_buy:
+            if c.low <= snip.trigger_price:
+                return snip.trigger_price, True
+        else:
+            if c.high >= snip.trigger_price:
+                return snip.trigger_price, True
+        return None
+
+    def _open_position(self, c: Candle, snip, fill, prop, a, equity) -> Position:
+        is_buy = prop.direction == "BUY"
+        stop_dist_points = abs(snip.trigger_price - snip.invalidation) / self._point(c)
+        sizing = self.brain.size_position(
+            equity=equity, risk_pct=self.risk_pct,
+            stop_distance_points=stop_dist_points,
+            point_value=self.point_value, lot_step=self.lot_step,
+            lot_min=self.lot_min, lot_max=self.lot_max,
+            entry_quality=snip.entry_quality)
+        lots = max(self.lot_min, sizing.get("lots", self.lot_min))
+        trail = self.trailing.plan(
+            direction=prop.direction, highs=[c.high], lows=[c.low],
+            atr_val=a, entry_price=fill[0],
+            trail_k=TrailingStop.DEFAULT_K)
+        return Position(
+            symbol=c.symbol, timeframe=c.timeframe,
+            direction=prop.direction, entry_price=fill[0], lots=lots,
+            sl=snip.invalidation, tp=snip.take_profit,
+            trail_k=trail.trail_k, trail_atr=trail.trail_atr,
+            trail_stop=snip.invalidation,  # starts at invalidation
+            entry_type=snip.entry_type, entry_quality=snip.entry_quality,
+            open_time=c.open_time, highest_high=c.high, lowest_low=c.low,
+            point=self._point(c))
+
+    def _check_exit(self, pos: Position, c: Candle):
+        """Return (exit_price, reason, should_record) or None."""
+        if pos.direction == "BUY":
+            if c.low <= pos.sl:
+                return pos.sl, "SL", True
+            if c.high >= pos.tp:
+                return pos.tp, "TP", True
+        else:
+            if c.high >= pos.sl:
+                return pos.sl, "SL", True
+            if c.low <= pos.tp:
+                return pos.tp, "TP", True
+        return None
+
+    def _settle(self, pos: Position, exit_price: float, reason: str,
+                equity: float) -> float:
+        """Compute realised PnL for a closed position (USD)."""
+        move_points = (exit_price - pos.entry_price) / self._point_for(pos)
+        if pos.direction == "SELL":
+            move_points = -move_points
+        pnl = pos.lots * move_points * self.point_value
+        pnl -= pos.lots * self.commission_per_lot  # round-turn commission
+        pos.pnl_usd = pnl
+        pos.close_price = exit_price
+        pos.close_reason = reason
+        pos.closed = True
+        return pnl
