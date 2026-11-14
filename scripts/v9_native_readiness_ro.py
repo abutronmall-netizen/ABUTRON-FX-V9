@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,6 +62,27 @@ def main() -> None:
         blockers.append("CUSTOMER_WIDE_NATIVE_RISK_NOT_CERTIFIED")
     details = risk.get("blockers", [])
 
+    # Consume only the already produced read-only root-owned reports.
+    # They are not direct MT5 order authority and never clear the portfolio
+    # audit, even when each secondary report is valid and fresh.
+    sys.path.insert(0, str(source / "src"))
+    try:
+        from abutron.execution.native_report_adapter import inspect_existing_native_reports
+        native_operator_reports = inspect_existing_native_reports()
+    except (OSError, ValueError, ImportError):
+        native_operator_reports = {
+            "status": "SECONDARY_REPORTS_UNVERIFIED",
+            "execution_authorized": False,
+            "blockers": ["NATIVE_REPORT_ADAPTER_UNAVAILABLE"],
+        }
+    if native_operator_reports.get("status") != "SECONDARY_REPORTS_VALID_READONLY":
+        blockers.append("NATIVE_SECONDARY_OPERATOR_REPORTS_NOT_VERIFIED")
+    else:
+        notes.append("NATIVE_OPERATOR_REPORTS_VALID_BUT_NOT_ORDER_AUTHORIZATION")
+        fp = native_operator_reports.get("sources", {}).get("fpmarkets", {})
+        if any(not a.get("effective_on") for a in fp.get("accounts", [])):
+            notes.append("FP_DEMO_ACCOUNT_EFFECTIVE_SWITCH_OFF_CONFIRMED")
+
     env = {}
     f = Path(args.env_file)
     if f.is_file():
@@ -90,6 +112,7 @@ def main() -> None:
         "customer_risk_status": risk_status,
         "customer_risk_checked_utc": risk.get("checked_utc"),
         "customer_risk_blockers": details,
+        "native_operator_reports": native_operator_reports,
         "v9_env_nonsecret_subset": env,
         "blockers": blockers,
         "notes": notes,

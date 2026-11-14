@@ -51,7 +51,7 @@ class Mt5Verifier:
             term = self._mgr.get(connection_id)
         except Mt5Error:
             term = None
-        if term is None or not term.is_running:
+        if term is None or not term.is_running():
             # No live isolated terminal to verify against — this is a verifier
             # availability issue, not a proof that the credentials are wrong.
             return False, REASON_VERIFIER_UNAVAILABLE
@@ -87,6 +87,7 @@ class Mt5Verifier:
         identity = native.get("identity") or {}
         if identity.get("login") != login:
             return False, REASON_BROKER_AUTH_REJECTED
-        # A native export matching the login is the broker-native identity
-        # proof. It is NOT a persistent session or an order grant.
-        return True, REASON_NONE
+        # The export contains account claims, not an authenticated broker
+        # challenge/response. Until the isolated native login probe is wired,
+        # never promote a matching login number into authenticated status.
+        return False, REASON_NATIVE_VERIFICATION_INCONCLUSIVE
