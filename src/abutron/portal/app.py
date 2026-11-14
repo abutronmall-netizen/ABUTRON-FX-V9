@@ -95,6 +95,18 @@ def create_app(event_log: EventLog) -> FastAPI:
             return None
         return sess
 
+    # Command endpoints include dispatch and reconciliation mutations.
+    # Require a valid admin/operator application session, not just a
+    # reverse-proxy password, for all command API operations.
+    @app.middleware("http")
+    async def command_api_auth(request: Request, call_next):
+        if request.url.path.startswith("/api/command/"):
+            if _admin_only(request) is None:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "ADMIN_SESSION_REQUIRED"})
+        return await call_next(request)
+
     def _scoped_accounts(owner_id: str) -> list:
         return [crm._control_state(a["connection_id"])
                 for a in crm.list_accounts(owner_id=owner_id)]
