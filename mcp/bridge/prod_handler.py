@@ -55,10 +55,10 @@ def parse_request():
     #  Title: ABUTRON ARENA REMOTE list_directory /mcp/config
     #  Title: ABUTRON ARENA REMOTE read_file /mcp/config/abutron-mcp.config.json
     #  Body: {"path": "/mcp/config", "path": "..."} (optional)
-    m = re.match(r"ABUTRON ARENA REMOTE\s+(\w+)\s+(.+)", TITLE.strip())
+    m = re.match(r"ABUTRON ARENA REMOTE\s+(\w+)(?:\s+(.*))?", TITLE.strip())
     if not m:
         return None, f"TITLE_PARSE_FAILED: expected 'ABUTRON ARENA REMOTE <tool> <path>', got: {TITLE!r}"
-    tool, raw_path = m.group(1), m.group(2).strip()
+    tool, raw_path = m.group(1), (m.group(2) or "").strip()
     # Also allow JSON body to override
     body_tool = None
     body_path = None
