@@ -132,6 +132,12 @@ def test_admin_api_requires_admin_auth(portal):
 
 
 def test_command_endpoints_match_ui_bindings(portal):
+    # Command APIs are operator/admin only, even for read endpoints.
+    assert portal.get("/api/command/health").status_code == 401
+    assert portal.post("/api/command/dispatch/conn_demo01").status_code == 401
+    portal.post("/api/client/login", json={"username": "demo_user", "password": "pw"})
+    assert portal.get("/api/command/health").status_code == 401
+    portal.post("/api/admin/login", json={"username": "admin_user", "password": "pw"})
     h = portal.get("/api/command/health").json()
     assert h and "overall" in h[0] and "faults" in h[0]
     sk = portal.get("/api/command/selflearn").json()
