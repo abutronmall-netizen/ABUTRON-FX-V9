@@ -1,0 +1,78 @@
+{
+  "_comment": "ABUTRON Own MCP Gateway V1 config — No OpenAI. Based on https://desktopcommander.app/mcp/#installation but hardened.",
+  "version": "1.0.0",
+  "upstream": "@wonderwhy-er/desktop-commander@0.3.1",
+  "node": {
+    "required": ">=22.12.0",
+    "pinned": {
+      "version": "v22.23.4",
+      "sha256": "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce",
+      "url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz",
+      "isolatedPath": "/opt/abutron-mcp/node"
+    }
+  },
+  "server": {
+    "package": "@wonderwhy-er/desktop-commander",
+    "entry": "/opt/abutron-mcp/desktop-commander/dist/index.js",
+    "args": ["--no-onboarding"],
+    "stdio": true
+  },
+  "security": {
+    "runAs": "abutronmcp:abutronmcp",
+    "allowedDirectories": [
+      "/opt/abutron-fx",
+      "/opt/abutron-fx-v9",
+      "/opt/abutron-dcmcp",
+      "/var/lib/abutron-mcp",
+      "/home/abutron",
+      "/home/abutronmcp",
+      "/tmp/abutron-mcp-smoke"
+    ],
+    "blockedCommands": [
+      "sudo",
+      "su",
+      "visudo",
+      "passwd",
+      "mkfs",
+      "dd if=",
+      "rm -rf /",
+      "shutdown",
+      "reboot",
+      "systemctl",
+      "abutron-gh-apex-source-stage",
+      "abutron-gh-apex-source-rollback",
+      "mt5-install-ex5-live",
+      "crm-toggle"
+    ],
+    "liveTrading": "ALWAYS_OFF",
+    "notes": "Gateway never installs EX5 into active terminals, never changes CRM ON/OFF, never sends orders, never touches LIVE accounts. Staging only via reviewed abutron-ops workflow with hash-pin + offsite backup proof."
+  },
+  "gateway": {
+    "ownVersion": "abutron-mcp-gateway-v1",
+    "transport": "http+sse",
+    "listen": "127.0.0.1:3467",
+    "endpoints": {
+      "health": "/healthz",
+      "ready": "/readyz",
+      "mcpSse": "/mcp/sse",
+      "mcpMessages": "/mcp/messages",
+      "tools": "/mcp/tools"
+    },
+    "auth": {
+      "type": "bearer",
+      "envFile": "/etc/abutron-mcp/gateway.env",
+      "envKey": "ABUTRON_MCP_API_KEY",
+      "mode": "0600 root:root",
+      "generate": "openssl rand -hex 32"
+    },
+    "tls": {
+      "recommended": "Put behind Caddy/Nginx with Let's Encrypt or Tailscale Funnel — gateway itself binds localhost only, no public listener.",
+      "alternative": "Cloudflare Tunnel self-hosted (not OpenAI tunnel-client), WireGuard, or Tailscale Serve"
+    }
+  },
+  "vsLegacyOpenAI": {
+    "legacy": "ops/mcp_gateway: tunnel-client v0.0.20 + CONTROL_PLANE_API_KEY + tunnel-id + Plus-blocked (Business/Enterprise only)",
+    "own": "Zero OpenAI deps, zero Plus quota, own API key, works with Claude Desktop/Cursor/Windsurf/Any MCP SSE client",
+    "smokeTest": "Same as abutron-ops 42483971911: initialize → notifications/initialized → tools/list must return 1-100 tools, no tool invocation"
+  }
+}

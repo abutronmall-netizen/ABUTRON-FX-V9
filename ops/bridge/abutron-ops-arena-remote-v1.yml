@@ -1,0 +1,121 @@
+name: ABUTRON Arena Remote Bridge V1 — Prod
+
+# FOR abutron-ops repo (self-hosted). Copy this file to:
+#   .github/workflows/abutron-arena-remote-bridge-v1.yml
+#   on main, via PR reviewed by abutronmall-netizen.
+# This is the PROD handler (runs-on self-hosted), while
+# ABUTRON-FX-V9/.github/workflows/abutron-arena-remote-bridge-v1.yml is the demo.
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: abutron-arena-remote-prod
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    if: >-
+      github.repository == 'abutronmall-netizen/abutron-ops' &&
+      github.event.issue.user.login == 'abutronmall-netizen' &&
+      startsWith(github.event.issue.title, 'ABUTRON ARENA REMOTE')
+    runs-on: [self-hosted, linux, x64, abutron-diagnostics]
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Arena remote — allowlisted only (abutrongha, no root)
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(id -un)" = "abutrongha"
+          test "$(id -u)" -ne 0
+          # Prod allowlist: /opt/abutron-fx*, /opt/abutron-dcmcp, /var/lib/abutron-mcp
+          # No sudo, no deploy, no LIVE. Use ABUTRON-FX-V9/mcp/bridge/prod_handler.py logic adapted to prod paths:
+          # For now, inline Python that enforces same allowlist but with prod ROOTS (no REPO_ROOT demo):
+          python3 - <<'PY'
+          import os, json, re, sys, stat
+          from pathlib import Path
+          TITLE=os.environ["ISSUE_TITLE"]; BODY=os.environ.get("ISSUE_BODY",""); NUM=os.environ["ISSUE_NUMBER"]
+          ALLOWED=[Path("/opt/abutron-fx"), Path("/opt/abutron-fx-v9"), Path("/opt/abutron-dcmcp"), Path("/var/lib/abutron-mcp"), Path("/tmp/abutron-mcp-smoke"), Path("/home/abutron")]
+          ALLOWED_TOOLS={"read_file","list_directory","get_file_info","get_config"}
+          BLOCKED=[r"\bsudo\b", r"rm\s+-rf\s+/", r"abutron-gh-apex-source-stage", r"abutron-gh-apex-source-rollback", r"crm-toggle", r"mt5-install-ex5-live"]
+          def ok_path(p: Path):
+              try: rp=p.resolve()
+              except: return False
+              if rp.is_symlink(): return False
+              for a in ALLOWED:
+                  try:
+                      if rp.is_relative_to(a.resolve()): return True
+                  except: pass
+              return False
+          m=re.match(r"ABUTRON ARENA REMOTE\s+(\w+)\s+(.+)", TITLE.strip())
+          if not m:
+              result={"error": f"TITLE_PARSE_FAILED: {TITLE!r}"}; meta={"status":"TITLE_PARSE_FAILED"}
+          else:
+              tool, raw=m.group(1), m.group(2).strip()
+              # body JSON override
+              try:
+                  jb=json.loads(BODY) if BODY else {}
+                  if isinstance(jb, dict):
+                      tool=jb.get("tool", tool); raw=jb.get("path", raw)
+              except: pass
+              blocked=False; bm=""
+              for pat in BLOCKED:
+                  if re.search(pat, f"{tool} {raw} {BODY}", re.I): blocked=True; bm=pat; break
+              if blocked:
+                  result={"error": f"BLOCKED_BY_ABUTRON_POLICY: {bm}"}; meta={"status":"BLOCKED_BY_ABUTRON_POLICY"}
+              elif tool not in ALLOWED_TOOLS:
+                  result={"error": f"TOOL_NOT_ALLOWLISTED: {tool}"}; meta={"status":"TOOL_NOT_ALLOWED"}
+              else:
+                  p=Path(raw)
+                  if not ok_path(p):
+                      result={"error": f"PATH_NOT_ALLOWED: {p} not in {[str(a) for a in ALLOWED]}"}; meta={"status":"TOOL_ERROR"}
+                  else:
+                      # Dispatch (prod version — root-owned checks)
+                      try:
+                          if tool=="list_directory":
+                              if not p.is_dir(): raise RuntimeError(f"NOT_A_DIRECTORY: {p}")
+                              items=[{"name": c.name, "type": "dir" if c.is_dir() else "file", "symlink": c.is_symlink()} for c in sorted(p.iterdir())]
+                              result={"path":str(p), "count": len(items), "items": items}
+                              meta={"status":"PASS","tool":tool,"path":raw}
+                          elif tool=="read_file":
+                              if p.stat().st_size>1_000_000: raise RuntimeError("FILE_TOO_LARGE")
+                              result={"path":str(p), "content": p.read_text(errors="replace")[:8000]}
+                              meta={"status":"PASS","tool":tool,"path":raw}
+                          elif tool=="get_file_info":
+                              s=p.lstat(); result={"path":str(p), "exists": p.exists(), "size": s.st_size, "mode": oct(s.st_mode)}
+                              meta={"status":"PASS","tool":tool,"path":raw}
+                          elif tool=="get_config":
+                              result={"allowedTools": sorted(ALLOWED_TOOLS), "allowedDirs": [str(a) for a in ALLOWED], "live":"ALWAYS_OFF"}
+                              meta={"status":"PASS","tool":tool,"path":raw}
+                      except Exception as e:
+                          result={"error": str(e)}; meta={"status":"TOOL_ERROR","tool":tool,"path":raw}
+          payload={"meta": {**meta, "title": TITLE, "issue": NUM}, "result": result}
+          Path("/tmp/abutron-bridge-result.json").write_text(json.dumps(payload, indent=2))
+          md=f"### ABUTRON Arena Bridge Result — `{meta.get('status')}`\n\n**Request:** `{TITLE}` (#{NUM})\n\n```json\n{json.dumps(payload, indent=2)[:7000]}\n```\n"
+          Path("/tmp/abutron-bridge-comment.md").write_text(md)
+          print(json.dumps(payload, indent=2))
+          if meta.get("status") in ("TITLE_PARSE_FAILED","BLOCKED_BY_ABUTRON_POLICY"): sys.exit(2)
+          PY
+          echo "BRIDGE_DONE prod"
+      - name: Post sanitized result as issue comment (prod)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh issue comment "$ISSUE_NUMBER" --repo "abutronmall-netizen/abutron-ops" --body-file /tmp/abutron-bridge-comment.md
+          echo "ARENA_BRIDGE_POSTED_PROD=YES"
+
+# NOTE: To activate, prod root must NOT install this as auto-deploy.
+# PR must be reviewed, CI offline checks must pass, and runner must be verified id abutrongha.
