@@ -11,7 +11,8 @@ import cors from "@fastify/cors";
 // --- ABUTRON config (no OpenAI) ---
 const CONFIG_PATH = process.env.ABUTRON_MCP_CONFIG || new URL("../../config/abutron-mcp.config.json", import.meta.url).pathname;
 const cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-const NODE_BIN = cfg.node?.pinned?.isolatedPath ? `${cfg.node.pinned.isolatedPath}/bin/node` : process.execPath;
+const NODE_BIN_CANDIDATE = cfg.node?.pinned?.isolatedPath ? `${cfg.node.pinned.isolatedPath}/bin/node` : process.execPath;
+const NODE_BIN = existsSync(NODE_BIN_CANDIDATE) ? NODE_BIN_CANDIDATE : process.execPath;
 const DCM_ENTRY = cfg.server?.entry || "/opt/abutron-mcp/desktop-commander/dist/index.js";
 const LISTEN_HOST = process.env.ABUTRON_GATEWAY_HOST || "127.0.0.1";
 const LISTEN_PORT = Number(process.env.ABUTRON_GATEWAY_PORT || 3467);

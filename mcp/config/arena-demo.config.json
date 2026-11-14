@@ -1,0 +1,49 @@
+{
+  "_comment": "Arena demo config — points to local npm install, not /opt/abutron-mcp (which only exists on Ubuntu localhost)",
+  "version": "1.0.0-arena",
+  "upstream": "@wonderwhy-er/desktop-commander@0.3.1-local",
+  "node": {
+    "required": ">=22.12.0",
+    "pinned": {
+      "version": "v22.22.3",
+      "isolatedPath": "/usr/local"
+    }
+  },
+  "server": {
+    "package": "@wonderwhy-er/desktop-commander",
+    "entry": "/home/user/ABUTRON-FX-V9/mcp/server/node_modules/@wonderwhy-er/desktop-commander/dist/index.js",
+    "args": ["--no-onboarding"],
+    "stdio": true
+  },
+  "security": {
+    "runAs": "abutronmcp:abutronmcp (arena: user)",
+    "allowedDirectories": [
+      "/home/user/ABUTRON-FX-V9",
+      "/tmp/abutron-mcp-smoke"
+    ],
+    "blockedCommands": [
+      "sudo",
+      "rm -rf /",
+      "abutron-gh-apex-source-stage",
+      "abutron-gh-apex-source-rollback"
+    ],
+    "liveTrading": "ALWAYS_OFF"
+  },
+  "gateway": {
+    "ownVersion": "abutron-mcp-gateway-v1-arena-demo",
+    "transport": "http+sse",
+    "listen": "0.0.0.0:3467",
+    "endpoints": {
+      "health": "/healthz",
+      "ready": "/readyz",
+      "mcpSse": "/mcp/sse",
+      "mcpMessages": "/mcp/messages",
+      "tools": "/mcp/tools"
+    },
+    "auth": {
+      "type": "bearer",
+      "envKey": "ABUTRON_MCP_API_KEY",
+      "mode": "demo: abutron-demo-key-2024 (change for prod)"
+    }
+  }
+}
