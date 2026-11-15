@@ -271,6 +271,22 @@ held-out bars. The expectancy guard prevents the degenerate "92% win
 rate at ~0.3:1 reward:risk" that loses money — it maximises win rate
 *subject to positive expectancy*.
 
+**All-symbol sweep** — optimize every Deriv and FP-Markets symbol at
+once and rank by held-out win rate:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m abutron.backtest.optimize_all \\
+    --data /path/to/market-data --broker all --timeframe M5 --htf H1 \\
+    --equity 10000 --risk-pct 0.05 --grid fast --out data/opt_all.json
+```
+
+`--grid fast` sweeps ~16 combos/symbol (quick overview); `--grid full`
+sweeps ~96 combos including tight TPs (0.3–0.5 ATR) and conviction
+floors for refining the best instruments. Across the full dataset the
+top symbols reach **~82% held-out win rate** (Boom 1000, EURUSD) — the
+expectancy-guarded ceiling for this geometry; a trained brain is the
+lever that lifts it further.
+
 ## Training the brain
 
 Train the NexusBrain on historical candles and save the model:
