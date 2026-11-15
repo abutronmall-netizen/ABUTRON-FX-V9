@@ -17,14 +17,34 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from ..brain import make_brain, default_ensemble
 from ..apex.sniper import SniperEntryEngine
 from .loader import MarketDataLoader
 from .engine import BacktestEngine
+
+
+def _slug(symbol: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", symbol.lower()).strip("_")
+
+
+def _load_ensemble(brain_root: Optional[str], symbol: str, tf: str):
+    """Load a trained brain for a symbol, or None to use untrained."""
+    if not brain_root:
+        return None
+    from ..brain.trainer import load_brain
+    path = os.path.join(brain_root, f"{_slug(symbol)}_{tf.lower()}")
+    if os.path.isdir(path):
+        try:
+            return load_brain(path, mc_samples=16)
+        except Exception:
+            return None
+    return None
 
 # --- grids --------------------------------------------------------------
 GRIDS = {
@@ -55,8 +75,11 @@ def _load(broker, symbol, tf, htf, data):
 
 
 def _run_combo(candles, htf_candles, *, tp_mult, sl_frac, min_conv,
-               require_trend, require_mom, equity, risk_pct, warmup):
-    brain = make_brain(ensemble=default_ensemble(seed=0), size_cap=1.0)
+               require_trend, require_mom, equity, risk_pct, warmup,
+               ensemble=None):
+    if ensemble is None:
+        ensemble = default_ensemble(seed=0)
+    brain = make_brain(ensemble=ensemble, size_cap=1.0)
     sniper = SniperEntryEngine(tp_atr_mult=tp_mult,
                                invalidation_atr_frac=sl_frac)
     eng = BacktestEngine(
@@ -74,11 +97,12 @@ def _expectancy(r) -> float:
 
 
 def _optimize_symbol(job) -> dict:
-    broker, symbol, tf, htf, data, equity, risk, grid, sweep_bars = job
+    broker, symbol, tf, htf, data, equity, risk, grid, sweep_bars, brain_root = job
     candles, htf_candles = _load(broker, symbol, tf, htf, data)
     if len(candles) < 400:
         return {"broker": broker, "symbol": symbol, "bars": len(candles),
                 "status": "too_few_bars"}
+    ensemble = _load_ensemble(brain_root, symbol, tf)
     split = max(1, int(len(candles) * 0.8))
     train, test = candles[:split], candles[split:]
     htf_tr = [x for x in htf_candles
@@ -97,7 +121,7 @@ def _optimize_symbol(job) -> dict:
                     r = _run_combo(
                         st, sh, tp_mult=tp, sl_frac=sl, min_conv=conv,
                         require_trend=trend, require_mom=mom, equity=equity,
-                        risk_pct=risk, warmup=30)
+                        risk_pct=risk, warmup=30, ensemble=ensemble)
                     if r.trades < 15:
                         continue
                     results.append((tp, sl, conv, trend, mom, r))
@@ -111,7 +135,7 @@ def _optimize_symbol(job) -> dict:
     tp, sl, conv, trend, mom, best = pool[0]
     rt = _run_combo(test, htf_te, tp_mult=tp, sl_frac=sl, min_conv=conv,
                     require_trend=trend, require_mom=mom, equity=equity,
-                    risk_pct=risk, warmup=30)
+                    risk_pct=risk, warmup=30, ensemble=ensemble)
     return {
         "broker": broker, "symbol": symbol, "bars": len(candles),
         "status": "ok",
@@ -144,6 +168,10 @@ def main(argv=None) -> int:
                     help="max bars used per sweep (speed)")
     ap.add_argument("--min-trades", type=int, default=15)
     ap.add_argument("--max-workers", type=int, default=2)
+    ap.add_argument("--brain-root", default=None,
+                    help="directory of trained brains (data/brains); loads "
+                         "the per-symbol trained brain instead of the "
+                         "untrained ensemble")
     ap.add_argument("--out", default=None,
                     help="write JSON results to this path")
     ap.add_argument("--json", action="store_true",
@@ -160,11 +188,13 @@ def main(argv=None) -> int:
             continue
         for sym in sorted({p["symbol"] for p in disc[broker]}):
             jobs.append((broker, sym, args.timeframe, args.htf, args.data,
-                         args.equity, args.risk_pct, grid, args.sweep_bars))
+                         args.equity, args.risk_pct, grid, args.sweep_bars,
+                         args.brain_root))
     n = len(grid["tp"]) * len(grid["sl"]) * len(grid["conv"]) * len(grid["filters"])
+    brain_tag = " +trained brains" if args.brain_root else ""
     print(f"Optimizing {len(jobs)} symbols on {args.timeframe}"
           + (f" +{args.htf}" if args.htf else "")
-          + f" ({n}-combo {args.grid} grid)...\n")
+          + f" ({n}-combo {args.grid} grid){brain_tag}...\n")
 
     out: List[dict] = []
     with ProcessPoolExecutor(max_workers=args.max_workers) as ex:
