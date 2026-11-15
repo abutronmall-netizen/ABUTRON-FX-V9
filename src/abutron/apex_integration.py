@@ -30,6 +30,7 @@ from .selflearn.engine import SelfLearningEngine
 from .brain import make_brain, default_ensemble
 from .config import (BRAIN_ENSEMBLE_SEED, BRAIN_MC_SAMPLES, BRAIN_SIZE_CAP)
 from .selflearn.features import build_feature_vector
+from .apex.eligibility import SymbolEligibility
 
 # ---------------------------------------------------------------------------
 # Locate + import the vendored APEX package.
@@ -139,6 +140,9 @@ class ApexIntegration:
             ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
             size_cap=BRAIN_SIZE_CAP)
         self.brain.ensemble.mc_samples = BRAIN_MC_SAMPLES
+        # Equity-aware symbol eligibility: trade only the symbols the
+        # client equity can carry (min-lot risk <= per-trade risk budget).
+        self.eligibility = SymbolEligibility()
         # one-bar causal lag per symbol: (features, scores, regime, prev_close)
         self._pending: Dict[str, Dict[str, Any]] = {}
 
@@ -202,6 +206,29 @@ class ApexIntegration:
                     "reason": self._apex_error, "decision": None,
                     "candidate": None,
                     "blockers": [f"APEX_VENDOR_MISSING:{self._apex_error}"]}
+
+        # --- Equity-aware symbol eligibility --------------------------------
+        # Trade only the symbols the client equity can carry: if the
+        # instrument's minimum lot already risks more than the per-trade
+        # risk budget, the account is too small for it. Uses the static
+        # representative-ATR threshold (single candle has no ATR series);
+        # the bridge's own sizing is the authoritative final guard.
+        _sym = candle["symbol"]
+        _risk_pct = (float(account["per_trade_risk_pct"])
+                     if account.get("per_trade_risk_pct") is not None
+                     else self.eligibility.default_risk_pct)
+        _min_eq = self.eligibility.min_equity_for(_sym, risk_pct=_risk_pct)
+        if float(equity or 0.0) < _min_eq:
+            self._record(connection_id, account, candle,
+                         "SYMBOL_NOT_ELIGIBLE_EQUITY",
+                         reason=f"EQUITY_BELOW_MIN_LOT(min={_min_eq:.2f})")
+            self._trace_run(connection_id, account, candle, status="BLOCKED",
+                            decision=None,
+                            blockers=[f"SYMBOL_NOT_ELIGIBLE_EQUITY:"
+                                      f"{_sym}:min={_min_eq:.2f}"])
+            return {"status": "BLOCKED", "decision": None, "candidate": None,
+                    "blockers": [f"SYMBOL_NOT_ELIGIBLE_EQUITY:{_sym}"],
+                    "review": None}
 
         bridge = self._bridge_for(connection_id, account, manifest)
 

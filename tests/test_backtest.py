@@ -188,9 +188,17 @@ def test_engine_fixed_vs_compound_sizing():
     comp = _engine(warmup=20, compound=True)
     rf = fixed.run(candles, [], symbol="SYN.0", timeframe="M5")
     rc = comp.run(candles, [], symbol="SYN.0", timeframe="M5")
-    # both produce valid results; compounding can diverge but stays sane
-    assert rf.trades == rc.trades
+    # both produce valid, internally-consistent results
+    for r in (rf, rc):
+        assert r.trades == r.wins + r.losses
+        assert r.equity_end == pytest.approx(r.equity_start + r.total_pnl)
+    # compounding can diverge but stays sane
     assert rc.equity_end > 0
+    # The equity-aware eligibility gate makes trade selection depend on the
+    # equity path: when equity drops below a symbol's min-lot threshold the
+    # engine stops trading it. So fixed vs compound may legitimately trade
+    # different counts (the gate is doing its job, not a sizing regression).
+    assert rf.trades > 0 and rc.trades > 0
 
 
 # --------------------------------------------------------------------------

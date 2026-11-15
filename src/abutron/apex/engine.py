@@ -37,6 +37,7 @@ from .debate import debate_advisor
 from .journal import DecisionJournal
 from .sniper import sniper_engine
 from .trailing import trailing_stop
+from .eligibility import SymbolEligibility, load_symbol_brain, default_brain_root
 
 # NexusBrain — the advanced, uncertainty-aware decision brain (signal
 # authority). The legacy agents below are retained as feature contributors
@@ -126,11 +127,17 @@ class Candidate:
 class ApexEngine:
     def __init__(self, event_log: EventLog, crm_service=None,
                  brain: "NexusBrain | None" = None,
-                 risk_policy: Optional[RiskPolicy] = None):
+                 risk_policy: Optional[RiskPolicy] = None,
+                 eligibility: Optional["SymbolEligibility"] = None,
+                 brain_root: Optional[str] = None):
         self.log = event_log
         # Equity-tiered compounding + daily target/loss-cap policy. Drives
         # tier-based risk_pct + lot_max and the daily profit-stop / loss-cap.
         self.risk_policy = risk_policy or RiskPolicy()
+        # Equity-aware symbol eligibility: trade only the symbols the
+        # client's equity can carry (min-lot risk <= per-trade risk budget).
+        # Built-in default; an explicit instance may be injected.
+        self.eligibility = eligibility or SymbolEligibility()
         self.journal = DecisionJournal(event_log)
         self.crm = crm_service
         # The NexusBrain is the signal authority. Legacy agents are retained
@@ -138,13 +145,24 @@ class ApexEngine:
         from ..config import (BRAIN_MIN_CONFIDENCE, BRAIN_MAX_UNCERTAINTY,
                               BRAIN_MAX_CONVICTION, BRAIN_MC_SAMPLES,
                               BRAIN_ENSEMBLE_SEED, BRAIN_SIZE_CAP)
+        self._brain_cfg = {
+            "min_confidence": BRAIN_MIN_CONFIDENCE,
+            "max_uncertainty": BRAIN_MAX_UNCERTAINTY,
+            "max_conviction": BRAIN_MAX_CONVICTION,
+            "size_cap": BRAIN_SIZE_CAP,
+        }
+        self._brain_mc_samples = BRAIN_MC_SAMPLES
+        self._brain_seed = BRAIN_ENSEMBLE_SEED
+        # Trained-brain root for per-symbol brains (data/brains/<slug>_m5).
+        self._brain_root = brain_root or default_brain_root()
+        # Per-symbol trained-brain cache. The brain used for a symbol is the
+        # one trained + validated on that symbol (loaded from data/brains);
+        # unknown symbols fall back to the default ensemble brain.
+        self._brain_cache: Dict[str, NexusBrain] = {}
         if brain is None:
             brain = make_brain(
                 ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
-                min_confidence=BRAIN_MIN_CONFIDENCE,
-                max_uncertainty=BRAIN_MAX_UNCERTAINTY,
-                max_conviction=BRAIN_MAX_CONVICTION,
-                size_cap=BRAIN_SIZE_CAP)
+                **self._brain_cfg)
             brain.ensemble.mc_samples = BRAIN_MC_SAMPLES
         self.brain = brain
         self.regime = RegimeAgent()
@@ -153,6 +171,29 @@ class ApexEngine:
         self.breakout = BreakoutAgent()
         self.portfolio = PortfolioAgent()
         self.risk = RiskAgent()
+
+    # ------------------------------------------------------------------
+    # Per-symbol trained brain
+    # ------------------------------------------------------------------
+    def _brain_for(self, symbol: str) -> NexusBrain:
+        """Return the brain trained + validated on ``symbol``.
+
+        Loads ``data/brains/<slug>_m5/nexus_brain.json`` (the brain whose
+        held-out accuracy is in its ``report``) and caches it. If no
+        trained brain exists for the symbol, falls back to the default
+        ensemble brain so the platform never breaks. This is how the live
+        engine trades with "the brain trained with the information and the
+        tests that have been done" for each instrument.
+        """
+        if symbol in self._brain_cache:
+            return self._brain_cache[symbol]
+        brain = load_symbol_brain(
+            symbol, brain_root=self._brain_root,
+            mc_samples=self._brain_mc_samples, brain_kwargs=self._brain_cfg)
+        if brain is None:
+            brain = self.brain
+        self._brain_cache[symbol] = brain
+        return brain
 
     # ------------------------------------------------------------------
     # Main decision pass
@@ -212,6 +253,45 @@ class ApexEngine:
         highs = [x.high for x in self._history(c)]
         lows = [x.low for x in self._history(c)]
 
+        # --- Equity-aware symbol eligibility gate ------------------------
+        # Look at the client equity and trade ONLY the symbols that cater
+        # for it: if the instrument's minimum lot already risks more than
+        # the per-trade risk budget, the account is too small for it. Skip
+        # before spending brain/sniper compute (size_position is the
+        # authoritative final guard with the actual entry quality).
+        from .indicators import atr as _atr
+        _a = _atr(highs, lows, closes, 14) or 0.0
+        _point = float(c.point or (quote.point if quote else 0.0) or 0.0)
+        _atr_points = (_a / _point) if _point > 0 else 0.0
+        _eq = float(account.get("equity",
+                                account.get("balance", 0.0)) or 0.0)
+        _risk_pct = (float(account["per_trade_risk_pct"])
+                     if "per_trade_risk_pct" in account
+                     else self.risk_policy.risk_pct_for(_eq))
+        _elig = self.eligibility.is_tradable(
+            c.symbol, _eq, atr_points=_atr_points or None,
+            risk_pct=_risk_pct,
+            point=_point or None,
+            point_value=(float(quote.point_value) if quote and quote.point_value
+                         else None),
+            lot_min=(float(quote.volume_min) if quote and quote.volume_min
+                     else None))
+        if not _elig.eligible:
+            self.journal.record(
+                connection_id=connection_id, broker=broker,
+                owner_id=owner_id, symbol=c.symbol,
+                timeframe=c.timeframe, bar_open=c.open_time,
+                regime="",
+                opinions=[], decision="REJECTED",
+                reason=f"SYMBOL_NOT_ELIGIBLE_EQUITY_{_elig.reason}",
+                detail={"equity": _eq, "risk_pct": _risk_pct,
+                        "min_equity": round(_elig.min_equity, 4),
+                        "risk_per_lot": round(_elig.risk_per_lot, 4),
+                        "stop_distance_points": round(
+                            _elig.stop_distance_points, 4),
+                        "atr_points": round(_elig.atr_points, 4)})
+            return None
+
         # --- Legacy agents: retained as feature contributors + diagnostics.
         # They are NOT the decision authority anymore; the NexusBrain is.
         regime_op = self.regime.vote({"symbol": c.symbol, "high": highs,
@@ -251,8 +331,10 @@ class ApexEngine:
             fp = build_footprint(c.symbol, of_snap.trades,
                                  tick_size or quote.tick_size)
 
-        # --- The NexusBrain is the signal authority. ---
-        proposal = self.brain.decide(
+        # --- The NexusBrain is the signal authority. The brain used is the
+        # one trained + validated on THIS symbol (loaded from data/brains),
+        # falling back to the default ensemble for untrained symbols. ---
+        proposal = self._brain_for(c.symbol).decide(
             symbol=c.symbol, closes=closes, highs=highs, lows=lows,
             orderflow=of_snap.features if of_snap else {},
             footprint=fp.features if fp else {},
@@ -278,10 +360,9 @@ class ApexEngine:
         # Entry precision is what controls drawdown. Compute a trigger-based
         # entry plan (pullback-to-level or confirmation) with a tight
         # invalidation instead of a naive market-at-close entry.
-        from .indicators import atr
         from .geometry import geometry_for, apply_entry_filters
         from .sniper import SniperEntryEngine
-        a = atr(highs, lows, closes, 14) or 0.0
+        a = _a
         direction = proposal.direction
 
         # Per-symbol win-rate geometry (TP/SL ATR multiples + entry
@@ -377,15 +458,11 @@ class ApexEngine:
             stop_distance_points = abs(sniper.trigger_price -
                                        sniper.invalidation) / point \
                 if point > 0 else 0.0
-            eq = float(account.get("equity",
-                                   account.get("balance", 0.0)) or 0.0)
-            # Tier-based risk/lot from the equity-tiered policy. An explicit
-            # account per_trade_risk_pct overrides the tier risk (admin
-            # control); otherwise the brain auto-scales from equity.
-            if "per_trade_risk_pct" in account:
-                risk_pct = float(account["per_trade_risk_pct"])
-            else:
-                risk_pct = self.risk_policy.risk_pct_for(eq)
+            eq = _eq
+            # Tier-based risk/lot from the equity-tiered policy (already
+            # resolved by the eligibility gate; an explicit account
+            # per_trade_risk_pct overrides the tier risk — admin control).
+            risk_pct = _risk_pct
             lot_max = min(self.risk_policy.lot_max_for(eq),
                           float(quote.volume_max or 50.0))
             sizing = self.brain.size_position(
