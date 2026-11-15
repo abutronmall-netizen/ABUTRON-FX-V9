@@ -61,16 +61,30 @@ class MarketDataLoader:
         return self._filter(candles, symbol, timeframe)
 
     def _assemble_deriv(self, d: str) -> Optional[str]:
-        """Concatenate the ordered part-* chunks into one gzip stream."""
-        parts = sorted(f for f in os.listdir(d) if f.endswith(".part-00")
-                       or ".part-" in f and f.endswith(".gz.part-00"))
-        # match all part files in order
+        """Concatenate the ordered part-* chunks into one gzip stream.
+
+        Writes to a per-process temp file and atomically replaces the
+        assembled file, so concurrent workers never read a torn/partial
+        stream (which would raise gzip EOFError).
+        """
         parts = sorted(f for f in os.listdir(d) if ".part-" in f)
         out = os.path.join(d, "_assembled.csv.gz")
-        with open(out, "wb") as w:
-            for p in parts:
-                with open(os.path.join(d, p), "rb") as r:
-                    w.write(r.read())
+        # skip if a complete assembled file already exists (cache)
+        if os.path.exists(out):
+            return out
+        tmp = os.path.join(d, f"._assembled.{os.getpid()}.tmp.gz")
+        try:
+            with open(tmp, "wb") as w:
+                for p in parts:
+                    with open(os.path.join(d, p), "rb") as r:
+                        w.write(r.read())
+            os.replace(tmp, out)  # atomic on POSIX
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
         return out
 
     # ------------------------------------------------------------------
