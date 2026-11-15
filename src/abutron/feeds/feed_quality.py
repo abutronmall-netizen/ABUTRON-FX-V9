@@ -123,24 +123,40 @@ class Quote:
         return self.spread / self.point if self.point else 0.0
 
 
-def normalize_native_bars(raw: Dict[str, Any], *, connection_id: str,
+def normalize_native_bars(raw: Any, *, connection_id: str,
                           login: int, broker: str) -> List[Candle]:
-    """Parse a native export payload (MT5 Files JSON/CSV) into Candles."""
+    """Parse a native export payload (MT5 Files JSON/CSV) into Candles.
+
+    Accepts either the full export envelope (``{"bars": [...]}``) or the bare
+    bar list, because the EA's bars file is normalised to a list by the
+    terminal reader. A malformed row is skipped rather than aborting the whole
+    export — one bad line must not blank an account's feed.
+    """
+    if isinstance(raw, dict):
+        rows = raw.get("bars", []) or []
+    elif isinstance(raw, (list, tuple)):
+        rows = list(raw)
+    else:
+        return []
     candles: List[Candle] = []
-    rows = raw.get("bars", [])
     for r in rows:
-        c = Candle(
-            symbol=r["symbol"], timeframe=r.get("timeframe", "M5"),
-            open_time=r["open_time"], close_time=r.get("close_time", ""),
-            open=float(r["open"]), high=float(r["high"]),
-            low=float(r["low"]), close=float(r["close"]),
-            volume=float(r.get("volume", 0.0)),
-            bid=float(r.get("bid", 0.0)), ask=float(r.get("ask", 0.0)),
-            spread=float(r.get("spread", 0.0)),
-            tick_size=float(r.get("tick_size", 0.0)),
-            point=float(r.get("point", 0.0)),
-            closed=bool(r.get("closed", True)),
-        )
+        if not isinstance(r, dict):
+            continue
+        try:
+            c = Candle(
+                symbol=r["symbol"], timeframe=r.get("timeframe", "M5"),
+                open_time=r["open_time"], close_time=r.get("close_time", ""),
+                open=float(r["open"]), high=float(r["high"]),
+                low=float(r["low"]), close=float(r["close"]),
+                volume=float(r.get("volume", 0.0)),
+                bid=float(r.get("bid", 0.0)), ask=float(r.get("ask", 0.0)),
+                spread=float(r.get("spread", 0.0)),
+                tick_size=float(r.get("tick_size", 0.0)),
+                point=float(r.get("point", 0.0)),
+                closed=bool(r.get("closed", True)),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue  # malformed row — skip it, keep the rest of the export
         if not c.close_time:
             ot = time.mktime(time.strptime(c.open_time, "%Y-%m-%dT%H:%M:%SZ"))
             c.close_time = time.strftime("%Y-%m-%dT%H:%M:%SZ",

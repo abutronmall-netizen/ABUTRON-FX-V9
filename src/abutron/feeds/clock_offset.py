@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from ..config import HEARTBEAT_STALE_SECONDS, utc_now
-from .feed_quality import Candle
+from .feed_quality import Candle, _tf_seconds
 
 
 @dataclass
@@ -46,8 +46,9 @@ class ClockOffsetEstimator:
             return state
         import time
         now_ts = time.mktime(time.strptime(now_utc, "%Y-%m-%dT%H:%M:%SZ"))
-        # Use the most recent closed candle's close_time; broker bars
-        # close on the broker clock, which should align with UTC.
+        # Use the most recent closed candle's close_time. Broker bars close on
+        # the broker clock, so the sample must fall on an M5 boundary and the
+        # *boundary alignment* is what proves the clocks agree.
         latest = max(candles, key=lambda c: c.close_time)
         try:
             close_ts = time.mktime(time.strptime(latest.close_time,
@@ -57,13 +58,31 @@ class ClockOffsetEstimator:
                                "BAD_SAMPLE_TIMESTAMP")
             self._states[broker] = state
             return state
-        offset = close_ts - now_ts
-        # Confidence: how fresh the sample is + sample count
-        age = abs(offset)
-        confidence = max(0.0, 1.0 - age / (6 * 3600)) * min(1.0, len(candles) / 12.0)
-        verified = abs(offset) < 5 and confidence > 0.5
+
+        tf = _tf_seconds(getattr(latest, "timeframe", "M5") or "M5")
+        # Distance from the sample to the nearest bar boundary. A broker clock
+        # aligned to UTC puts every closed bar exactly on a multiple of the
+        # timeframe, so this residual is the clock offset we actually care
+        # about. Comparing close_time against wall-clock *now* (the previous
+        # behaviour) always produced a large offset, because a closed M5 bar is
+        # between 0 and 5 minutes old by definition — the estimator then
+        # reported BROKER_CLOCK_OFFSET_UNVERIFIED on every healthy feed.
+        offset = close_ts - round(close_ts / tf) * tf
+        # The sample must also be plausibly recent: a bar more than a day old
+        # is a stale export, not a clock reading.
+        stale = (now_ts - close_ts) > 86400 or close_ts > now_ts + tf
+        # Confidence: boundary alignment + sample count + freshness.
+        alignment = max(0.0, 1.0 - abs(offset) / tf)
+        confidence = alignment * min(1.0, len(candles) / 12.0)
+        verified = (not stale) and abs(offset) < 5 and confidence > 0.5
+        if stale:
+            reason = "STALE_CLOCK_SAMPLE"
+        elif verified:
+            reason = ""
+        else:
+            reason = "OFFSET_OUT_OF_RANGE"
         state = ClockState(broker, offset, confidence, len(candles), verified,
-                           "" if verified else "OFFSET_OUT_OF_RANGE")
+                           reason)
         self._states[broker] = state
         return state
 

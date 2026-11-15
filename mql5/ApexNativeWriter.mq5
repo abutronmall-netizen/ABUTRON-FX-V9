@@ -55,12 +55,21 @@ void ExportNativeData()
    string bars     = dir + "ABUTRON_NATIVE_BARS_V2_"    + Nonce() + ".txt";
    string oflow    = dir + "ABUTRON_ORDER_FLOW_V2_"     + Nonce() + ".txt";
 
+   // Account equity is exported with the identity: the candidate contract
+   // needs a broker-attested equity to compute the per-trade risk budget and
+   // the 20% portfolio ceiling. Without it every candidate is blocked with
+   // BROKER_EQUITY_OR_OPEN_RISK_UNVERIFIED and the account can never trade.
    string idJson = StringFormat(
       "{\"connection_id\":\"%s\",\"login\":%d,\"broker\":\"%s\","
       "\"server\":\"%s\",\"nonce\":\"%s\",\"challenge\":\"%s\","
-      "\"worker_health_ts\":\"%s\"}",
+      "\"worker_health_ts\":\"%s\",\"equity\":%.2f,\"balance\":%.2f,"
+      "\"free_margin\":%.2f,\"trade_allowed\":%d,\"terminal_trade_allowed\":%d}",
       InpConnectionId, AccountInfoInteger(ACCOUNT_LOGIN),
-      "native", InpBrokerServer, Nonce(), Challenge(), TimeStampToStr(TimeCurrent()));
+      "native", InpBrokerServer, Nonce(), Challenge(), TimeStampToStr(TimeCurrent()),
+      AccountInfoDouble(ACCOUNT_EQUITY), AccountInfoDouble(ACCOUNT_BALANCE),
+      AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+      AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) ? 1 : 0,
+      AccountInfoInteger(ACCOUNT_TRADE_EXPERT) ? 1 : 0);
 
    FileWrite(identity, idJson);
 

@@ -535,3 +535,18 @@ def _user_safe(u):
 def _row_dict(row):
     return {c.name: getattr(row, c.name)
             for c in row.__table__.columns}
+
+
+def default_app() -> FastAPI:
+    """Zero-argument factory for `uvicorn abutron.portal.app:default_app`.
+
+    Builds the portal with the standard audit journal under DATA_ROOT, so the
+    UI can be run standalone (development / preview) without the full
+    ApexRuntime supervisor.
+    """
+    import os as _os
+
+    from ..config import DATA_ROOT
+    from ..events import EventLog
+
+    return create_app(EventLog(_os.path.join(DATA_ROOT, "events.jsonl")))

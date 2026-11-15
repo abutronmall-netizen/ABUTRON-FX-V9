@@ -21,6 +21,12 @@ execution, broker-native reconciliation, and three operator surfaces
   RiskAgent (per-instrument cap, asset-class cap, correlation clusters,
   net/gross leverage, portfolio vol target, VaR, drawdown/daily-loss kill
   switch). The `abutron_signal_only` bridge computes signal-only proposals.
+
+  The vendored tree lives in-repo at `vendor/abutron-apex/` (`apex11/` +
+  `risk_guard/`) and is loaded by `apex_integration._load_apex`, which
+  registers both import roots itself — no `PYTHONPATH` setup is required.
+  When the tree is absent the platform degrades cleanly to the NexusBrain
+  path and reports `APEX_VENDOR_MISSING` per candle instead of crashing.
 - **NexusBrain — advanced uncertainty-aware decision brain**
   (`src/abutron/brain/`) — the **signal authority**, rebuilt from scratch
   (not the legacy rule-based agent voting). A pure-NumPy ensemble of diverse
@@ -50,13 +56,23 @@ execution, broker-native reconciliation, and three operator surfaces
   geometry flows through the dispatcher to the native EA, which places a
   LIMIT order at the trigger price. Still always-trade — every edge is
   entered — but drawdown is minimised by entering precisely.
+
+  The plan is computed by `ApexIntegration.build_entry_plan` on the live
+  decision path (it consumes a rolling per-symbol OHLC history), merged into
+  the broker-native review geometry by `review_geometry`, attached to the
+  READY candidate, persisted on the candidate row (`entry_type`,
+  `trigger_price`, `invalidation`, `entry_quality`, `sniper_plan`, `trail_k`,
+  `trail_stop`, `trail_plan`), and forwarded to the EA by the dispatcher.
 - **Brain lot sizing + trailing stop + loss-learning**
   (`src/abutron/brain/brain.py`, `src/abutron/apex/trailing.py`) — the AI
   brain performs ALL the calculation; the EA only executes. **Lot size**
   is computed from client equity + per-trade risk + the sniper stop
   distance, scaled by entry quality, and sent as the exact lot. A
   **trailing stop** (Chandelier: high/low ± 3·ATR) tightens in favour to
-  lock profit. **Self-learning from losses**: every settled trade feeds
+  lock profit. The executed lot is **clamped to the volume the candidate
+  contract validated** against the 0.10% per-trade risk policy and the 20%
+  portfolio ceiling, so quality-scaled sizing can never breach a limit the
+  contract just proved safe. **Self-learning from losses**: every settled trade feeds
   the brain's `TradeMemory`; a loss raises the confirm-bias and
   entry-quality floor so the brain prefers CONFIRM entries and waits for
   a cleaner setup — it learns to never enter too early. Wins decay the
@@ -184,17 +200,27 @@ cp .env.example .env
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -v
+.venv/bin/python -m pytest            # 168 platform tests
+.venv/bin/python -m pytest vendor/abutron-apex/apex11/tests   # 210 vendored APEX tests
 ```
 
-145 tests covering feed quality, the **NexusBrain** decision brain
+`pytest.ini` registers `src/` on the path, so no `PYTHONPATH` is needed.
+
+**168 tests** covering feed quality, the **NexusBrain** decision brain
 (neural backprop, ensemble uncertainty, conviction-based sizing,
 walk-forward training, engine integration), decision logic, account auth,
 risk sizing/caps, single-writer execution, client OFF, order flow +
-footprint, reconciliation, the **real APEX integration** (signal bridge
-→ advisory review → READY candidate), and the **backtest / forward-test /
-training** pipeline. The vendored APEX source also ships its own **210-test**
-suite (run from `vendor/abutron-apex/apex11`).
+footprint, reconciliation, the **real APEX integration** (instrument
+manifest → signal bridge → advisory review → READY candidate), the **AI
+entry pipeline** (sniper geometry → trailing stop → brain lot sizing) and
+the **backtest / forward-test / training** pipeline.
+
+The vendored APEX source also ships its own **210-test** suite, which the
+repo ships a `conftest.py` bootstrap for so it runs unmodified:
+
+```bash
+.venv/bin/python -m pytest vendor/abutron-apex/apex11/tests -q   # 210 passed
+```
 
 ## Deploying to Ubuntu
 

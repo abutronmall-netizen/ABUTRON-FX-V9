@@ -48,8 +48,10 @@ echo "==> systemd units"
 sudo cp "$SRC_DIR"/deploy/systemd/*.service /etc/systemd/system/
 sudo cp "$SRC_DIR"/deploy/systemd/*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
+# abutron-health.timer drives abutron-health.service (the ops snapshot
+# worker); both units must be present or the timer fails on every tick.
 sudo systemctl enable abutron-portal.service abutron-dispatch.service \
-    abutron-reconcile.timer abutron-health.timer
+    abutron-reconcile.timer abutron-health.service abutron-health.timer
 
 echo "==> done. Next:"
 echo "    sudo systemctl start abutron-portal.service"

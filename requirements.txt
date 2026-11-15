@@ -11,6 +11,10 @@ sqlalchemy==2.0.36
 httpx==0.28.1
 python-multipart==0.0.20
 python-dotenv==1.0.1
+# Vendored APEX 1.1.0 decision engine (vendor/abutron-apex/apex11) loads its
+# signal-only config from YAML. Without this the vendored bridge fails to
+# import and the platform silently degrades to the NexusBrain-only path.
+PyYAML==6.0.2
 # Gemma LLM advisory (optional at runtime; weights served via a local
 # LiteLLM / Ollama gateway or Google AI endpoint). Kept optional so the
 # signal engine never depends on it for execution.

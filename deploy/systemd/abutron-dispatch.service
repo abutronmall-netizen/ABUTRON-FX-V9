@@ -8,7 +8,8 @@ User=abutron
 Group=abutron
 WorkingDirectory=/opt/abutron-fx-v9
 Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-fx-v9/data
-ExecStart=/usr/bin/python3 -m abutron.workers.dispatcher_worker
+Environment=PYTHONPATH=/opt/abutron-fx-v9/src
+ExecStart=/opt/abutron-fx-v9/.venv/bin/python -m abutron.workers.dispatcher_worker
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

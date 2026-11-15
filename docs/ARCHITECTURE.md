@@ -55,10 +55,13 @@ src/abutron/
 ├── crm/controls.py      accounts, licenses, ON/OFF state machine
 ├── ops/health.py        health + fault-code registry
 ├── ops/portal_ops.py    runs/traces, analytics, leaderboard, providers
-├── workers/             mt5_worker, dispatcher_worker, reconcile_worker
+├── workers/             mt5_worker, dispatcher_worker, reconcile_worker,
+│                       health_worker (timer-driven ops snapshot)
 └── portal/              FastAPI app + client/admin/command templates
 mql5/ApexNativeWriter.mq5   native single-writer EA
 vendor/abutron-apex/     VENDORED authoritative APEX 1.1.0 source
+  apex11/conftest.py     test bootstrap (import roots + config CWD)
+  risk_guard/            dual-layer DEMO risk guard (sibling import root)
   apex11/apex/           regime/trend/meanreversion/breakout/portfolio/risk
                          agents, engine, covariance, memory, llm advisor
   apex11/abutron_replacement/  signal-only bridge + candidate_contract +
@@ -80,6 +83,14 @@ is vendored under `vendor/abutron-apex/` and driven through
    trust + online reputation + vol targeting) → **NexusBrain** (the signal
    authority, always committing to BUY/SELL with conviction-scaled sizing).
    Output is a signal-only proposal.
+2a. **Entry plan** — `ApexIntegration.build_entry_plan` turns the direction
+   decision into an executable geometry: a **sniper entry** (LIMIT pullback to
+   a structural level, or CONFIRM continuation) with a tight invalidation and
+   tight take-profit, the **Chandelier trailing-stop** leg, and the
+   **NexusBrain lot size** derived from client equity + per-trade risk + the
+   sniper stop distance, scaled by entry quality. `review_geometry` merges
+   the trigger/stop/take into the broker-native review geometry — without
+   this stage the contract would see a zero stop and block every candidate.
 3. **Advisory review** — `candidate_contract.review_candidate` checks
    attestation (account binding, native EA, single-writer, entitlement,
    per-trade risk, portfolio ceiling, broker calc-profit/order-check). The

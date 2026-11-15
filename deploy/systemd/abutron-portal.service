@@ -10,7 +10,8 @@ Group=abutron
 WorkingDirectory=/opt/abutron-fx-v9
 Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-fx-v9/data
 Environment=ABUTRON_ENV=demo
-ExecStart=/usr/bin/python3 -m abutron.main
+Environment=PYTHONPATH=/opt/abutron-fx-v9/src
+ExecStart=/opt/abutron-fx-v9/.venv/bin/python -m abutron.main
 Restart=always
 RestartSec=5
 # Hardening

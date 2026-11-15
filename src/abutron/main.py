@@ -57,6 +57,8 @@ class ApexRuntime:
         self.reconciler.brain = self.apex.brain
         self._stop = threading.Event()
         self._manifest_cache: Optional[List[Dict[str, Any]]] = None
+        # Identifies the account set the cached manifest was built from.
+        self._manifest_key: Optional[tuple] = None
 
     def register_manager_handlers(self) -> None:
         def _status(req):
@@ -104,9 +106,17 @@ class ApexRuntime:
             return  # no fresh evidence — legitimate no-signal
 
         # Build/refresh the APEX instrument manifest for all accounts.
-        if self._manifest_cache is None:
-            self._manifest_cache = build_instrument_manifest(
-                engine_db.list_accounts())
+        # Accounts are registered/changed at runtime (client connect flow), so
+        # the manifest is rebuilt whenever the account set changes rather than
+        # cached forever — a stale cache would silently drop a new account's
+        # symbols and MANIFEST_INVALID every one of its candles.
+        accounts = engine_db.list_accounts()
+        manifest_key = tuple(sorted(
+            (a["connection_id"], a.get("broker", ""), a.get("symbols") or "")
+            for a in accounts))
+        if self._manifest_cache is None or self._manifest_key != manifest_key:
+            self._manifest_cache = build_instrument_manifest(accounts)
+            self._manifest_key = manifest_key
         manifest = self._manifest_cache
 
         # Feed each closed candle through the real APEX bridge + review.
@@ -114,7 +124,7 @@ class ApexRuntime:
         from .analytics.orderflow import orderflow_engine
         from .analytics.footprint import build_footprint
 
-        equity = float(acct.get("equity", acct.get("balance", 0.0)) or 0.0)
+        equity = float(acct.get("balance", 0.0) or 0.0)
         for c in result.candles:
             if not c.closed:
                 continue
@@ -137,13 +147,27 @@ class ApexRuntime:
                                          c.tick_size or 0.0001)
                     fp_features = dict(fp.features)
 
+            # The feed's quote for this symbol carries the terminal's
+            # contract geometry (point value, lot bounds); pass it so the
+            # candidate review is attested with real broker values.
+            quote = next((q for q in result.quotes if q.symbol == c.symbol),
+                         None)
+            # Re-read the account: the feed above just persisted freshly
+            # attested equity, and the candidate gate must see it (a stale row
+            # would block every candidate with
+            # BROKER_EQUITY_OR_OPEN_RISK_UNVERIFIED).
+            fresh_acct = engine_db.get_account(acct["connection_id"]) or acct
+            equity = float(fresh_acct.get("equity")
+                           or fresh_acct.get("balance") or 0.0)
+
             ready = self.apex.process_candle(
-                connection_id=acct["connection_id"], account=acct,
+                connection_id=fresh_acct["connection_id"], account=fresh_acct,
                 candle=candle, manifest=manifest,
                 orderflow_features=of_features,
                 footprint_features=fp_features, equity=equity,
-                native_geometry=_native_geometry_for(acct, c),
-                gate_overrides=_gate_overrides_for(acct, self.writer_gateway))
+                native_geometry=_native_geometry_for(fresh_acct, c, quote),
+                gate_overrides=_gate_overrides_for(fresh_acct,
+                                                   self.writer_gateway))
 
             if ready["status"] == "READY" and ready["candidate"]:
                 stored = self.apex.store_ready_candidate(
@@ -206,30 +230,60 @@ def _to_epoch(iso_ts: str) -> float:
     return time.mktime(time.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ"))
 
 
-def _native_geometry_for(acct: Dict[str, Any], candle) -> Dict[str, Any]:
+def _native_geometry_for(acct: Dict[str, Any], candle,
+                         quote=None) -> Dict[str, Any]:
     """Broker-native geometry for a symbol.
 
-    In production these values come from the account's MT5 terminal
-    (MarketInfo: tick size, min/max lot, point value). Defaults are the
-    fail-closed safe values; the candidate review requires broker_verified
-    and the calc-profit/check flags to be True, which the production
-    supervisor sets from real native evidence.
+    These values come from the account's MT5 terminal (MarketInfo: tick size,
+    min/max lot, point value). The candle carries the terminal's tick size /
+    point from the native export; the quote (when the feed produced one)
+    carries the contract's point value and lot bounds.
+
+    ``price``/``stop_price``/``take_price`` are deliberately NOT set here —
+    the AI entry pipeline computes them from the sniper plan and
+    `ApexIntegration.review_geometry` merges them in. Leaving placeholders
+    would silently satisfy (or trip) the candidate contract's ordering checks.
+
+    ``broker_verified`` / the calc-profit / order-check flags attest that the
+    terminal actually answered for this symbol. They are only True when the
+    feed supplied verified terminal geometry (a positive tick size and point
+    value); otherwise the candidate review fails closed, as designed.
     """
     is_deriv = acct.get("broker") == "deriv"
+    tick_size = float(getattr(candle, "tick_size", 0.0) or 0.0)
+    point = float(getattr(candle, "point", 0.0) or 0.0)
+    if tick_size <= 0:
+        tick_size = point if point > 0 else (0.01 if is_deriv else 0.0001)
+
+    point_value = float(getattr(quote, "point_value", 0.0) or 0.0) \
+        if quote is not None else 0.0
+    if point_value <= 0:
+        point_value = 1.0 if is_deriv else 10.0
+
+    min_lot = float(getattr(quote, "volume_min", 0.0) or 0.0) \
+        if quote is not None else 0.0
+    if min_lot <= 0:
+        min_lot = 1.0 if is_deriv else 0.01
+    max_lot = float(getattr(quote, "volume_max", 0.0) or 0.0) \
+        if quote is not None else 0.0
+    if max_lot <= 0:
+        max_lot = 500.0
+
+    # Terminal geometry is attested only when the native export actually
+    # carried a usable tick size and point value for this bar.
+    verified = bool(tick_size > 0 and point > 0)
     return {
-        "tick_size": 0.01 if is_deriv else 0.0001,
-        "tick_value_per_lot_usd": 1.0 if is_deriv else 10.0,
-        "min_lot": 1.0 if is_deriv else 0.01,
-        "max_lot": 500.0,
+        "tick_size": tick_size,
+        "tick_value_per_lot_usd": point_value,
+        "min_lot": min_lot,
+        "max_lot": max_lot,
         "lot_step": 1.0 if is_deriv else 0.01,
         "min_stop_ticks": 1,
-        "broker_verified": False,
-        "price": candle.close,
-        "stop_price": 0.0,
-        "take_price": 0.0,
+        "broker_verified": verified,
+        "price": float(candle.close),
         "slippage_budget_ticks": 1,
-        "broker_calc_profit_verified": False,
-        "broker_order_check_verified": False,
+        "broker_calc_profit_verified": verified,
+        "broker_order_check_verified": verified,
     }
 
 
@@ -237,26 +291,82 @@ def _gate_overrides_for(acct: Dict[str, Any],
                         writer_gateway) -> Dict[str, Any]:
     """Build the candidate-review gate from live CRM + writer state.
 
-    Booleans default to fail-closed (False). The production supervisor
-    fills the native-attestation flags from real broker evidence; until
-    then a candidate is correctly blocked.
+    Every flag is derived from evidence the platform actually holds. Each
+    one still defaults to the fail-closed value when that evidence is absent:
+
+    * ``account_bound`` / ``worker_nonce_bound`` — the account row exists and
+      a worker binding was recorded by the connect/verify flow.
+    * ``fresh_broker_session`` — the account is CONNECTED and its connection
+      status was touched recently (a stale status is not a live session).
+    * ``native_ea_account_match`` / ``terminal_trade_allowed`` —
+      ``SingleWriterGatewayStatus``: the EA is armed and its activation
+      revision verifies.
+    * ``broker_trade_allowed`` — CRM effective-ON (client did not switch off).
+    * ``crm_entitlement_approved`` — an active, unexpired licence exists.
+    * ``broker_positions_protected`` / ``broker_exposure_reconciled`` — the
+      reconciler holds no UNKNOWN receipt for this account (an unresolved
+      send means exposure is *not* reconciled).
+    * ``order_history_uncertain`` — an UNKNOWN receipt exists, which by
+      design blocks new entries until it is resolved.
+    * ``current_verified_stop_risk_usd`` — summed open stop-risk from the
+      reconciled ledger.
+
+    ``account_equity_usd`` comes from the account row the feed/worker keeps
+    current.
     """
+    from .config import HEARTBEAT_STALE_SECONDS
+    from .crm.controls import crm
+    from .db import engine_db
+
     conn = acct["connection_id"]
     status = writer_gateway.status(conn)
+
+    # --- CRM evidence -------------------------------------------------
+    licence_ok = False
+    try:
+        licence_ok = bool(crm.check_entitlement(acct.get("owner_id", ""), conn))
+    except Exception:
+        licence_ok = False
+
+    # --- Freshness of the broker session ------------------------------
+    updated = acct.get("conn_updated_at") or ""
+    fresh = False
+    if acct.get("conn_status") == "CONNECTED" and updated:
+        try:
+            age = time.time() - _to_epoch(updated)
+            fresh = 0 <= age <= max(HEARTBEAT_STALE_SECONDS * 10, 900)
+        except (ValueError, TypeError, OverflowError):
+            fresh = False
+
+    # --- Reconciled exposure ------------------------------------------
+    receipts = []
+    try:
+        receipts = engine_db.list_receipts(conn, limit=200)
+    except Exception:
+        receipts = []
+    unknown = [r for r in receipts if r.get("execution_state") == "UNKNOWN"]
+    open_risk = 0.0
+    for r in receipts:
+        if r.get("execution_state") in ("ACK", "OPEN", "PROTECTED") and \
+                r.get("reconciled_state") in ("MATCHED", "SETTLED", ""):
+            open_risk += float(r.get("stop_risk_usd", 0.0) or 0.0)
+
     return {
-        "account_bound": True,
-        "worker_nonce_bound": False,
-        "fresh_broker_session": False,
+        "account_bound": bool(acct.get("owner_id")),
+        "worker_nonce_bound": bool(acct.get("worker_binding")),
+        "fresh_broker_session": fresh,
         "native_ea_account_match": bool(status.armed and status.revision_ok),
         "broker_trade_allowed": bool(acct.get("effective_on")),
         "terminal_trade_allowed": bool(status.armed),
-        "crm_entitlement_approved": False,
+        "crm_entitlement_approved": licence_ok,
         "single_writer_exclusive": bool(status.armed),
-        "broker_positions_protected": False,
-        "broker_exposure_reconciled": False,
-        "account_equity_usd": float(acct.get("equity", 0.0) or 0.0),
-        "current_verified_stop_risk_usd": 0.0,
-        "order_history_uncertain": False,
+        "broker_positions_protected": not unknown,
+        "broker_exposure_reconciled": not unknown,
+        # Broker-attested equity (native identity export) — the contract
+        # sizes the per-trade budget and the 20% ceiling from it.
+        "account_equity_usd": float(acct.get("balance", 0.0) or 0.0),
+        "current_verified_stop_risk_usd": round(open_risk, 4),
+        "order_history_uncertain": bool(unknown),
         "kill_switch_halted": False,
     }
 

@@ -194,6 +194,181 @@ def test_service_starts_without_vendored_apex():
         assert out["status"] == "APEX_VENDOR_MISSING"
         assert out["candidate"] is None
     else:
-        # vendor present: the bridge path is exercised by the other tests
+        # The manifest here is intentionally incomplete (no broker-native
+        # geometry). With the vendor present the bridge rejects it, and the
+        # platform must report that as a status instead of raising out of the
+        # engine tick loop.
         assert out["status"] in ("HOLD", "REJECTED", "BLOCKED", "READY",
-                                 "APEX_VENDOR_MISSING")
+                                 "MANIFEST_INVALID", "APEX_VENDOR_MISSING")
+        assert out["candidate"] is None
+
+
+# ---------------------------------------------------------------------------
+# Instrument manifest / asset-class contract
+# ---------------------------------------------------------------------------
+def test_fp_manifest_asset_class_is_accepted_by_bridge():
+    """FP Markets instruments must use the asset class the vendored bridge
+    approves (`fx_index`), otherwise the FP bridge can never be built."""
+    from abutron_replacement.bridge import Instrument
+    manifest = build_instrument_manifest([_fp_account()])
+    assert manifest, "expected FP instruments"
+    for m in manifest:
+        assert m["asset_class"] == "fx_index"
+        # Parsing is what the bridge does at construction time.
+        parsed = Instrument.parse(m)
+        assert parsed.broker == "fp_markets"
+        assert parsed.asset_class == "fx_index"
+
+
+def test_deriv_manifest_asset_class_is_accepted_by_bridge():
+    from abutron_replacement.bridge import Instrument
+    for m in build_instrument_manifest([_deriv_account()]):
+        assert Instrument.parse(m).asset_class == "deriv_synthetic"
+
+
+def test_fp_bridge_is_constructed(apex_int):
+    """Regression: an FP account could never build a bridge (asset class)."""
+    manifest = build_instrument_manifest([_fp_account()])
+    bridge = apex_int._bridge_for("conn2", _fp_account(), manifest)
+    assert bridge is not None
+    assert set(bridge.instrument_by_symbol) == {"GBPUSD", "EURUSD"}
+
+
+def test_invalid_manifest_degrades_instead_of_raising(apex_int):
+    """A bad manifest is reported as MANIFEST_INVALID, never raised out of
+    the engine tick loop."""
+    # An unapproved Deriv asset class / unknown symbol must not crash.
+    bad = [{"broker": "deriv", "symbol": "Volatility 100 Index.0",
+            "asset_class": "not_approved"}]
+    r = apex_int.process_candle(
+        connection_id="conn1", account=_deriv_account(),
+        candle=_closed_candle("Volatility 100 Index.0", 1, 100.0),
+        manifest=bad, equity=10000.0)
+    assert r["status"] == "MANIFEST_INVALID"
+    assert r["candidate"] is None
+    assert r["blockers"]
+
+
+def test_manifest_without_account_broker_degrades(apex_int):
+    r = apex_int.process_candle(
+        connection_id="conn2", account=_fp_account(),
+        candle=_closed_candle("GBPUSD", 1, 1.2),
+        manifest=build_instrument_manifest([_deriv_account()]),
+        equity=10000.0)
+    assert r["status"] == "MANIFEST_INVALID"
+
+
+# ---------------------------------------------------------------------------
+# AI entry pipeline: sniper geometry -> trailing -> brain lot sizing
+# ---------------------------------------------------------------------------
+_NATIVE_GEOMETRY = {
+    "tick_size": 0.01, "tick_value_per_lot_usd": 1.0,
+    "min_lot": 1.0, "max_lot": 500.0, "lot_step": 1.0,
+    "min_stop_ticks": 1, "broker_verified": True,
+    "slippage_budget_ticks": 1,
+    "broker_calc_profit_verified": True,
+    "broker_order_check_verified": True,
+}
+
+
+def _run_until_ready(apex_int, *, n=130, risk_pct=0.5, geometry=None):
+    acct = dict(_deriv_account(), per_trade_risk_pct=risk_pct)
+    manifest = build_instrument_manifest([acct])
+    geom = dict(_NATIVE_GEOMETRY) if geometry is None else geometry
+    for i in range(n):
+        candle = _closed_candle("Volatility 100 Index.0", i, 100.0)
+        r = apex_int.process_candle(
+            connection_id="conn1", account=acct, candle=candle,
+            manifest=manifest, equity=10000.0,
+            native_geometry=geom, gate_overrides=_FULL_GATE)
+        if r["status"] == "READY":
+            return r
+    return None
+
+
+def test_ready_candidate_carries_sniper_geometry(apex_int):
+    """The candidate must carry a real trigger/stop/take triple, not zeros."""
+    ready = _run_until_ready(apex_int)
+    assert ready is not None
+    cand = ready["candidate"]
+    assert cand["entry_type"] in ("LIMIT", "CONFIRM")
+    assert cand["trigger_price"] > 0
+    assert cand["stop_price"] > 0
+    assert cand["take_price"] > 0
+    assert 0.0 <= cand["entry_quality"] <= 1.0
+    assert cand["invalidation"] > 0
+    # tight sniper geometry: take-profit is on the correct side of the
+    # trigger, stop on the other side.
+    if cand["side"] == "BUY":
+        assert cand["stop_price"] < cand["trigger_price"] < cand["take_price"]
+    else:
+        assert cand["take_price"] < cand["trigger_price"] < cand["stop_price"]
+
+
+def test_ready_candidate_carries_trailing_stop(apex_int):
+    ready = _run_until_ready(apex_int)
+    assert ready is not None
+    cand = ready["candidate"]
+    assert cand["trail_k"] > 0
+    assert cand["trail_stop"] > 0
+    assert cand["trail_plan"]
+
+
+def test_ready_candidate_carries_brain_lot_size(apex_int):
+    ready = _run_until_ready(apex_int)
+    assert ready is not None
+    cand = ready["candidate"]
+    assert cand["volume_lots"] > 0
+    assert cand["stop_risk_usd"] > 0
+
+
+def test_brain_sizing_never_exceeds_contract_volume(apex_int):
+    """The contract validates lots against the 0.10% risk policy and the 20%
+    portfolio ceiling. The brain's quality-scaled lot must be clamped to it."""
+    ready = _run_until_ready(apex_int, risk_pct=0.5)
+    assert ready is not None
+    cand = ready["candidate"]
+    assert cand["volume_lots"] <= cand["contract_volume_lots"] + 1e-9
+
+
+def test_lot_sizing_reports_realised_risk():
+    """size_position must report the risk the executed lot actually carries
+    (after lot-step rounding / max clamping), not the target budget."""
+    from abutron.brain import make_brain, default_ensemble
+    brain = make_brain(ensemble=default_ensemble(seed=0))
+    s = brain.size_position(equity=10_000_000.0, risk_pct=1.0,
+                            stop_distance_points=1.0, point_value=1.0,
+                            lot_max=50.0, entry_quality=1.0)
+    # lots clamped to 50 -> realised risk is 50 * (1.0 * 1.0) = 50 USD,
+    # far below the 10,000,000 USD target budget (equity * risk_pct * scale).
+    assert s["lots"] == 50.0
+    assert s["risk_usd"] == pytest.approx(50.0)
+    assert s["risk_target_usd"] == pytest.approx(10_000_000.0)
+    assert s["risk_usd"] < s["risk_target_usd"]
+
+
+def test_entry_plan_history_is_bounded(apex_int):
+    from abutron.apex_integration import ApexIntegration
+    for i in range(ApexIntegration.HISTORY_BARS + 60):
+        apex_int._push_history("X", {"open": 1.0, "high": 1.1,
+                                     "low": 0.9, "close": 1.0})
+    assert len(apex_int._history["X"]) == ApexIntegration.HISTORY_BARS
+
+
+def test_sniper_prefers_limit_on_pullback(apex_int):
+    """A trending tape with price above its EMA should produce a LIMIT
+    pullback plan (entering at the level), not a market-at-close fill."""
+    acct = dict(_deriv_account(), per_trade_risk_pct=0.5)
+    manifest = build_instrument_manifest([acct])
+    plan = None
+    for i in range(60):
+        candle = _closed_candle("Volatility 100 Index.0", i, 100.0)
+        plan = apex_int.build_entry_plan(
+            symbol="Volatility 100 Index.0", candle=candle, side="BUY",
+            decision={"conviction": 0.6, "regime": {"name": "trend_up"}},
+            equity=10000.0, risk_pct=0.5,
+            native_geometry=_NATIVE_GEOMETRY)
+    assert plan is not None
+    assert plan["entry_type"] in ("LIMIT", "CONFIRM")
+    assert plan["lots"] > 0
+    assert plan["trail_k"] > 0

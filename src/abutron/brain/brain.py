@@ -428,8 +428,13 @@ class NexusBrain:
         lots = risk_usd / risk_per_lot
         lots = max(lot_min, round(lots / lot_step) * lot_step)
         lots = min(lots, lot_max)
+        # Report the risk the *executed* lot actually carries. Rounding to
+        # the lot step and clamping can move it away from the intended
+        # budget, so the realised figure (not the target) must be reported —
+        # downstream portfolio-ceiling checks depend on it.
         actual_risk = lots * risk_per_lot
-        return {"lots": round(lots, 4), "risk_usd": round(risk_usd, 4),
+        return {"lots": round(lots, 4), "risk_usd": round(actual_risk, 4),
+                "risk_target_usd": round(risk_usd, 4),
                 "risk_per_lot": round(risk_per_lot, 4),
                 "risk_scale": round(risk_scale, 4),
                 "stop_distance_points": round(stop_distance_points, 4),

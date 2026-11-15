@@ -19,3 +19,9 @@ data/
 .DS_Store
 .vscode/
 .idea/
+
+# Vendored APEX runtime artifacts (its test suite writes these)
+vendor/abutron-apex/apex11/state/
+vendor/abutron-apex/state/
+# Vendored APEX default log/decision journal dir (relative to CWD)
+/state/

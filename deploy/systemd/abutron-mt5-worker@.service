@@ -10,12 +10,19 @@ Group=abutron
 WorkingDirectory=/opt/abutron-fx-v9
 Environment=ABUTRON_CONNECTION_ID=%i
 Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-fx-v9/data
-ExecStart=/usr/bin/python3 -m abutron.workers.mt5_worker
+Environment=PYTHONPATH=/opt/abutron-fx-v9/src
+Environment=WINEPREFIX=/var/lib/abutron-fx-v9/data/mt5/wineprefix
+Environment=WINEDEBUG=-all
+ExecStart=/opt/abutron-fx-v9/.venv/bin/python -m abutron.workers.mt5_worker
 Restart=always
 RestartSec=10
 NoNewPrivileges=true
+# Wine writes into the prefix under the data root and into /opt (the MT5
+# installation copied into the app dir), so a read-only system tree would
+# break terminal startup. The data root stays the only stateful location.
 ProtectSystem=full
-ReadWritePaths=/var/lib/abutron-fx-v9/data
+ProtectHome=true
+ReadWritePaths=/var/lib/abutron-fx-v9/data /opt/abutron-fx-v9
 PrivateTmp=true
 
 [Install]

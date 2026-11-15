@@ -47,7 +47,23 @@ class BaseBrokerFeed:
             return FeedResult(connection_id, self.broker_name, login,
                               [], [], False, ["EXPORT_MISSING"], False)
 
-        ident = raw["identity"]
+        ident = raw["identity"] or {}
+        # Account equity is broker-attested evidence from the terminal. The
+        # candidate contract sizes every trade from it, so a stale/zero value
+        # silently blocks trading (BROKER_EQUITY_OR_OPEN_RISK_UNVERIFIED).
+        # Persist it on the account row whenever the export carries it.
+        try:
+            equity = float(ident.get("equity", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            equity = 0.0
+        if equity > 0:
+            from ..db import engine_db
+            acct = engine_db.get_account(connection_id)
+            if acct is not None and float(acct.get("balance") or 0.0) != equity:
+                acct["balance"] = equity
+                acct["equity"] = equity
+                engine_db.upsert_account(acct)
+
         envelope_errors = validate_export_envelope(
             {**raw, "broker": self.broker_name},
             connection_id=connection_id, login=login, broker=self.broker_name)

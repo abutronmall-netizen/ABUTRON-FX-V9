@@ -1,0 +1,16 @@
+[Unit]
+Description=ABUTRON operations health snapshot
+After=abutron-portal.service
+
+[Service]
+Type=oneshot
+User=abutron
+Group=abutron
+WorkingDirectory=/opt/abutron-fx-v9
+Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-fx-v9/data
+Environment=PYTHONPATH=/opt/abutron-fx-v9/src
+ExecStart=/opt/abutron-fx-v9/.venv/bin/python -m abutron.workers.health_worker
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/abutron-fx-v9/data
+PrivateTmp=true

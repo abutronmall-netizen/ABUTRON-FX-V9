@@ -61,6 +61,17 @@ BRAIN_MODEL_DIR = os.getenv("ABUTRON_BRAIN_DIR",
 LIVE_TRADING_ENABLED = os.getenv("ABUTRON_LIVE_TRADING_ENABLED", "true").lower() in (
     "1", "true", "yes")
 
+# ---------------------------------------------------------------------------
+# Broker-native candidate contract risk policy
+# ---------------------------------------------------------------------------
+# The vendored candidate_contract enforces an exact policy: it blocks unless
+# per_trade_risk_pct == 0.001 AND portfolio_ceiling_pct == 0.20 (reason code
+# RISK_POLICY_MUST_MATCH_ABUTRON_010_AND_20). Those are the authoritative
+# numbers and must not be "helpfully" overridden, so they are named here once
+# instead of being scattered as literals at the call site.
+CONTRACT_PER_TRADE_RISK_PCT = 0.001   # 0.10% of account equity per trade
+CONTRACT_PORTFOLIO_CEILING_PCT = 0.20  # 20% of equity in aggregate stop-risk
+
 # Decision timing
 DECISION_TIMEFRAMES = ("M5", "M15", "H1")
 PRIMARY_TIMEFRAME = "M5"

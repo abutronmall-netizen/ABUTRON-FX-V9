@@ -156,7 +156,22 @@ class Mt5TerminalManager:
         return self._terminals.get(connection_id)
 
     def read_native_export(self, connection_id: str) -> Optional[Dict]:
-        """Read the latest native export (bars + identity) from MQL5/Files."""
+        """Read the latest native export (bars + identity) from MQL5/Files.
+
+        The EA writes two files per cycle:
+
+        * ``ABUTRON_NATIVE_ACCOUNT_V2_<nonce>.txt`` — a JSON *envelope*
+          (``connection_id``, ``login``, ``broker``, ``server``, ``nonce``,
+          ``challenge``, ``worker_health_ts``).
+        * ``ABUTRON_NATIVE_BARS_V2_<nonce>.txt`` — ``{"bars": [...]}``.
+
+        The envelope fields are what `validate_export_envelope` checks, so
+        they are lifted out of the identity file into the top level of the
+        returned dict. Previously only the raw identity blob was returned at
+        ``identity``, so every export failed envelope validation with
+        EXPORT_CONNECTION_MISMATCH / EXPORT_NONCE_MISSING / … and the engine
+        never saw an accepted candle.
+        """
         term = self._terminals.get(connection_id)
         if term is None or not term.is_running:
             return None
@@ -173,12 +188,29 @@ class Mt5TerminalManager:
             bars_raw = json.loads(open(bars).read())
         except (ValueError, OSError):
             return None
-        return {
+        if not isinstance(identity, dict):
+            return None
+
+        # The bars file is {"bars": [...]}; tolerate a bare list too.
+        if isinstance(bars_raw, dict):
+            bars_list = bars_raw.get("bars", [])
+        elif isinstance(bars_raw, list):
+            bars_list = bars_raw
+        else:
+            return None
+
+        export = {
             "identity": identity,
-            "bars": bars_raw,
+            "bars": bars_list,
             "identity_file": ident,
             "bars_file": bars,
         }
+        # Lift the envelope fields the feed-quality contract validates.
+        for key in ("connection_id", "login", "broker", "server", "nonce",
+                    "challenge", "worker_health_ts"):
+            if key in identity:
+                export[key] = identity[key]
+        return export
 
     def health(self, connection_id: str) -> Dict:
         term = self._terminals.get(connection_id)

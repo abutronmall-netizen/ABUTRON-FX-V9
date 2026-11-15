@@ -55,6 +55,12 @@ class AccountRow(Base):
     # trusted broker worker (never by a client request or a login record).
     worker_binding: Mapped[str] = mapped_column(String(64), default="")
     broker_verified_at: Mapped[str] = mapped_column(String(32), default="")
+    # Broker-attested account equity/balance from the native identity export.
+    # The candidate contract computes the per-trade risk budget and the 20%
+    # portfolio ceiling from this figure, so it must come from the terminal —
+    # never from a client-supplied or defaulted value.
+    equity: Mapped[float] = mapped_column(Float, default=0.0)
+    balance: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class LinkAttemptRow(Base):
@@ -297,6 +303,8 @@ class EngineDB:
                 "conn_error": "VARCHAR(256) DEFAULT ''",
                 "worker_binding": "VARCHAR(64) DEFAULT ''",
                 "broker_verified_at": "VARCHAR(32) DEFAULT ''",
+                "equity": "FLOAT DEFAULT 0",
+                "balance": "FLOAT DEFAULT 0",
             })
             _migrate_columns(self._engine, "candidates", {
                 "price": "FLOAT DEFAULT 0",
@@ -336,7 +344,11 @@ class EngineDB:
                       "portfolio_cap_pct", "desired_on", "effective_on",
                       "activation_revision", "ea_sha256", "symbols",
                       "conn_status", "conn_updated_at", "conn_error",
-                      "worker_binding", "broker_verified_at"):
+                      "worker_binding", "broker_verified_at",
+                      # Broker-attested account equity from the native
+                      # identity export — the candidate contract sizes every
+                      # trade from these values.
+                      "equity", "balance"):
                 if k in acct:
                     setattr(row, k, acct[k])
             s.commit()
