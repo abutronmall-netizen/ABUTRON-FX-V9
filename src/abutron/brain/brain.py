@@ -425,6 +425,18 @@ class NexusBrain:
         if risk_per_lot <= 0:
             return {"lots": 0.0, "risk_usd": risk_usd,
                     "risk_per_lot": 0.0, "reason": "BAD_RISK_PER_LOT"}
+        # Small-account guard: if the broker's minimum lot already risks more
+        # than the intended per-trade risk, the account is too small for this
+        # instrument. Skip rather than floor to lot_min and over-risk — on
+        # tiny equity the fixed minimum-lot risk compounds into a >100%
+        # drawdown death spiral (sizing can't scale below lot_min).
+        min_lot_risk = lot_min * risk_per_lot
+        if min_lot_risk > risk_usd:
+            return {"lots": 0.0, "risk_usd": risk_usd,
+                    "risk_per_lot": risk_per_lot, "risk_scale": risk_scale,
+                    "stop_distance_points": stop_distance_points,
+                    "min_lot_risk": round(min_lot_risk, 4),
+                    "reason": "MIN_LOT_RISK_EXCEEDS_CAP"}
         lots = risk_usd / risk_per_lot
         lots = max(lot_min, round(lots / lot_step) * lot_step)
         lots = min(lots, lot_max)

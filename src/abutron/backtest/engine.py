@@ -453,7 +453,13 @@ class BacktestEngine:
             point_value=self.point_value, lot_step=self.lot_step,
             lot_min=self.lot_min, lot_max=self.lot_max,
             entry_quality=snip.entry_quality)
-        lots = max(self.lot_min, sizing.get("lots", self.lot_min))
+        # If sizing refused the trade (e.g. MIN_LOT_RISK_EXCEEDS_CAP when
+        # the account is too small for the instrument's minimum lot), skip
+        # it — do NOT force the minimum lot and over-risk (that compounds
+        # into a >100% drawdown on tiny equity).
+        if sizing.get("lots", 0.0) <= 0.0:
+            return None
+        lots = sizing["lots"]
         trail = self.trailing.plan(
             direction=prop.direction, highs=[c.high], lows=[c.low],
             atr_val=a, entry_price=fill[0],
