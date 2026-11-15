@@ -46,23 +46,40 @@ DEFAULT_GEOMETRY = SymbolGeometry(tp_atr_mult=0.5,
                                   pullback_atr_max=1.5)
 
 # Refined per-symbol geometry from the win-rate optimizer (held-out
-# validated). These are the exact TP/SL + filter combos that produced the
-# ~82% win rate on each instrument.
+# validated, re-optimised at equity=$50). These are the exact TP/SL +
+# filter combos that produced the ~75–89% win rate on each instrument.
+# NOTE: win rate is equity-scale-invariant; the equity=$50 run re-picks
+# slightly wider SLs on some FX pairs. The small-account sizing guard in
+# brain.size_position skips instruments whose minimum lot over-risks a
+# tiny account, so these geometries are safe to trade on any equity.
 GEOMETRY_BY_SYMBOL: Dict[str, SymbolGeometry] = {
-    "Boom 1000 Index.0": SymbolGeometry(tp_atr_mult=0.4,
+    # Deriv synthetic indices
+    "Boom 1000 Index.0": SymbolGeometry(tp_atr_mult=0.7,
                                         invalidation_atr_frac=0.3,
-                                        require_trend=True),
+                                        require_trend=True,
+                                        require_momentum=True),
     "Boom 600 Index.0": SymbolGeometry(tp_atr_mult=0.3,
                                        invalidation_atr_frac=0.3),
+    "Crash 600 Index.0": SymbolGeometry(tp_atr_mult=0.4,
+                                        invalidation_atr_frac=0.3),
+    "Volatility 10 Index.0": SymbolGeometry(tp_atr_mult=0.3,
+                                            invalidation_atr_frac=0.3,
+                                            require_momentum=True),
+    # FP-Markets FX + indices
     "EURUSD.r": SymbolGeometry(tp_atr_mult=0.3,
-                               invalidation_atr_frac=0.5,
-                               require_momentum=True),
+                               invalidation_atr_frac=0.8),
     "GBPUSD.r": SymbolGeometry(tp_atr_mult=0.3,
                                invalidation_atr_frac=0.5,
                                require_momentum=True),
     "NZDUSD.r": SymbolGeometry(tp_atr_mult=0.3,
-                               invalidation_atr_frac=0.3,
+                               invalidation_atr_frac=0.8,
                                require_momentum=True),
+    "US100": SymbolGeometry(tp_atr_mult=0.3,
+                            invalidation_atr_frac=0.5,
+                            require_momentum=True),
+    "US30": SymbolGeometry(tp_atr_mult=0.4,
+                           invalidation_atr_frac=0.5,
+                           require_momentum=True),
 }
 
 _FILTER_WINDOW = 50

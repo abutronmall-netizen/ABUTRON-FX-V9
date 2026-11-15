@@ -7,6 +7,8 @@ use (via ``apply_entry_filters``).
 """
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from abutron.apex.geometry import (
@@ -32,14 +34,20 @@ def _falling(n=60, start=100.0, step=0.5):
 
 # --- geometry resolution -------------------------------------------------
 def test_geometry_for_refined_symbols():
+    # Refined at equity=$50 (win-rate optimizer, held-out validated).
     boom = geometry_for("Boom 1000 Index.0")
-    assert boom.tp_atr_mult == 0.4
+    assert boom.tp_atr_mult == 0.7
     assert boom.invalidation_atr_frac == 0.3
     assert boom.require_trend is True
+    assert boom.require_momentum is True
+    us100 = geometry_for("US100")
+    assert us100.tp_atr_mult == 0.3
+    assert us100.invalidation_atr_frac == 0.5
+    assert us100.require_momentum is True
     eurusd = geometry_for("EURUSD.r")
     assert eurusd.tp_atr_mult == 0.3
-    assert eurusd.invalidation_atr_frac == 0.5
-    assert eurusd.require_momentum is True
+    assert eurusd.invalidation_atr_frac == 0.8
+    assert eurusd.require_momentum is False
 
 
 def test_geometry_for_unknown_symbol_uses_default():
@@ -50,9 +58,17 @@ def test_geometry_for_unknown_symbol_uses_default():
 
 
 def test_geometry_by_symbol_is_immutable_config():
-    # all refined geometries use a tight TP (win-rate lever)
+    # all refined geometries use a sane TP/SL ATR multiple
     for sym, g in GEOMETRY_BY_SYMBOL.items():
-        assert g.tp_atr_mult <= 0.5, sym
+        assert 0.2 <= g.tp_atr_mult <= 1.0, sym
+        assert 0.2 <= g.invalidation_atr_frac <= 1.0, sym
+    # SymbolGeometry is frozen (immutable config)
+    g = GEOMETRY_BY_SYMBOL["Boom 600 Index.0"]
+    try:
+        g.tp_atr_mult = 9.9  # type: ignore[misc]
+        raise AssertionError("SymbolGeometry should be frozen")
+    except (dataclasses.FrozenInstanceError, AttributeError):
+        pass
 
 
 # --- shared entry filters ------------------------------------------------
