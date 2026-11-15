@@ -149,56 +149,26 @@ class BacktestEngine:
         p = pos.point or self.point
         return p if p > 0 else 1e-9
 
-    # rolling window used by the regime / momentum entry filters
-    _FILTER_WINDOW = 50
-
     def _entry_allowed(self, prop, closes, highs, lows, a, idx) -> tuple:
         """Return (allowed: bool, reason: str) for high-precision entry
-        filters. All filters remove low-probability setups to raise win
-        rate; a rejected entry is skipped (counted by the caller).
+        filters. Delegates to the shared ``apply_entry_filters`` so the
+        backtest and the live APEX engine select trades identically.
 
-        Filters are computed on a rolling window of history UP TO the
-        current bar `idx` (point-in-time, no lookahead) so they are
-        stationary and reproduce regardless of dataset size.
+        Filters remove low-probability setups to raise win rate; a
+        rejected entry is skipped (counted by the caller). Computed on a
+        rolling window of history UP TO the current bar ``idx``
+        (point-in-time, no lookahead).
         """
-        # conviction floor
-        if self.min_conviction > 0 and prop.conviction < self.min_conviction:
-            return False, f"LOW_CONVICTION({prop.conviction:.3f})"
-        # volatility filter (ATR as % of price)
-        price = closes[idx] if idx < len(closes) and closes else 0.0
-        if price:
-            atr_pct = (a / price) * 100.0
-            if atr_pct < self.min_atr_pct:
-                return False, f"LOW_VOL({atr_pct:.3f}%)"
-            if atr_pct > self.max_atr_pct:
-                return False, f"HIGH_VOL({atr_pct:.3f}%)"
-        end = idx + 1
-        w = self._FILTER_WINDOW
-        lo = max(0, end - w)
-        closes_w = closes[lo:end]
-        highs_w = highs[lo:end]
-        lows_w = lows[lo:end]
-        # regime filter: only trade trending regimes
-        if self.require_trend_regime and len(closes_w) > 10:
-            from ..brain.features import _atr as _f_atr
-            from ..brain.brain import detect_regime
-            try:
-                regime = detect_regime(closes_w, _f_atr(highs_w, lows_w, closes_w))
-            except Exception:
-                regime = ""
-            if regime and regime not in ("trend_up", "trend_down"):
-                return False, f"REGIME({regime})"
-        # momentum confirmation: only trade WITH the momentum (raises win
-        # rate). A BUY needs upward momentum (RSI > 50), a SELL needs
-        # downward momentum (RSI < 50); trades against momentum are dropped.
-        if self.require_momentum and len(closes_w) > 14:
-            from ..brain.features import _rsi
-            rsi = _rsi(closes_w)
-            if prop.direction == "BUY" and rsi < 50.0:
-                return False, f"RSI_NO_UP_MOM({rsi:.1f})"
-            if prop.direction == "SELL" and rsi > 50.0:
-                return False, f"RSI_NO_DOWN_MOM({rsi:.1f})"
-        return True, ""
+        from ..apex.geometry import SymbolGeometry, apply_entry_filters
+        geom = SymbolGeometry(
+            tp_atr_mult=0.0,
+            invalidation_atr_frac=0.0,
+            require_trend=self.require_trend_regime,
+            require_momentum=self.require_momentum,
+            min_conviction=self.min_conviction,
+            min_atr_pct=self.min_atr_pct,
+            max_atr_pct=self.max_atr_pct)
+        return apply_entry_filters(prop, closes, highs, lows, a, geom, idx)
 
     @staticmethod
     def _to_epoch(iso: str) -> float:

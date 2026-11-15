@@ -274,12 +274,49 @@ class ApexEngine:
         # entry plan (pullback-to-level or confirmation) with a tight
         # invalidation instead of a naive market-at-close entry.
         from .indicators import atr
+        from .geometry import geometry_for, apply_entry_filters
+        from .sniper import SniperEntryEngine
         a = atr(highs, lows, closes, 14) or 0.0
         direction = proposal.direction
+
+        # Per-symbol win-rate geometry (TP/SL ATR multiples + entry
+        # filters) validated out-of-sample by the optimizer. The live
+        # engine trades with the exact geometry the backtest measured.
+        geom = geometry_for(c.symbol)
+
+        # High-precision entry filters (trade selection for win rate, NOT
+        # a risk gate). A rejected setup is journaled and skipped; valid
+        # setups always proceed. Computed on the point-in-time history.
+        filt_ok, filt_reason = apply_entry_filters(
+            proposal, closes, highs, lows, a, geom, idx=-1)
+        if not filt_ok:
+            self.journal.record(
+                connection_id=connection_id, broker=broker,
+                owner_id=owner_id, symbol=c.symbol,
+                timeframe=c.timeframe, bar_open=c.open_time,
+                regime=proposal.regime,
+                opinions=[o.to_dict() for o in
+                          (regime_op, trend_op, meanrev_op, breakout_op,
+                           portfolio_op)],
+                decision=direction, gemma=gemma,
+                reason=f"ENTRY_FILTERED_{filt_reason}",
+                detail={"geometry": {
+                    "tp_atr": geom.tp_atr_mult,
+                    "sl_atr": geom.invalidation_atr_frac,
+                    "require_trend": geom.require_trend,
+                    "require_momentum": geom.require_momentum}},
+                brain=proposal.to_dict())
+            return None
+
         # Brain's learned entry bias: after losses the brain prefers
         # CONFIRM entries (never enter too early) and floors entry quality.
         bias = self.brain.get_entry_bias(c.symbol, proposal.regime)
-        sniper = sniper_engine.plan(
+        # Per-symbol sniper engine carrying the validated TP/SL geometry.
+        sniper_engine_sym = SniperEntryEngine(
+            tp_atr_mult=geom.tp_atr_mult,
+            invalidation_atr_frac=geom.invalidation_atr_frac,
+            pullback_atr_max=geom.pullback_atr_max)
+        sniper = sniper_engine_sym.plan(
             symbol=c.symbol, direction=direction,
             closes=closes, highs=highs, lows=lows, atr_val=a,
             of_features=of_snap.features if of_snap else {},

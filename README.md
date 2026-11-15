@@ -284,8 +284,17 @@ PYTHONPATH=src .venv/bin/python -m abutron.backtest.optimize_all \\
 sweeps ~96 combos including tight TPs (0.3–0.5 ATR) and conviction
 floors for refining the best instruments. Across the full dataset the
 top symbols reach **~82% held-out win rate** (Boom 1000, EURUSD) — the
-expectancy-guarded ceiling for this geometry; a trained brain is the
-lever that lifts it further.
+expectancy-guarded ceiling for this geometry.
+
+**Live wiring** — the validated per-symbol geometry is encoded in
+`src/abutron/apex/geometry.py` (`GEOMETRY_BY_SYMBOL`) and applied by the
+live APEX engine (`ApexEngine._evaluate_symbol`): each instrument trades
+with its optimized TP/SL ATR multiples, and the shared entry filters
+(conviction / volatility / trend / momentum) drop low-probability setups
+before the order reaches the EA. The backtest engine uses the **same**
+filter via `apply_entry_filters`, so live and backtest select trades
+identically. A filtered setup is journaled (`ENTRY_FILTERED_*`) and
+skipped — trade selection for win rate, not a risk gate.
 
 ## Training the brain
 
