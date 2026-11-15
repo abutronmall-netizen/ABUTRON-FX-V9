@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import gzip
 import json
 import os
 import sys
@@ -169,12 +170,22 @@ def _to_float(v: Any) -> float:
 
 
 def load_trade_file(path: str) -> List[Trade]:
-    """Load trades from a CSV or JSON file (auto-detected)."""
+    """Load trades from a CSV/CSV.gz or JSON file (auto-detected).
+
+    MT5/broker native deal exports (rows per DEAL with entry_code/
+    position_id) are reconstructed into closed trades; simple one-row-
+    per-trade CSVs/JSON are read directly.
+    """
     trades: List[Trade] = []
     ext = os.path.splitext(path)[1].lower()
     try:
-        if ext in (".csv", ".txt"):
-            with open(path, newline="", encoding="utf-8-sig") as fh:
+        if ext in (".csv", ".txt", ".gz", ".csv.gz", ""):
+            # peek header to detect MT5 deals format
+            with _open_csv(path) as fh:
+                fields = list(csv.DictReader(fh).fieldnames or [])
+            if is_mt5_deals(fields):
+                return load_mt5_deals(path)
+            with _open_csv(path) as fh:
                 reader = csv.DictReader(fh)
                 cols = _detect_columns(list(reader.fieldnames or []))
                 for row in reader:
@@ -281,6 +292,79 @@ def _match_symbol(s: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# MT5 / broker deals.csv reconstruction
+# --------------------------------------------------------------------------
+# Broker native deal exports (MT5) record one row per DEAL, not per trade:
+# a position is an OPEN deal (entry_code=0) plus a CLOSE deal (entry_code=1)
+# sharing a position_id. We pair them to reconstruct each closed trade.
+# deal_type convention (verified 100% against profit/move agreement):
+#   0 = BUY, 1 = SELL.
+_MT5_DEAL_TYPE = {0: "BUY", 1: "SELL"}
+
+
+def _open_csv(path: str):
+    """Open a possibly-gzipped CSV for reading."""
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8-sig", newline="")
+    return open(path, newline="", encoding="utf-8-sig")
+
+
+def is_mt5_deals(fieldnames: List[str]) -> bool:
+    return any(_norm(f) in ("entry_code", "position_id")
+               for f in (fieldnames or []))
+
+
+def load_mt5_deals(path: str) -> List[Trade]:
+    """Reconstruct closed trades from an MT5/broker deals.csv(.gz)."""
+    trades: List[Trade] = []
+    broker = ""
+    account = ""
+    # derive broker/account from path: .../<Broker>/<ACCT>/deals.csv.gz
+    parts = path.replace("\\", "/").split("/")
+    if len(parts) >= 2:
+        account = parts[-2]
+        broker = parts[-3] if len(parts) >= 3 else ""
+    opens: Dict[str, Dict[str, Any]] = {}
+    with _open_csv(path) as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            pos = str(row.get("position_id", "")).strip()
+            try:
+                entry_code = int(float(row.get("entry_code", "0") or 0))
+            except (TypeError, ValueError):
+                continue
+            if entry_code == 0:  # open
+                opens[pos] = {
+                    "symbol": _match_symbol(row.get("symbol", "")),
+                    "entry_time": parse_time(row.get("time_utc", "")),
+                    "entry_price": _to_float(row.get("price", 0)),
+                    "deal_type": int(float(row.get("deal_type_code", "0")
+                                            or 0)),
+                    "volume": _to_float(row.get("volume", 0)),
+                }
+            elif entry_code == 1:  # close
+                o = opens.pop(pos, None)
+                if o is None:
+                    continue  # close with no matching open (skip)
+                sym = o["symbol"]
+                if sym not in SYMBOL_UNIVERSE:
+                    continue
+                trades.append(Trade(
+                    symbol=sym,
+                    direction=_MT5_DEAL_TYPE.get(o["deal_type"], "BUY"),
+                    entry_time=o["entry_time"],
+                    exit_time=parse_time(row.get("time_utc", "")),
+                    entry_price=o["entry_price"],
+                    exit_price=_to_float(row.get("price", 0)),
+                    lots=o["volume"],
+                    pnl=_to_float(row.get("profit", 0)),
+                    broker=broker, account=account,
+                    entry_type=str(row.get("entry_type", "")),
+                ))
+    return trades
+
+
+# --------------------------------------------------------------------------
 # Market-data alignment
 # --------------------------------------------------------------------------
 class MarketAlign:
@@ -367,10 +451,9 @@ def train_offline(brain, trades: List[Trade], align: MarketAlign,
             skipped += 1
             continue
         closes, highs, lows = win
-        rets = returns_from_closes(closes)
         feats = build_unified_feature_vector(
             symbol=t.symbol, closes=closes, highs=highs, lows=lows,
-            regime="", universe=brain.symbol_ids, **rets)
+            regime="", universe=brain.symbol_ids)
         if t.exit_price and t.entry_price:
             rr = t.realised_return
         else:
@@ -413,7 +496,7 @@ def main():
     # collect trade files
     paths: List[str] = []
     if os.path.isdir(args.trades):
-        for ext in ("*.csv", "*.json", "*.txt"):
+        for ext in ("*.csv", "*.csv.gz", "*.gz", "*.json", "*.txt"):
             paths.extend(glob.glob(os.path.join(args.trades, ext)))
     else:
         paths.extend(glob.glob(args.trades))
