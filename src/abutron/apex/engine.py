@@ -42,6 +42,7 @@ from .trailing import trailing_stop
 # authority). The legacy agents below are retained as feature contributors
 # and diagnostics, not as the decision authority.
 from ..brain import NexusBrain, make_brain, default_ensemble
+from ..brain.risk import RiskPolicy
 
 
 def _json_default(obj):
@@ -124,8 +125,12 @@ class Candidate:
 
 class ApexEngine:
     def __init__(self, event_log: EventLog, crm_service=None,
-                 brain: "NexusBrain | None" = None):
+                 brain: "NexusBrain | None" = None,
+                 risk_policy: Optional[RiskPolicy] = None):
         self.log = event_log
+        # Equity-tiered compounding + daily target/loss-cap policy. Drives
+        # tier-based risk_pct + lot_max and the daily profit-stop / loss-cap.
+        self.risk_policy = risk_policy or RiskPolicy()
         self.journal = DecisionJournal(event_log)
         self.crm = crm_service
         # The NexusBrain is the signal authority. Legacy agents are retained
@@ -372,16 +377,25 @@ class ApexEngine:
             stop_distance_points = abs(sniper.trigger_price -
                                        sniper.invalidation) / point \
                 if point > 0 else 0.0
+            eq = float(account.get("equity",
+                                   account.get("balance", 0.0)) or 0.0)
+            # Tier-based risk/lot from the equity-tiered policy. An explicit
+            # account per_trade_risk_pct overrides the tier risk (admin
+            # control); otherwise the brain auto-scales from equity.
+            if "per_trade_risk_pct" in account:
+                risk_pct = float(account["per_trade_risk_pct"])
+            else:
+                risk_pct = self.risk_policy.risk_pct_for(eq)
+            lot_max = min(self.risk_policy.lot_max_for(eq),
+                          float(quote.volume_max or 50.0))
             sizing = self.brain.size_position(
-                equity=float(account.get("equity",
-                                         account.get("balance", 0.0)) or 0.0),
-                risk_pct=float(account.get("per_trade_risk_pct",
-                                           DEFAULT_PER_TRADE_RISK_PCT)),
+                equity=eq,
+                risk_pct=risk_pct,
                 stop_distance_points=stop_distance_points,
                 point_value=float(quote.point_value or 0.0),
                 lot_step=float(quote.volume_min or 0.01),
                 lot_min=float(quote.volume_min or 0.01),
-                lot_max=float(quote.volume_max or 50.0),
+                lot_max=lot_max,
                 entry_quality=sniper.entry_quality)
         else:
             sizing = {"lots": 0.0, "risk_usd": 0.0, "reason": "NO_QUOTE"}

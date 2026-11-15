@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 from ..brain import NexusBrain
 from ..brain.trainer import prepare_samples, walk_forward_train
+from ..brain.risk import RiskPolicy
 from ..apex.sniper import SniperEntryEngine, sniper_engine
 from ..apex.trailing import TrailingStop, trailing_stop
 from ..apex.indicators import atr
@@ -78,6 +79,8 @@ class BacktestResult:
     htf: str = ""
     confluence_filtered: int = 0
     entry_filtered: int = 0
+    daily_stopped: int = 0
+    days_traded: int = 0
     mode: str = "backtest"
     details: List[Dict] = field(default_factory=list)
 
@@ -107,7 +110,8 @@ class BacktestEngine:
                  require_trend_regime: bool = False,
                  min_atr_pct: float = 0.0,
                  max_atr_pct: float = 9.99,
-                 require_momentum: bool = False):
+                 require_momentum: bool = False,
+                 risk_policy: Optional[RiskPolicy] = None):
         self.brain = brain
         self.sniper = sniper or sniper_engine
         self.trailing = trailing or trailing_stop
@@ -132,6 +136,10 @@ class BacktestEngine:
         self.min_atr_pct = min_atr_pct
         self.max_atr_pct = max_atr_pct
         self.require_momentum = require_momentum
+        # Equity-tiered compounding + daily target/loss-cap policy. When
+        # set, sizing uses the tier risk_pct/lot_max for the live equity
+        # and entries stop for the day on the profit-target / loss-cap.
+        self.risk_policy = risk_policy or RiskPolicy()
         self.train_epochs = 60
         self.train_batch = 32
         self.train_seed = 0
@@ -241,6 +249,11 @@ class BacktestEngine:
         reported_wins = reported_losses = 0
         reported_pnl = 0.0
         details: List[Dict] = []
+        # daily profit-stop / loss-cap tracking (equity-tiered policy)
+        current_day = None
+        daily_pnl = 0.0
+        daily_stopped = 0
+        days_traded = 0
 
         history: List[Candle] = []
         position: Optional[Position] = None
@@ -256,6 +269,12 @@ class BacktestEngine:
         for c in run_candles:
             idx += 1
             history.append(c)
+            # roll the daily PnL over to a new trading day
+            day_key = (c.open_time or "")[:10]
+            if day_key and day_key != current_day:
+                current_day = day_key
+                daily_pnl = 0.0
+                days_traded += 1
             if len(history) > self.history_len:
                 history = history[-self.history_len:]
 
@@ -316,6 +335,7 @@ class BacktestEngine:
                 if closed is not None:
                     pnl = self._settle(position, closed[0], closed[1], equity)
                     equity += pnl
+                    daily_pnl += pnl
                     self.brain.learn_from_trade(
                         symbol=position.symbol, regime="",
                         direction=position.direction,
@@ -358,41 +378,49 @@ class BacktestEngine:
                     orderflow={}, footprint={}, agent_scores={},
                     regime="")
                 if prop.direction in ("BUY", "SELL"):
-                    # High-precision entry filter (win-rate optimisation):
-                    # drop low-probability setups before the confluence gate.
-                    _ok, _reason = self._entry_allowed(
-                        prop, closes, highs, lows, a, idx)
-                    if not _ok:
-                        entry_filtered += 1
-                    elif self.mtf_confluence and htf_candles and (
-                            not htf_dir or htf_dir != prop.direction):
-                        # Multi-timeframe confluence: wait until the HTF
-                        # agrees with the LTF trigger. Only applies when a
-                        # higher-timeframe series was supplied; otherwise the
-                        # platform trades every trigger as before.
-                        confluence_filtered += 1
+                    # Daily profit-stop / loss-cap: once the daily target is
+                    # reached or the loss cap hit, stop trading for the day.
+                    # Never raises risk to chase the target (tier risk is fixed).
+                    _dstop, _dreason = self.risk_policy.allow_entry(equity, daily_pnl)
+                    if not _dstop:
+                        daily_stopped += 1
                     else:
-                        bias = self.brain.get_entry_bias(c.symbol, "")
-                        snip = self.sniper.plan(
-                            symbol=c.symbol, direction=prop.direction,
-                            closes=closes, highs=highs, lows=lows,
-                            atr_val=a, of_features={}, fp_features={},
-                            regime="", uncertainty=prop.uncertainty,
-                            conviction=prop.conviction,
-                            confirm_bias=bias.get("confirm_bias", 0.0),
-                            quality_floor=bias.get("quality_floor", 0.0))
-                        fill = self._entry_fill(snip, c, prop.direction)
-                        if fill is not None:
-                            sizing_equity = equity if self.compound \
-                                else self.equity
-                            position = self._open_position(
-                                c, snip, fill, prop, a, sizing_equity)
+                        # High-precision entry filter (win-rate optimisation):
+                        # drop low-probability setups before the confluence gate.
+                        _ok, _reason = self._entry_allowed(
+                            prop, closes, highs, lows, a, idx)
+                        if not _ok:
+                            entry_filtered += 1
+                        elif self.mtf_confluence and htf_candles and (
+                                not htf_dir or htf_dir != prop.direction):
+                            # Multi-timeframe confluence: wait until the HTF
+                            # agrees with the LTF trigger. Only applies when a
+                            # higher-timeframe series was supplied; otherwise the
+                            # platform trades every trigger as before.
+                            confluence_filtered += 1
+                        else:
+                            bias = self.brain.get_entry_bias(c.symbol, "")
+                            snip = self.sniper.plan(
+                                symbol=c.symbol, direction=prop.direction,
+                                closes=closes, highs=highs, lows=lows,
+                                atr_val=a, of_features={}, fp_features={},
+                                regime="", uncertainty=prop.uncertainty,
+                                conviction=prop.conviction,
+                                confirm_bias=bias.get("confirm_bias", 0.0),
+                                quality_floor=bias.get("quality_floor", 0.0))
+                            fill = self._entry_fill(snip, c, prop.direction)
+                            if fill is not None:
+                                sizing_equity = equity if self.compound \
+                                    else self.equity
+                                position = self._open_position(
+                                    c, snip, fill, prop, a, sizing_equity)
 
         # --- close any position left open at end of data -------------------
         if position is not None:
             last = candles[-1]
             pnl = self._settle(position, last.close, "END_OF_DATA", equity)
             equity += pnl
+            daily_pnl += pnl
             if last and idx > report_from:
                 reported_trades += 1
                 reported_pnl += pnl
@@ -420,6 +448,8 @@ class BacktestEngine:
             htf=(htf_candles[0].timeframe if htf_candles else ""),
             confluence_filtered=confluence_filtered,
             entry_filtered=entry_filtered,
+            daily_stopped=daily_stopped,
+            days_traded=days_traded,
             mode=mode, details=details)
 
     # ------------------------------------------------------------------
@@ -448,10 +478,10 @@ class BacktestEngine:
         is_buy = prop.direction == "BUY"
         stop_dist_points = abs(snip.trigger_price - snip.invalidation) / self._point(c)
         sizing = self.brain.size_position(
-            equity=equity, risk_pct=self.risk_pct,
+            equity=equity, risk_pct=self.risk_policy.risk_pct_for(equity),
             stop_distance_points=stop_dist_points,
             point_value=self.point_value, lot_step=self.lot_step,
-            lot_min=self.lot_min, lot_max=self.lot_max,
+            lot_min=self.lot_min, lot_max=self.risk_policy.lot_max_for(equity),
             entry_quality=snip.entry_quality)
         # If sizing refused the trade (e.g. MIN_LOT_RISK_EXCEEDS_CAP when
         # the account is too small for the instrument's minimum lot), skip
