@@ -67,7 +67,21 @@ class ApexVendorMissing(RuntimeError):
 # ---------------------------------------------------------------------------
 # Instrument manifest builder
 # ---------------------------------------------------------------------------
-DEFAULT_DERIV_SYMBOLS = ["Volatility 100 Index.0"]
+DEFAULT_DERIV_SYMBOLS = [
+    'Volatility 10 Index.0',
+    'Volatility 25 Index.0',
+    'Volatility 50 Index.0',
+    'Volatility 75 Index.0',
+    'Volatility 100 Index.0',
+    'Crash 150 Index.0',
+    'Crash 300 Index.0',
+    'Crash 600 Index.0',
+    'Crash 1000 Index.0',
+    'Boom 150 Index.0',
+    'Boom 300 Index.0',
+    'Boom 600 Index.0',
+    'Boom 1000 Index.0',
+]
 DEFAULT_FP_SYMBOLS = ["GBPUSD", "EURUSD", "XAUUSD"]
 
 # Approved asset classes + brokers (bridge enforces these too)
