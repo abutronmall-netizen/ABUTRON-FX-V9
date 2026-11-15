@@ -55,6 +55,9 @@ class Position:
     closed: bool = False
     close_price: float = 0.0
     close_reason: str = ""
+    # feature vector captured at decision time — fed back for online
+    # neural learning when the position settles (true self-learning).
+    features: list = field(default_factory=list)
 
 
 @dataclass
@@ -296,6 +299,18 @@ class BacktestEngine:
                 last_a = _a
             a = _a if _a else (self._point(c) * 10)
 
+            # --- continuous per-bar online neural learning --------------
+            # Learn from the move that just completed: the features as of
+            # the PREVIOUS bar predict this bar's move. Causal (no
+            # look-ahead) and runs on every closed bar, so the brain
+            # self-trains continuously, not just on settled trades.
+            if len(closes) >= 30:
+                _prev_close = closes[-2]
+                self.brain.online_learn(
+                    symbol=c.symbol, closes=closes[:-1],
+                    highs=highs[:-1], lows=lows[:-1],
+                    realised_return=closes[-1] - _prev_close)
+
             # --- advance the higher-timeframe series to bars closed before
             #     this LTF bar opens, and derive the HTF direction.
             c_open_epoch = self._to_epoch(c.open_time)
@@ -349,6 +364,14 @@ class BacktestEngine:
                         direction=position.direction,
                         entry_type=position.entry_type,
                         entry_quality=position.entry_quality, pnl=pnl)
+                    # True online neural learning: nudge the brain's own
+                    # weights toward the realised move using the features
+                    # captured at entry (self-learning from each trade).
+                    if position.features:
+                        self.brain.online_learn_features(
+                            position.features,
+                            closed[0] - position.entry_price,
+                            symbol=position.symbol)
                     if pnl > 0:
                         wins += 1; total_win += pnl; consec_losses = 0
                     else:
@@ -442,6 +465,16 @@ class BacktestEngine:
             pnl = self._settle(position, last.close, "END_OF_DATA", equity)
             equity += pnl
             daily_pnl += pnl
+            self.brain.learn_from_trade(
+                symbol=position.symbol, regime="",
+                direction=position.direction,
+                entry_type=position.entry_type,
+                entry_quality=position.entry_quality, pnl=pnl)
+            if position.features:
+                self.brain.online_learn_features(
+                    position.features,
+                    last.close - position.entry_price,
+                    symbol=position.symbol)
             if last and idx > report_from:
                 reported_trades += 1
                 reported_pnl += pnl
@@ -528,7 +561,8 @@ class BacktestEngine:
             trail_stop=snip.invalidation,  # starts at invalidation
             entry_type=snip.entry_type, entry_quality=snip.entry_quality,
             open_time=c.open_time, highest_high=c.high, lowest_low=c.low,
-            point=self._point(c))
+            point=self._point(c),
+            features=list(prop.features))
 
     def _check_exit(self, pos: Position, c: Candle):
         """Return (exit_price, reason, should_record) or None."""

@@ -148,17 +148,22 @@ class MLP:
 
     def __init__(self, sizes: Sequence[int], *, hidden_act: str = "relu",
                  out_act: str = "softmax", p_drop: float = 0.1,
+                 online_lr: float = 1e-3,
                  rng: Optional[np.random.Generator] = None):
         rng = rng or RNG
         self.sizes = list(sizes)
         self.p_drop = p_drop
         self.out_act = out_act
+        self.online_lr = online_lr
         self.layers: List[Dense] = []
         for i in range(len(sizes) - 1):
             act = hidden_act if i < len(sizes) - 2 else (
                 "sigmoid" if out_act == "sigmoid" else "none")
             self.layers.append(Dense(sizes[i], sizes[i + 1], act=act, rng=rng))
         self.optimizer = Adam()
+        # Dedicated optimizer for online (per-outcome) weight updates so
+        # live learning never disturbs the offline Adam state.
+        self._online_opt = Adam(lr=online_lr)
 
     # -- forward ----------------------------------------------------------
     def forward(self, x: np.ndarray, *, training: bool = False
@@ -213,6 +218,45 @@ class MLP:
                     continue
                 newv = self.optimizer.step_param(f"l{i}_{name}", grad,
                                                  getattr(layer, name))
+                setattr(layer, name, newv)
+        return float(loss)
+
+    def online_step(self, x: np.ndarray, y: np.ndarray,
+                    *, l2: float = 1e-5) -> float:
+        """One single-sample gradient step from a realised outcome.
+
+        Used for true online learning: every settled trade (or observed
+        bar) gives one (features, realised-direction) pair, and the
+        network nudges its own weights toward predicting that outcome.
+        Runs in eval mode (no dropout) for a stable, deterministic
+        single-sample update, and uses a dedicated Adam optimizer with a
+        small learning rate so live updates never destabilise the
+        offline-trained weights. Returns the loss of this sample.
+        """
+        x = np.asarray(x, dtype=float)
+        if x.ndim == 1:
+            x = x[None, :]
+        y = np.asarray(y, dtype=float)
+        p = self.forward(x, training=False)
+        if self.out_act == "softmax":
+            if y.ndim == 1:
+                y_oh = np.zeros((y.shape[0], p.shape[-1]), dtype=float)
+                y_oh[np.arange(y.shape[0]), y.astype(int)] = 1.0
+                y = y_oh
+            loss = -np.mean(np.sum(y * np.log(p + 1e-12), axis=1))
+            dout = (p - y) / x.shape[0]
+        else:
+            loss = -np.mean(y * np.log(p + 1e-12) +
+                            (1 - y) * np.log(1 - p + 1e-12))
+            dout = (p - y) / x.shape[0]
+        for layer in reversed(self.layers):
+            dout = layer.backward(dout, l2=l2)
+        for i, layer in enumerate(self.layers):
+            for name, grad in (("W", layer.dW), ("b", layer.db)):
+                if grad is None:
+                    continue
+                newv = self._online_opt.step_param(f"l{i}_{name}", grad,
+                                                   getattr(layer, name))
                 setattr(layer, name, newv)
         return float(loss)
 

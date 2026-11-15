@@ -159,6 +159,25 @@ class BrainEnsemble:
         z = self._cal_a * raw + self._cal_b
         return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
 
+    # -- online learning ------------------------------------------------
+    def online_update(self, x: np.ndarray, y: np.ndarray,
+                      *, lr: Optional[float] = None) -> Dict[str, float]:
+        """One online gradient step across every member from one outcome.
+
+        Each ensemble member nudges its own neural weights toward the
+        realised direction, so the whole brain self-learns from each
+        settled trade / observed bar. Returns a small summary.
+        """
+        if not self.members or x.size == 0:
+            return {"updated": 0, "loss": 0.0}
+        losses = []
+        for m in self.members:
+            if lr is not None and hasattr(m.model, "_online_opt"):
+                m.model._online_opt.lr = lr
+            losses.append(m.model.online_step(x, y))
+        return {"updated": len(self.members),
+                "loss": float(np.mean(losses))}
+
     def fit_calibration(self, raw_scores: Sequence[float],
                         labels: Sequence[int]) -> None:
         """Fit a simple Platt sigmoid so confidence matches realised accuracy.

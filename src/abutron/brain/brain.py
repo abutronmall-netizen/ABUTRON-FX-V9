@@ -51,6 +51,7 @@ class BrainProposal:
     rationale: str = ""
     brain_version: str = "nexus_v1"
     trained: bool = False
+    features: List[float] = field(default_factory=list)  # captured at decision time for online learning
 
     @property
     def will_trade(self) -> bool:
@@ -212,6 +213,10 @@ class NexusBrain:
         online_lr: float = 0.05,
         forget_decay: float = 0.99,
         oos_gate: float = 0.0,
+        # True online neural learning: the ensemble's own weights update
+        # from every realised outcome (settled trade / observed bar).
+        online_enabled: bool = True,
+        nn_online_lr: float = 1e-3,
         seed: int = 0,
     ):
         self.ensemble = ensemble
@@ -222,8 +227,11 @@ class NexusBrain:
         self.online_lr = online_lr
         self.forget_decay = forget_decay
         self.oos_gate = oos_gate
+        self.online_enabled = online_enabled
+        self.nn_online_lr = nn_online_lr
         self.seed = seed
         self.rng = np.random.default_rng(seed)
+        self.online_updates = 0
 
         # online adaptation state (bounded edge model + OOS gating)
         self._online_w = float(self.rng.standard_normal()) * 0.01
@@ -308,7 +316,8 @@ class NexusBrain:
             regime=regime, model_agreement=pred.votes,
             position_size=position_size,
             rationale=rationale,
-            brain_version=self.VERSION, trained=True)
+            brain_version=self.VERSION, trained=True,
+            features=list(feats))
 
     # ------------------------------------------------------------------
     # Deterministic fallback (untrained brain still trades — no gates)
@@ -340,14 +349,16 @@ class NexusBrain:
                 rationale="fallback_rule_edge "
                           f"edge={edge:.3f} size={position_size:.3f} "
                           f"regime={regime}",
-                brain_version=self.VERSION, trained=False)
+                brain_version=self.VERSION, trained=False,
+                features=list(feats))
         except Exception:
             return BrainProposal(
                 symbol=symbol, direction="BUY", conviction=0.1,
                 confidence=0.0, uncertainty=1.0, regime=regime,
                 position_size=0.1,
                 rationale="fallback_error (committed to BUY)",
-                brain_version=self.VERSION, trained=False)
+                brain_version=self.VERSION, trained=False,
+                features=list(feats))
 
     # ------------------------------------------------------------------
     # Online adaptation (safe, gated)
@@ -382,6 +393,73 @@ class NexusBrain:
         self._online_loss = self._online_ema
         return {"updated": accept, "loss_ema": round(self._online_ema, 5),
                 "baseline": round(self._baseline_loss or 0.0, 5)}
+
+    # ------------------------------------------------------------------
+    # True online neural learning — the ensemble's own weights update
+    # from each realised outcome, so the brain is continuously
+    # self-training (not just the offline batch + the scalar edge model).
+    # ------------------------------------------------------------------
+    def online_learn(
+        self, *, symbol: str,
+        closes: Optional[List[float]] = None,
+        highs: Optional[List[float]] = None,
+        lows: Optional[List[float]] = None,
+        realised_return: float = 0.0,
+        orderflow: Optional[Dict[str, float]] = None,
+        footprint: Optional[Dict[str, float]] = None,
+        agent_scores: Optional[Dict[str, float]] = None,
+        regime: str = "",
+    ) -> Dict[str, Any]:
+        """Nudge the ensemble weights toward a realised outcome.
+
+        The label is the direction the market actually moved: class 1
+        (BUY) if ``realised_return > 0`` else class 0 (SELL). Features
+        are built exactly as in ``decide`` (no look-ahead). One
+        single-sample gradient step is taken per ensemble member with a
+        small learning rate, so live outcomes refine the offline-trained
+        brain without destroying it.
+        """
+        if not self.online_enabled or not self.trained:
+            return {"updated": False,
+                    "reason": "ONLINE_DISABLED" if not self.online_enabled
+                    else "UNTRAINED"}
+        closes = list(closes or [])
+        highs = list(highs or closes)
+        lows = list(lows or closes)
+        if not closes:
+            return {"updated": False, "reason": "NO_DATA"}
+        rets = returns_from_closes(closes)
+        feats = build_feature_vector(
+            closes=closes, highs=highs, lows=lows,
+            orderflow=orderflow, footprint=footprint,
+            regime=regime, agent_scores=agent_scores, **rets)
+        return self.online_learn_features(feats, realised_return,
+                                          symbol=symbol)
+
+    def online_learn_features(self, features: Sequence[float],
+                              realised_return: float,
+                              *, symbol: str = "") -> Dict[str, Any]:
+        """Online neural update from a pre-built feature vector.
+
+        Used by the engines with the exact features captured at decision
+        time (proposal.features) so there is no recomputation and no
+        feature-dimension mismatch. One single-sample gradient step per
+        ensemble member toward the realised direction.
+        """
+        if not self.online_enabled or not self.trained:
+            return {"updated": False,
+                    "reason": "ONLINE_DISABLED" if not self.online_enabled
+                    else "UNTRAINED"}
+        feats = list(features or [])
+        if not feats:
+            return {"updated": False, "reason": "NO_DATA"}
+        x = np.asarray([feats], dtype=float)
+        y = np.asarray([1.0 if realised_return > 0 else 0.0])
+        summary = self.ensemble.online_update(x, y, lr=self.nn_online_lr)
+        self.online_updates += 1
+        return {"updated": True, "loss": round(summary["loss"], 6),
+                "members": summary["updated"],
+                "label": int(y[0]), "symbol": symbol}
 
     def _online_sigmoid(self, x: float) -> float:
         z = self._online_w * x + self._online_b
@@ -476,7 +554,10 @@ class NexusBrain:
             "ensemble": (self.ensemble.state_dict()
                          if self.ensemble else None),
             "online": {"w": self._online_w, "b": self._online_b,
-                       "ema": self._online_ema, "n": self._online_n},
+                       "ema": self._online_ema, "n": self._online_n,
+                       "nn_updates": self.online_updates,
+                       "enabled": self.online_enabled,
+                       "nn_lr": self.nn_online_lr},
             "thresholds": {"min_confidence": self.min_confidence,
                            "max_uncertainty": self.max_uncertainty},
             "trade_memory": self.trade_memory.state_dict(),

@@ -45,7 +45,8 @@ from .ranker import DailyProfitRanker
 # and diagnostics, not as the decision authority.
 from ..brain import NexusBrain, make_brain, default_ensemble
 from ..brain.risk import RiskPolicy
-from ..brain.unified import load_unified, unified_brain_dir
+from ..brain.unified import load_unified, save_unified, unified_brain_dir
+from ..brain.trainer import save_brain
 
 
 def _json_default(obj):
@@ -133,7 +134,8 @@ class ApexEngine:
                  eligibility: Optional["SymbolEligibility"] = None,
                  brain_root: Optional[str] = None,
                  ranker: Optional["DailyProfitRanker"] = None,
-                 max_symbols_per_day: Optional[int] = 5):
+                 max_symbols_per_day: Optional[int] = 5,
+                 online_save_interval: int = 50):
         self.log = event_log
         # Equity-tiered compounding + daily target/loss-cap policy. Drives
         # tier-based risk_pct + lot_max and the daily profit-stop / loss-cap.
@@ -175,6 +177,8 @@ class ApexEngine:
         # Cap on simultaneous symbols traded per day (most-profitable first).
         # None = trade every profitable eligible symbol.
         self.max_symbols_per_day = max_symbols_per_day
+        # Throttle for persisting online-learned brain weights.
+        self.online_save_interval = online_save_interval
         # High-water mark for the extreme-low-drawdown runtime risk taper.
         self._high_water: float = 0.0
         if brain is None:
@@ -213,6 +217,18 @@ class ApexEngine:
             brain = self.brain
         self._brain_cache[symbol] = brain
         return brain
+
+    def _persist_brain_online(self, brain, symbol: str = "") -> None:
+        """Save a brain's online-learned weights to disk (best-effort)."""
+        try:
+            if brain is self._unified_brain:
+                save_unified(unified_brain_dir(self._brain_root), brain)
+            elif symbol and getattr(brain, "ensemble", None) is not None:
+                from .eligibility import brain_dir_for
+                save_brain(brain_dir_for(symbol, self._brain_root),
+                           brain.ensemble)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Main decision pass
@@ -290,6 +306,25 @@ class ApexEngine:
         closes = [x.close for x in self._history(c)]
         highs = [x.high for x in self._history(c)]
         lows = [x.low for x in self._history(c)]
+
+        # --- Continuous per-bar online neural learning (true self-learning)
+        # Learn from the move that just completed: features as of the
+        # PREVIOUS bar predict this bar's move. Causal, runs on every
+        # closed candle so the brain self-trains continuously in live
+        # trading (not just offline retraining). No-op when online
+        # learning is disabled or the brain is untrained.
+        if len(closes) >= 30:
+            _prev_close = closes[-2]
+            _brain = self._brain_for(c.symbol)
+            _brain.online_learn(
+                symbol=c.symbol, closes=closes[:-1],
+                highs=highs[:-1], lows=lows[:-1],
+                realised_return=closes[-1] - _prev_close)
+            # Persist online-learned weights every N updates so the
+            # self-training survives restarts (throttled, not per-bar).
+            if _brain.online_updates and \
+                    _brain.online_updates % self.online_save_interval == 0:
+                self._persist_brain_online(_brain, c.symbol)
 
         # --- Equity-aware symbol eligibility gate ------------------------
         # Look at the client equity and trade ONLY the symbols that cater

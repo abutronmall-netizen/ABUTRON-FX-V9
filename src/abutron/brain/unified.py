@@ -187,7 +187,42 @@ class UnifiedBrain(NexusBrain):
             confidence=pred.confidence, uncertainty=pred.uncertainty,
             regime=regime, model_agreement=pred.votes,
             position_size=position_size, rationale=rationale,
-            brain_version=self.VERSION, trained=True)
+            brain_version=self.VERSION, trained=True,
+            features=list(feats))
+
+    def online_learn(
+        self, *, symbol: str,
+        closes: Optional[List[float]] = None,
+        highs: Optional[List[float]] = None,
+        lows: Optional[List[float]] = None,
+        realised_return: float = 0.0,
+        orderflow: Optional[Dict[str, float]] = None,
+        footprint: Optional[Dict[str, float]] = None,
+        agent_scores: Optional[Dict[str, float]] = None,
+        regime: str = "",
+    ) -> Dict[str, Any]:
+        """Online neural update using the unified (market + one-hot) features.
+
+        Same contract as ``NexusBrain.online_learn``: one single-sample
+        gradient step per member toward the realised direction. The
+        symbol one-hot is appended so each instrument's outcome refines
+        that instrument's slice of the shared weights.
+        """
+        if not self.online_enabled or not self.trained:
+            return {"updated": False,
+                    "reason": "ONLINE_DISABLED" if not self.online_enabled
+                    else "UNTRAINED"}
+        closes = list(closes or [])
+        highs = list(highs or closes)
+        lows = list(lows or closes)
+        if not closes:
+            return {"updated": False, "reason": "NO_DATA"}
+        feats = build_unified_feature_vector(
+            symbol=symbol, closes=closes, highs=highs, lows=lows,
+            orderflow=orderflow, footprint=footprint, regime=regime,
+            agent_scores=agent_scores, universe=self.symbol_ids)
+        return self.online_learn_features(feats, realised_return,
+                                          symbol=symbol)
 
     def _fallback_unified(self, symbol: str, regime: str):
         # Deterministic rule edge (same as NexusBrain._fallback) but routed
@@ -370,6 +405,9 @@ def save_unified(brain_dir: str, brain: UnifiedBrain,
                         "b": brain.ensemble._cal_b,
                         "fitted": brain.ensemble._fitted},
         "report": report.to_dict() if report else None,
+        "online": {"updates": brain.online_updates,
+                   "enabled": brain.online_enabled,
+                   "nn_lr": brain.nn_online_lr},
     }
     path = os.path.join(brain_dir, "nexus_brain.json")
     with open(path, "w") as fh:
@@ -402,7 +440,12 @@ def load_unified(brain_dir: str, *, mc_samples: int = 16
         ens._cal_a = cal.get("a", 1.0)
         ens._cal_b = cal.get("b", 0.0)
         ens._fitted = cal.get("fitted", False)
-        brain = UnifiedBrain(ensemble=ens, symbol_ids=symbol_ids)
+        _online = payload.get("online", {})
+        brain = UnifiedBrain(
+            ensemble=ens, symbol_ids=symbol_ids,
+            online_enabled=_online.get("enabled", True),
+            nn_online_lr=_online.get("nn_lr", 1e-3))
+        brain.online_updates = int(_online.get("updates", 0))
         return brain
     except Exception:
         return None
