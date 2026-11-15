@@ -180,7 +180,10 @@ class TestEngineBrainIntegration:
         # the brain in agent_votes (the brain is the signal authority)
         for cand in result:
             assert "nexus_brain" in cand.agent_votes
-            assert cand.agent_votes["nexus_brain"]["brain_version"] == "nexus_v1"
+            bv = cand.agent_votes["nexus_brain"]["brain_version"]
+            # the active brain is the unified brain (all symbols, one brain)
+            # when trained, otherwise the per-symbol nexus brain
+            assert bv in ("nexus_v1", "unified_v1")
             # stop geometry (ATR path) was exercised and produces SL/TP
             assert cand.stop_loss > 0 and cand.take_profit > 0
 

@@ -19,15 +19,30 @@ def test_tier_for_equity_picks_correct_milestone():
 
 def test_risk_pct_and_lot_scale_with_equity():
     policy = RiskPolicy()
-    # $50 starter tier -> 15% risk, 0.5 lot cap
-    assert policy.risk_pct_for(50.0) == pytest.approx(0.15)
+    # Extreme-low-drawdown cap: per-trade risk is capped at dd_target /
+    # max_consec_losses = 0.05 / 5 = 1% across every tier (the 15% tier
+    # risk is only an upper bound). lot_max still scales with equity.
+    assert policy.dd_risk_pct() == pytest.approx(0.01)
+    assert policy.risk_pct_for(50.0) == pytest.approx(0.01)
     assert policy.lot_max_for(50.0) == pytest.approx(0.5)
-    # risk held at 15% across tiers; lot_max scales up (auto lot scaling)
-    assert policy.risk_pct_for(100.0) == pytest.approx(0.15)
+    assert policy.risk_pct_for(100.0) == pytest.approx(0.01)
     assert policy.lot_max_for(100.0) == pytest.approx(1.0)
-    # $10k tier
-    assert policy.risk_pct_for(10000.0) == pytest.approx(0.15)
+    assert policy.risk_pct_for(10000.0) == pytest.approx(0.01)
     assert policy.lot_max_for(10000.0) == pytest.approx(25.0)
+
+
+def test_dd_risk_scale_tapers_with_drawdown():
+    policy = RiskPolicy()  # dd_target=5%, max_consec_losses=5
+    # no drawdown -> full risk
+    assert policy.dd_risk_scale(100.0, 100.0) == pytest.approx(1.0)
+    # 2.5% drawdown (half the target) -> scale 0.5
+    assert policy.dd_risk_scale(97.5, 100.0) == pytest.approx(0.5)
+    # at the target -> floor 0.2 (risk scaled, never hard-stopped)
+    assert policy.dd_risk_scale(95.0, 100.0) == pytest.approx(0.2)
+    # deep drawdown -> still floors at 0.2 (no fail-closed stop)
+    assert policy.dd_risk_scale(80.0, 100.0) == pytest.approx(0.2)
+    # runtime risk combines cap + taper
+    assert policy.risk_pct_for_runtime(97.5, 100.0) == pytest.approx(0.005)
 
 
 def test_daily_stops_off_by_default():
@@ -46,10 +61,10 @@ def test_daily_profit_stop():
 
 def test_daily_loss_cap():
     policy = RiskPolicy(daily_loss_r=3.0)
-    # $50 equity @ 15% risk -> $7.50/trade; 3R cap = $22.50/day
-    assert policy.allow_entry(50.0, -22.4)[0] is True
-    assert policy.allow_entry(50.0, -22.5) == (False, "DAILY_LOSS_CAP")
-    assert policy.allow_entry(50.0, -23.0)[0] is False
+    # $50 equity @ DD-capped 1% risk -> $0.50/trade; 3R cap = $1.50/day
+    assert policy.allow_entry(50.0, -1.4)[0] is True
+    assert policy.allow_entry(50.0, -1.5) == (False, "DAILY_LOSS_CAP")
+    assert policy.allow_entry(50.0, -2.0)[0] is False
 
 
 def test_equity_for_daily_target_reachable_equity():

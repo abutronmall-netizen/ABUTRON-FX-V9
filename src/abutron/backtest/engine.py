@@ -433,7 +433,8 @@ class BacktestEngine:
                                     sizing_equity = equity if self.compound \
                                         else self.equity
                                     position = self._open_position(
-                                        c, snip, fill, prop, a, sizing_equity)
+                                        c, snip, fill, prop, a, sizing_equity,
+                                        max_equity)
 
         # --- close any position left open at end of data -------------------
         if position is not None:
@@ -495,11 +496,15 @@ class BacktestEngine:
                 return snip.trigger_price, True
         return None
 
-    def _open_position(self, c: Candle, snip, fill, prop, a, equity) -> Position:
+    def _open_position(self, c: Candle, snip, fill, prop, a, equity,
+                       max_equity) -> Optional[Position]:
         is_buy = prop.direction == "BUY"
         stop_dist_points = abs(snip.trigger_price - snip.invalidation) / self._point(c)
+        # Extreme-low-drawdown sizing: DD-capped per-trade risk with the
+        # runtime drawdown taper (risk scaled, never hard-stopped).
+        risk_pct = self.risk_policy.risk_pct_for_runtime(equity, max_equity)
         sizing = self.brain.size_position(
-            equity=equity, risk_pct=self.risk_policy.risk_pct_for(equity),
+            equity=equity, risk_pct=risk_pct,
             stop_distance_points=stop_dist_points,
             point_value=self.point_value, lot_step=self.lot_step,
             lot_min=self.lot_min, lot_max=self.risk_policy.lot_max_for(equity),

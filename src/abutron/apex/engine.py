@@ -38,12 +38,14 @@ from .journal import DecisionJournal
 from .sniper import sniper_engine
 from .trailing import trailing_stop
 from .eligibility import SymbolEligibility, load_symbol_brain, default_brain_root
+from .ranker import DailyProfitRanker
 
 # NexusBrain — the advanced, uncertainty-aware decision brain (signal
 # authority). The legacy agents below are retained as feature contributors
 # and diagnostics, not as the decision authority.
 from ..brain import NexusBrain, make_brain, default_ensemble
 from ..brain.risk import RiskPolicy
+from ..brain.unified import load_unified, unified_brain_dir
 
 
 def _json_default(obj):
@@ -129,7 +131,9 @@ class ApexEngine:
                  brain: "NexusBrain | None" = None,
                  risk_policy: Optional[RiskPolicy] = None,
                  eligibility: Optional["SymbolEligibility"] = None,
-                 brain_root: Optional[str] = None):
+                 brain_root: Optional[str] = None,
+                 ranker: Optional["DailyProfitRanker"] = None,
+                 max_symbols_per_day: Optional[int] = 5):
         self.log = event_log
         # Equity-tiered compounding + daily target/loss-cap policy. Drives
         # tier-based risk_pct + lot_max and the daily profit-stop / loss-cap.
@@ -159,6 +163,20 @@ class ApexEngine:
         # one trained + validated on that symbol (loaded from data/brains);
         # unknown symbols fall back to the default ensemble brain.
         self._brain_cache: Dict[str, NexusBrain] = {}
+        # --- Unified brain: all per-symbol brains working as ONE brain. ---
+        # If a unified (symbol-conditioned) brain is trained, it is the
+        # signal authority for EVERY symbol; per-symbol specialists are the
+        # fallback when no unified brain is present.
+        self._unified_brain = load_unified(
+            unified_brain_dir(self._brain_root))
+        # --- Daily profit ranker: trade the most profitable eligible symbols. ---
+        self.ranker = (ranker if ranker is not None
+                       else DailyProfitRanker(self.eligibility))
+        # Cap on simultaneous symbols traded per day (most-profitable first).
+        # None = trade every profitable eligible symbol.
+        self.max_symbols_per_day = max_symbols_per_day
+        # High-water mark for the extreme-low-drawdown runtime risk taper.
+        self._high_water: float = 0.0
         if brain is None:
             brain = make_brain(
                 ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
@@ -176,15 +194,16 @@ class ApexEngine:
     # Per-symbol trained brain
     # ------------------------------------------------------------------
     def _brain_for(self, symbol: str) -> NexusBrain:
-        """Return the brain trained + validated on ``symbol``.
+        """Return the signal brain for ``symbol``.
 
-        Loads ``data/brains/<slug>_m5/nexus_brain.json`` (the brain whose
-        held-out accuracy is in its ``report``) and caches it. If no
-        trained brain exists for the symbol, falls back to the default
-        ensemble brain so the platform never breaks. This is how the live
-        engine trades with "the brain trained with the information and the
-        tests that have been done" for each instrument.
+        When a **unified** brain is trained, it is the single brain for
+        EVERY symbol ("all brains work as one brain") — the symbol-
+        conditioned ensemble handles all instruments. Otherwise the
+        per-symbol trained brain is loaded from ``data/brains/<slug>_m5``
+        and cached; unknown symbols fall back to the default ensemble.
         """
+        if self._unified_brain is not None:
+            return self._unified_brain
         if symbol in self._brain_cache:
             return self._brain_cache[symbol]
         brain = load_symbol_brain(
@@ -215,15 +234,34 @@ class ApexEngine:
         balance = balance if balance is not None else float(
             account.get("balance", 0.0) or 0.0)
 
+        # Track the high-water mark for the extreme-low-drawdown risk taper.
+        if equity > self._high_water:
+            self._high_water = equity
+
         # Aggressive mode: NO effective-ON gate. Trading proceeds on every
         # closed candle regardless of the CRM switch state. (Fail-closed
         # EFFECTIVE_OFF gating has been removed per the new design directive.)
 
         owner_book = self._owner_book(owner_id, connection_id)
 
+        # --- Daily profit selection: trade the most profitable eligible
+        # symbols. The ranker returns eligible + profitable symbols ranked
+        # by expected daily profit; we trade the top-N (most profit first),
+        # which also caps simultaneous exposure for low drawdown. ---
+        trade_set = None
+        if self.ranker is not None:
+            avail = list(dict.fromkeys(
+                c.symbol for c in candles if c.closed))
+            base_risk = self.risk_policy.risk_pct_for(equity)
+            trade_set = set(self.ranker.select(
+                equity, symbols=avail, risk_pct=base_risk,
+                top_n=self.max_symbols_per_day))
+
         seen_symbols = set()
         for c in candles:
             if c.symbol in seen_symbols or not c.closed:
+                continue
+            if trade_set is not None and c.symbol not in trade_set:
                 continue
             seen_symbols.add(c.symbol)
             result = self._evaluate_symbol(
@@ -459,10 +497,18 @@ class ApexEngine:
                                        sniper.invalidation) / point \
                 if point > 0 else 0.0
             eq = _eq
-            # Tier-based risk/lot from the equity-tiered policy (already
-            # resolved by the eligibility gate; an explicit account
-            # per_trade_risk_pct overrides the tier risk — admin control).
-            risk_pct = _risk_pct
+            # Extreme-low-drawdown sizing: the per-trade risk is capped by
+            # the DD target (dd_target / max_consec_losses) and tapered by
+            # the runtime drawdown scale. An explicit account override is
+            # still capped by the DD target so the drawdown limit always
+            # holds. (Risk is scaled, never hard-stopped — no fail-closed.)
+            if "per_trade_risk_pct" in account:
+                base_rp = min(float(account["per_trade_risk_pct"]),
+                              self.risk_policy.dd_risk_pct())
+            else:
+                base_rp = _risk_pct
+            risk_pct = base_rp * self.risk_policy.dd_risk_scale(
+                eq, self._high_water)
             lot_max = min(self.risk_policy.lot_max_for(eq),
                           float(quote.volume_max or 50.0))
             sizing = self.brain.size_position(

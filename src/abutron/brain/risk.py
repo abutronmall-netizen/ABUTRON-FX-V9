@@ -82,14 +82,64 @@ class RiskPolicy:
     The policy is the single source of truth for how much to risk and
     when to stop for the day. It is intentionally conservative: the
     daily target is a *stop*, never a reason to raise risk.
+
+    **Extreme-low-drawdown cap.** ``dd_target`` is the maximum drawdown
+    the account is allowed to reach; ``max_consec_losses`` is the worst
+    consecutive-loss streak the sizing must survive. The per-trade risk
+    is capped so that ``max_consec_losses`` losses cannot breach
+    ``dd_target``: ``risk_pct <= dd_target / max_consec_losses``. With a
+    5% target and 5-loss streak that is **1% per trade** — extreme low
+    drawdown. The tier risk (e.g. 15%) is only an upper bound; the DD
+    target governs the actual sizing. ``dd_risk_scale`` adds a soft
+    runtime taper (1.0 -> 0.2) as real-time drawdown approaches the
+    target — risk is scaled, never hard-stopped (no fail-closed).
     """
     tiers: Tuple[EquityTier, ...] = DEFAULT_TIERS
     target_pnl: Optional[float] = None      # daily profit-stop (None = off)
     daily_loss_r: Optional[float] = None   # daily loss cap = N * per-trade risk (R)
+    # extreme-low-drawdown controls
+    dd_target: float = 0.05                # max drawdown (0.05 = 5%)
+    max_consec_losses: int = 5             # worst-case consecutive-loss streak
 
     # -- tier resolution ------------------------------------------------
+    def dd_risk_pct(self) -> float:
+        """Per-trade risk that keeps worst-case DD under the target.
+
+        With ``max_consec_losses`` consecutive losses each risking
+        ``risk_pct``, the worst-case DD is ``max_consec_losses * risk_pct``.
+        Solving ``max_consec_losses * risk_pct <= dd_target`` gives the cap.
+        """
+        if self.max_consec_losses <= 0 or self.dd_target <= 0:
+            return float("inf")
+        return self.dd_target / self.max_consec_losses
+
     def risk_pct_for(self, equity: float) -> float:
-        return tier_for_equity(equity, self.tiers).risk_pct
+        # The tier risk is the upper bound; the DD target caps the actual
+        # per-trade risk for extreme-low-drawdown trading.
+        return min(tier_for_equity(equity, self.tiers).risk_pct,
+                   self.dd_risk_pct())
+
+    def dd_risk_scale(self, equity: float, high_water: float) -> float:
+        """Soft runtime taper: 1.0 at 0% DD, tapering to 0.2 at the target.
+
+        Risk is *scaled* (never hard-stopped), so this is not a fail-closed
+        gate. Floors at 0.2 so the account keeps trading at reduced size
+        even deep in a drawdown.
+        """
+        if high_water <= 0 or equity >= high_water:
+            return 1.0
+        dd = (high_water - equity) / high_water
+        if dd <= 0:
+            return 1.0
+        if self.dd_target <= 0:
+            return 1.0
+        scale = 1.0 - (dd / self.dd_target)
+        return float(max(0.2, min(1.0, scale)))
+
+    def risk_pct_for_runtime(self, equity: float, high_water: float) -> float:
+        """Effective per-trade risk with the runtime DD taper applied."""
+        return self.risk_pct_for(equity) * self.dd_risk_scale(
+            equity, high_water)
 
     def lot_max_for(self, equity: float) -> float:
         return tier_for_equity(equity, self.tiers).lot_max
@@ -146,11 +196,14 @@ def equity_for_daily_target(
     avg_win_rr: float = 0.8,
     avg_loss_rr: float = 1.0,
     tiers: Tuple[EquityTier, ...] = DEFAULT_TIERS,
+    dd_cap: float = 0.01,
 ) -> float:
     """Equity at which ``target_pnl``/day is reachable at sane risk.
 
-    Solves expectancy = target for equity within each tier's range.
-    Returns ``inf`` if the target is unreachable within the ladder.
+    Solves expectancy = target for equity within each tier's range. The
+    per-trade risk is the DD-capped value (``min(tier_risk, dd_cap)``) so
+    the answer is consistent with ``RiskPolicy.realistic_daily_pnl`` (which
+    also uses the DD-capped risk). Returns ``inf`` if unreachable.
     """
     rr = win_rate * avg_win_rr - (1.0 - win_rate) * avg_loss_rr
     if rr <= 0:
@@ -158,7 +211,7 @@ def equity_for_daily_target(
     # sorted ascending; last tier is the ceiling
     ordered = sorted(tiers, key=lambda t: t.min_equity)
     for i, t in enumerate(ordered):
-        risk_pct = t.risk_pct
+        risk_pct = min(t.risk_pct, dd_cap)
         # equity needed so that rr * trades * risk_pct * equity == target
         need = target_pnl / (rr * trades_per_day * risk_pct)
         # this tier applies for equity in [t.min_equity, next.min_equity)
