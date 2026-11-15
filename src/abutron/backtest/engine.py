@@ -77,6 +77,7 @@ class BacktestResult:
     timeframe: str = ""
     htf: str = ""
     confluence_filtered: int = 0
+    entry_filtered: int = 0
     mode: str = "backtest"
     details: List[Dict] = field(default_factory=list)
 
@@ -100,7 +101,13 @@ class BacktestEngine:
                  warmup: int = 30,
                  compound: bool = False,
                  mtf_confluence: bool = True,
-                 htf_warmup: int = 20):
+                 htf_warmup: int = 20,
+                 # High-precision entry filters (win-rate optimisation):
+                 min_conviction: float = 0.0,
+                 require_trend_regime: bool = False,
+                 min_atr_pct: float = 0.0,
+                 max_atr_pct: float = 9.99,
+                 require_momentum: bool = False):
         self.brain = brain
         self.sniper = sniper or sniper_engine
         self.trailing = trailing or trailing_stop
@@ -120,6 +127,11 @@ class BacktestEngine:
         # to agree before trading).
         self.mtf_confluence = mtf_confluence
         self.htf_warmup = htf_warmup
+        self.min_conviction = min_conviction
+        self.require_trend_regime = require_trend_regime
+        self.min_atr_pct = min_atr_pct
+        self.max_atr_pct = max_atr_pct
+        self.require_momentum = require_momentum
         self.train_epochs = 60
         self.train_batch = 32
         self.train_seed = 0
@@ -136,6 +148,57 @@ class BacktestEngine:
     def _point_for(self, pos: "Position") -> float:
         p = pos.point or self.point
         return p if p > 0 else 1e-9
+
+    # rolling window used by the regime / momentum entry filters
+    _FILTER_WINDOW = 50
+
+    def _entry_allowed(self, prop, closes, highs, lows, a, idx) -> tuple:
+        """Return (allowed: bool, reason: str) for high-precision entry
+        filters. All filters remove low-probability setups to raise win
+        rate; a rejected entry is skipped (counted by the caller).
+
+        Filters are computed on a rolling window of history UP TO the
+        current bar `idx` (point-in-time, no lookahead) so they are
+        stationary and reproduce regardless of dataset size.
+        """
+        # conviction floor
+        if self.min_conviction > 0 and prop.conviction < self.min_conviction:
+            return False, f"LOW_CONVICTION({prop.conviction:.3f})"
+        # volatility filter (ATR as % of price)
+        price = closes[idx] if idx < len(closes) and closes else 0.0
+        if price:
+            atr_pct = (a / price) * 100.0
+            if atr_pct < self.min_atr_pct:
+                return False, f"LOW_VOL({atr_pct:.3f}%)"
+            if atr_pct > self.max_atr_pct:
+                return False, f"HIGH_VOL({atr_pct:.3f}%)"
+        end = idx + 1
+        w = self._FILTER_WINDOW
+        lo = max(0, end - w)
+        closes_w = closes[lo:end]
+        highs_w = highs[lo:end]
+        lows_w = lows[lo:end]
+        # regime filter: only trade trending regimes
+        if self.require_trend_regime and len(closes_w) > 10:
+            from ..brain.features import _atr as _f_atr
+            from ..brain.brain import detect_regime
+            try:
+                regime = detect_regime(closes_w, _f_atr(highs_w, lows_w, closes_w))
+            except Exception:
+                regime = ""
+            if regime and regime not in ("trend_up", "trend_down"):
+                return False, f"REGIME({regime})"
+        # momentum confirmation: only trade WITH the momentum (raises win
+        # rate). A BUY needs upward momentum (RSI > 50), a SELL needs
+        # downward momentum (RSI < 50); trades against momentum are dropped.
+        if self.require_momentum and len(closes_w) > 14:
+            from ..brain.features import _rsi
+            rsi = _rsi(closes_w)
+            if prop.direction == "BUY" and rsi < 50.0:
+                return False, f"RSI_NO_UP_MOM({rsi:.1f})"
+            if prop.direction == "SELL" and rsi > 50.0:
+                return False, f"RSI_NO_DOWN_MOM({rsi:.1f})"
+        return True, ""
 
     @staticmethod
     def _to_epoch(iso: str) -> float:
@@ -218,6 +281,7 @@ class BacktestEngine:
         htf_ptr: int = 0
         htf_dir: str = ""
         confluence_filtered = 0
+        entry_filtered = 0
 
         for c in run_candles:
             idx += 1
@@ -324,14 +388,18 @@ class BacktestEngine:
                     orderflow={}, footprint={}, agent_scores={},
                     regime="")
                 if prop.direction in ("BUY", "SELL"):
-                    # Multi-timeframe confluence: wait until the HTF agrees
-                    # with the LTF trigger before entering. Only applies when
-                    # a higher-timeframe series was supplied; otherwise the
-                    # platform trades every trigger as before. If the HTF has
-                    # not yet formed a direction, or it disagrees, skip this
-                    # bar (no entry) and wait for the timeframes to agree.
-                    if self.mtf_confluence and htf_candles and (
+                    # High-precision entry filter (win-rate optimisation):
+                    # drop low-probability setups before the confluence gate.
+                    _ok, _reason = self._entry_allowed(
+                        prop, closes, highs, lows, a, idx)
+                    if not _ok:
+                        entry_filtered += 1
+                    elif self.mtf_confluence and htf_candles and (
                             not htf_dir or htf_dir != prop.direction):
+                        # Multi-timeframe confluence: wait until the HTF
+                        # agrees with the LTF trigger. Only applies when a
+                        # higher-timeframe series was supplied; otherwise the
+                        # platform trades every trigger as before.
                         confluence_filtered += 1
                     else:
                         bias = self.brain.get_entry_bias(c.symbol, "")
@@ -381,6 +449,7 @@ class BacktestEngine:
             timeframe=timeframe or (candles[0].timeframe if candles else ""),
             htf=(htf_candles[0].timeframe if htf_candles else ""),
             confluence_filtered=confluence_filtered,
+            entry_filtered=entry_filtered,
             mode=mode, details=details)
 
     # ------------------------------------------------------------------

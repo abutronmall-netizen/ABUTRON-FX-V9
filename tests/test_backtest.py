@@ -17,6 +17,7 @@ from abutron.backtest import MarketDataLoader, BacktestEngine
 from abutron.backtest.loader import _decimals, _epoch_to_iso
 from abutron.feeds.feed_quality import Candle
 from abutron.brain import make_brain, default_ensemble
+from abutron.brain.brain import BrainProposal
 
 
 def _iso(epoch: float) -> str:
@@ -273,3 +274,92 @@ def test_mtf_no_htf_trades_every_trigger():
     assert r.htf == ""
     assert r.confluence_filtered == 0
     assert r.trades > 0
+
+
+# --------------------------------------------------------------------------
+# High-precision entry filters (win-rate optimisation)
+# --------------------------------------------------------------------------
+def _engine(**kw):
+    brain = make_brain(ensemble=default_ensemble(seed=0), size_cap=1.0)
+    kw.setdefault("equity", 10000)
+    kw.setdefault("risk_pct", 0.05)
+    kw.setdefault("point", 0.0)
+    kw.setdefault("point_value", 1.0)
+    kw.setdefault("warmup", 20)
+    return BacktestEngine(brain, **kw)
+
+
+def _prop(direction, conviction=0.9):
+    return BrainProposal(symbol="SYN.0", direction=direction,
+                         conviction=conviction, confidence=conviction,
+                         uncertainty=0.1)
+
+
+def _rising(n=60, start=100.0, step=0.5):
+    return [start + i * step for i in range(n)]
+
+
+def _falling(n=60, start=100.0, step=0.5):
+    return [start - i * step for i in range(n)]
+
+
+def test_entry_filter_conviction_floor():
+    eng = _engine(min_conviction=0.9)
+    ok, reason = eng._entry_allowed(_prop("BUY", 0.3), _rising(), _rising(),
+                                    _rising(), 1.0, 59)
+    assert ok is False
+    assert reason.startswith("LOW_CONVICTION")
+    ok2, _ = eng._entry_allowed(_prop("BUY", 0.95), _rising(), _rising(),
+                                _rising(), 1.0, 59)
+    assert ok2 is True
+
+
+def test_entry_filter_volatility_band():
+    # ATR=1.0 on a 100 price is 1%. Reject below 5%.
+    eng = _engine(min_atr_pct=5.0)
+    ok, reason = eng._entry_allowed(_prop("BUY"), _rising(), _rising(),
+                                    _rising(), 1.0, 59)
+    assert ok is False
+    assert reason.startswith("LOW_VOL")
+    # Reject above band
+    eng2 = _engine(max_atr_pct=0.5)
+    ok2, reason2 = eng2._entry_allowed(_prop("BUY"), _rising(), _rising(),
+                                       _rising(), 1.0, 59)
+    assert ok2 is False
+    assert reason2.startswith("HIGH_VOL")
+
+
+def test_entry_filter_momentum_requires_agreement():
+    rising = _rising()
+    falling = _falling()
+    eng = _engine(require_momentum=True)
+    # BUY in an uptrend (RSI>50) is allowed; SELL in uptrend is rejected.
+    ok_buy, _ = eng._entry_allowed(_prop("BUY"), rising, rising, rising,
+                                   1.0, 59)
+    assert ok_buy is True
+    ok_sell, reason = eng._entry_allowed(_prop("SELL"), rising, rising,
+                                         rising, 1.0, 59)
+    assert ok_sell is False
+    assert reason.startswith("RSI_NO_DOWN_MOM")
+    # Mirror: SELL in a downtrend allowed, BUY rejected.
+    ok_sell2, _ = eng._entry_allowed(_prop("SELL"), falling, falling,
+                                     falling, 1.0, 59)
+    assert ok_sell2 is True
+    ok_buy2, reason2 = eng._entry_allowed(_prop("BUY"), falling, falling,
+                                          falling, 1.0, 59)
+    assert ok_buy2 is False
+    assert reason2.startswith("RSI_NO_UP_MOM")
+
+
+def test_entry_filter_reduces_trades_and_counts():
+    candles = _synth(n=300, tf="M5", point=0.001)
+    brain = make_brain(ensemble=default_ensemble(seed=0), size_cap=1.0)
+    r_plain = BacktestEngine(
+        brain, equity=10000, risk_pct=0.05, point=0.0, point_value=1.0,
+        warmup=20).run(candles, [], symbol="SYN.0", timeframe="M5")
+    r_filt = _engine(require_momentum=True).run(
+        candles, [], symbol="SYN.0", timeframe="M5")
+    # momentum filter must not create trades; it can only remove them.
+    assert r_filt.trades <= r_plain.trades
+    assert r_filt.entry_filtered >= 0
+    assert r_plain.entry_filtered == 0

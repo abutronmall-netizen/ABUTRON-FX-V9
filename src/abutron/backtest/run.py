@@ -23,6 +23,7 @@ import sys
 from ..brain import make_brain, default_ensemble
 from ..brain.trainer import load_brain
 from ..config import BRAIN_ENSEMBLE_SEED, BRAIN_SIZE_CAP
+from ..apex.sniper import SniperEntryEngine
 from .loader import MarketDataLoader
 from .engine import BacktestEngine
 
@@ -41,6 +42,9 @@ def _print_report(r) -> None:
     if r.htf:
         print(f"  MTF confluence: HTF {r.htf} — "
               f"{r.confluence_filtered} entries filtered (waited for TFs)")
+    if r.entry_filtered:
+        print(f"  entry filters : {r.entry_filtered} entries filtered "
+              f"(conviction/regime/momentum/volatility)")
     if r.details:
         print(f"\n  last 10 closed trades:")
         for d in r.details[-10:]:
@@ -67,6 +71,22 @@ def main(argv=None) -> int:
     ap.add_argument("--point-value", type=float, default=1.0,
                     help="USD per point per lot (1.0 = standard for indices/FX)")
     ap.add_argument("--commission-per-lot", type=float, default=0.0)
+    ap.add_argument("--tp-atr", type=float, default=None,
+                    help="sniper take-profit in ATR multiples "
+                         "(optimizer picks tighter TP for higher win rate)")
+    ap.add_argument("--sl-atr", type=float, default=None,
+                    help="sniper stop-loss in ATR fraction")
+    ap.add_argument("--min-conviction", type=float, default=0.0,
+                    help="skip entries with brain conviction below this "
+                         "(0 = no filter)")
+    ap.add_argument("--require-trend", action="store_true",
+                    help="only enter in a trending regime")
+    ap.add_argument("--require-momentum", action="store_true",
+                    help="skip entries opposed by an extreme RSI / momentum")
+    ap.add_argument("--min-atr-pct", type=float, default=0.0,
+                    help="skip entries when ATR% is below this (volatility)")
+    ap.add_argument("--max-atr-pct", type=float, default=0.0,
+                    help="skip entries when ATR% is above this (volatility)")
     ap.add_argument("--brain", default=None,
                     help="path to a trained brain dir (from train.py) to load "
                          "instead of an untrained ensemble")
@@ -120,10 +140,21 @@ def main(argv=None) -> int:
                            size_cap=BRAIN_SIZE_CAP)
         print("Using untrained brain ensemble (random fallback signals). "
               "Train first with: python -m abutron.backtest.train")
+    sniper_kwargs = {}
+    if args.tp_atr is not None:
+        sniper_kwargs["tp_atr_mult"] = args.tp_atr
+    if args.sl_atr is not None:
+        sniper_kwargs["invalidation_atr_frac"] = args.sl_atr
+    sniper = SniperEntryEngine(**sniper_kwargs)
     engine = BacktestEngine(
-        brain, equity=args.equity, risk_pct=args.risk_pct,
+        brain, sniper=sniper, equity=args.equity, risk_pct=args.risk_pct,
         point=args.point, point_value=args.point_value,
-        commission_per_lot=args.commission_per_lot)
+        commission_per_lot=args.commission_per_lot,
+        min_conviction=args.min_conviction,
+        require_trend_regime=args.require_trend,
+        require_momentum=args.require_momentum,
+        min_atr_pct=args.min_atr_pct,
+        max_atr_pct=args.max_atr_pct)
     result = engine.run(
         candles, quotes, symbol=args.symbol or "",
         timeframe=args.timeframe or "",

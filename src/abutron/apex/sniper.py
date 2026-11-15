@@ -73,6 +73,15 @@ class SniperEntryEngine:
     # the market is gapped/extended and a CONFIRM entry is used instead.
     PULLBACK_ATR_MAX = 4.0
 
+    def __init__(self, *, tp_atr_mult: float = TP_ATR_MULT,
+                 invalidation_atr_frac: float = INVALIDATION_ATR_FRAC,
+                 pullback_atr_max: float = PULLBACK_ATR_MAX):
+        # Configurable geometry so a win-rate optimizer can sweep TP/SL
+        # multiples without touching the class defaults.
+        self.tp_atr_mult = tp_atr_mult
+        self.invalidation_atr_frac = invalidation_atr_frac
+        self.pullback_atr_max = pullback_atr_max
+
     def plan(self, *, symbol: str, direction: str,
              closes: List[float], highs: List[float], lows: List[float],
              atr_val: float, of_features: Optional[Dict[str, float]] = None,
@@ -132,7 +141,7 @@ class SniperEntryEngine:
             if not is_buy and lvl < price:
                 continue  # resistance must be at/above price for a SELL
             dist = abs(price - lvl)
-            if a > 0 and dist > self.PULLBACK_ATR_MAX * a:
+            if a > 0 and dist > self.pullback_atr_max * a:
                 continue  # too far to be a practical pullback
             usable.append((kind, lvl, dist))
 
@@ -143,8 +152,8 @@ class SniperEntryEngine:
             usable.sort(key=lambda u: (u[2], priority.get(u[0], 3)))
             level_type, trigger, dist = usable[0]
             entry_type = "LIMIT"
-            inv = trigger - (self.INVALIDATION_ATR_FRAC * a) if is_buy \
-                else trigger + (self.INVALIDATION_ATR_FRAC * a)
+            inv = trigger - (self.invalidation_atr_frac * a) if is_buy \
+                else trigger + (self.invalidation_atr_frac * a)
         else:
             # No usable pullback level, OR the brain's learned confirm_bias
             # is high (it learned from a loss to wait for confirmation and
@@ -154,17 +163,17 @@ class SniperEntryEngine:
             entry_type = "CONFIRM"
             ref = swing_low if is_buy else swing_high
             if ref is not None:
-                inv = ref - (self.INVALIDATION_ATR_FRAC * a) if is_buy \
-                    else ref + (self.INVALIDATION_ATR_FRAC * a)
+                inv = ref - (self.invalidation_atr_frac * a) if is_buy \
+                    else ref + (self.invalidation_atr_frac * a)
             else:
-                inv = price - (self.INVALIDATION_ATR_FRAC * a) if is_buy \
-                    else price + (self.INVALIDATION_ATR_FRAC * a)
+                inv = price - (self.invalidation_atr_frac * a) if is_buy \
+                    else price + (self.invalidation_atr_frac * a)
 
         # --- Tight take-profit (lock profit fast) ---------------------
         if is_buy:
-            tp = trigger + self.TP_ATR_MULT * a
+            tp = trigger + self.tp_atr_mult * a
         else:
-            tp = trigger - self.TP_ATR_MULT * a
+            tp = trigger - self.tp_atr_mult * a
 
         # --- Entry quality score (0..1) ------------------------------
         quality = self._quality(
@@ -198,7 +207,7 @@ class SniperEntryEngine:
         #    sniper ideal — least adverse path to the fill.
         if entry_type == "LIMIT":
             a_ref = a if a > 0 else (abs(price) * 0.001 or 1.0)
-            proximity = 1.0 - min(1.0, dist / (self.PULLBACK_ATR_MAX * a_ref))
+            proximity = 1.0 - min(1.0, dist / (self.pullback_atr_max * a_ref))
             q += 0.25 * proximity
         else:
             # CONFIRM entries are inherently less precise.
