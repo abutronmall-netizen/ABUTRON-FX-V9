@@ -19,14 +19,14 @@ def test_tier_for_equity_picks_correct_milestone():
 
 def test_risk_pct_and_lot_scale_with_equity():
     policy = RiskPolicy()
-    # $50 starter tier -> 4% risk, 0.5 lot cap
-    assert policy.risk_pct_for(50.0) == pytest.approx(0.04)
+    # $50 starter tier -> 15% risk, 0.5 lot cap
+    assert policy.risk_pct_for(50.0) == pytest.approx(0.15)
     assert policy.lot_max_for(50.0) == pytest.approx(0.5)
-    # crossing $100 steps risk up + lot cap up (auto lot scaling)
-    assert policy.risk_pct_for(100.0) == pytest.approx(0.05)
+    # risk held at 15% across tiers; lot_max scales up (auto lot scaling)
+    assert policy.risk_pct_for(100.0) == pytest.approx(0.15)
     assert policy.lot_max_for(100.0) == pytest.approx(1.0)
     # $10k tier
-    assert policy.risk_pct_for(10000.0) == pytest.approx(0.12)
+    assert policy.risk_pct_for(10000.0) == pytest.approx(0.15)
     assert policy.lot_max_for(10000.0) == pytest.approx(25.0)
 
 
@@ -45,11 +45,11 @@ def test_daily_profit_stop():
 
 
 def test_daily_loss_cap():
-    policy = RiskPolicy(daily_loss_pct=0.10)
-    # $50 equity -> $5 loss cap
-    assert policy.allow_entry(50.0, -4.9)[0] is True
-    assert policy.allow_entry(50.0, -5.0) == (False, "DAILY_LOSS_CAP")
-    assert policy.allow_entry(50.0, -6.0)[0] is False
+    policy = RiskPolicy(daily_loss_r=3.0)
+    # $50 equity @ 15% risk -> $7.50/trade; 3R cap = $22.50/day
+    assert policy.allow_entry(50.0, -22.4)[0] is True
+    assert policy.allow_entry(50.0, -22.5) == (False, "DAILY_LOSS_CAP")
+    assert policy.allow_entry(50.0, -23.0)[0] is False
 
 
 def test_equity_for_daily_target_reachable_equity():

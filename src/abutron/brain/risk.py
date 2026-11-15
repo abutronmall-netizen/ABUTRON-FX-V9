@@ -49,15 +49,17 @@ class EquityTier:
 
 
 # Default compounding ladder for the $50 -> $100 -> ... growth path.
-# Risk steps up modestly as equity grows; lot_max scales with it so the
-# position size grows with the account rather than staying fixed.
+# Risk is held at 15% per trade across tiers (aggressive sniper risk as
+# requested for small accounts); lot_max scales with equity so the
+# position size grows with the account (auto lot sizing) while the
+# per-trade risk fraction stays fixed at 15%.
 DEFAULT_TIERS: Tuple[EquityTier, ...] = (
-    EquityTier(0.0,     0.04, 0.5,  "$50 starter"),
-    EquityTier(100.0,   0.05, 1.0,  "$100"),
-    EquityTier(500.0,   0.07, 2.0,  "$500"),
-    EquityTier(1000.0,  0.08, 5.0,  "$1k"),
-    EquityTier(5000.0,  0.10, 10.0, "$5k"),
-    EquityTier(10000.0, 0.12, 25.0, "$10k"),
+    EquityTier(0.0,     0.15, 0.5,  "$50 starter"),
+    EquityTier(100.0,   0.15, 1.0,  "$100"),
+    EquityTier(500.0,   0.15, 2.0,  "$500"),
+    EquityTier(1000.0,  0.15, 5.0,  "$1k"),
+    EquityTier(5000.0,  0.15, 10.0, "$5k"),
+    EquityTier(10000.0, 0.15, 25.0, "$10k"),
     EquityTier(25000.0, 0.15, 50.0, "$25k+"),
 )
 
@@ -82,8 +84,8 @@ class RiskPolicy:
     daily target is a *stop*, never a reason to raise risk.
     """
     tiers: Tuple[EquityTier, ...] = DEFAULT_TIERS
-    target_pnl: Optional[float] = None   # daily profit-stop (None = off)
-    daily_loss_pct: Optional[float] = None  # daily loss cap = equity * this
+    target_pnl: Optional[float] = None      # daily profit-stop (None = off)
+    daily_loss_r: Optional[float] = None   # daily loss cap = N * per-trade risk (R)
 
     # -- tier resolution ------------------------------------------------
     def risk_pct_for(self, equity: float) -> float:
@@ -96,9 +98,13 @@ class RiskPolicy:
         return tier_for_equity(equity, self.tiers).label
 
     def loss_cap_for(self, equity: float) -> float:
-        if self.daily_loss_pct is None:
+        # Expressed in R (multiples of the per-trade risk) so the cap
+        # scales with the tier risk and never conflicts with it. At 15%
+        # risk a fixed %-of-equity cap would be hit by the first loss;
+        # an R-multiple cap (e.g. 3R) allows a sensible number of losses.
+        if self.daily_loss_r is None:
             return float("inf")
-        return equity * self.daily_loss_pct
+        return self.daily_loss_r * equity * self.risk_pct_for(equity)
 
     # -- daily stops ---------------------------------------------------
     def allow_entry(self, equity: float, daily_pnl: float
