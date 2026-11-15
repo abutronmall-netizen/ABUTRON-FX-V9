@@ -38,6 +38,9 @@ def _print_report(r) -> None:
     print(f"  avg win / loss: {r.avg_win:,.2f} / {r.avg_loss:,.2f}")
     print(f"  max drawdown : {r.max_drawdown:.2f}%")
     print(f"  max consec losses: {r.max_consecutive_losses}")
+    if r.htf:
+        print(f"  MTF confluence: HTF {r.htf} — "
+              f"{r.confluence_filtered} entries filtered (waited for TFs)")
     if r.details:
         print(f"\n  last 10 closed trades:")
         for d in r.details[-10:]:
@@ -53,6 +56,10 @@ def main(argv=None) -> int:
                     choices=["deriv", "fpmarkets"])
     ap.add_argument("--symbol", default=None)
     ap.add_argument("--timeframe", default=None)
+    ap.add_argument("--htf", default=None,
+                    help="higher timeframe for multi-timeframe confluence "
+                         "(e.g. H1 when trading M5); only enter when the HTF "
+                         "direction agrees with the trigger")
     ap.add_argument("--equity", type=float, default=10000.0)
     ap.add_argument("--risk-pct", type=float, default=0.05)
     ap.add_argument("--point", type=float, default=0.0,
@@ -85,6 +92,15 @@ def main(argv=None) -> int:
         candles, quotes = loader.load_fp_markets(symbol=args.symbol,
                                                  timeframe=args.timeframe)
 
+    htf_candles = []
+    if args.htf:
+        if args.broker == "deriv":
+            htf_candles = loader.load_deriv(symbol=args.symbol,
+                                            timeframe=args.htf)
+        else:
+            htf_candles, _ = loader.load_fp_markets(symbol=args.symbol,
+                                                    timeframe=args.htf)
+
     if not candles:
         print("No candles loaded. Check --broker/--symbol/--timeframe or run "
               "--list.")
@@ -111,6 +127,7 @@ def main(argv=None) -> int:
     result = engine.run(
         candles, quotes, symbol=args.symbol or "",
         timeframe=args.timeframe or "",
+        htf_candles=htf_candles,
         forward_test=args.forward, forward_frac=args.forward_frac)
 
     if args.json:

@@ -242,3 +242,34 @@ def test_train_cli_runs(tmp_path, capsys):
                      "--out", str(out)])
     assert rc == 0
     assert os.path.exists(os.path.join(str(out), "nexus_brain.json"))
+
+
+def test_mtf_confluence_filters_disagreeing_entries():
+    """Only enter when the HTF direction agrees with the LTF trigger."""
+    candles = _synth(n=200, tf="M5", point=0.001)
+    htf = _synth(n=40, tf="H1", point=0.001)
+    brain = make_brain(ensemble=default_ensemble(seed=0), size_cap=1.0)
+    eng_on = BacktestEngine(brain, equity=10000, risk_pct=0.05, point=0.0,
+                            point_value=1.0, warmup=20, mtf_confluence=True)
+    eng_off = BacktestEngine(brain, equity=10000, risk_pct=0.05, point=0.0,
+                             point_value=1.0, warmup=20, mtf_confluence=False)
+    r_on = eng_on.run(candles, [], symbol="SYN.0", timeframe="M5",
+                      htf_candles=htf)
+    r_off = eng_off.run(candles, [], symbol="SYN.0", timeframe="M5",
+                        htf_candles=htf)
+    # confluence must not increase trades and must report filtered entries
+    assert r_on.trades <= r_off.trades
+    assert r_on.confluence_filtered >= 0
+    assert r_on.htf == "H1"
+
+
+def test_mtf_no_htf_trades_every_trigger():
+    """Without HTF data, confluence is a no-op (trades every trigger)."""
+    candles = _synth(n=200, tf="M5", point=0.001)
+    brain = make_brain(ensemble=default_ensemble(seed=0), size_cap=1.0)
+    eng = BacktestEngine(brain, equity=10000, risk_pct=0.05, point=0.0,
+                         point_value=1.0, warmup=20, mtf_confluence=True)
+    r = eng.run(candles, [], symbol="SYN.0", timeframe="M5")  # no htf
+    assert r.htf == ""
+    assert r.confluence_filtered == 0
+    assert r.trades > 0

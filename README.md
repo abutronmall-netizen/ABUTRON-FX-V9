@@ -232,6 +232,12 @@ PYTHONPATH=src .venv/bin/python -m abutron.backtest.run \
 Point sizes are auto-detected from each instrument's price precision.
 `--brain <dir>` loads a trained model instead of the untrained ensemble.
 
+**Multi-timeframe confluence** — wait for timeframes to agree before
+trading. Pass `--htf <timeframe>` (e.g. `--htf H1` when trading M5): the
+engine only enters when the higher-timeframe direction agrees with the
+lower-timeframe trigger. Disagreeing / not-yet-formed HTF directions are
+skipped (counted as "filtered"). Omit `--htf` to trade every trigger.
+
 ## Training the brain
 
 Train the NexusBrain on historical candles and save the model:

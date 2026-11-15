@@ -75,6 +75,8 @@ class BacktestResult:
     trades_reported: int
     symbol: str = ""
     timeframe: str = ""
+    htf: str = ""
+    confluence_filtered: int = 0
     mode: str = "backtest"
     details: List[Dict] = field(default_factory=list)
 
@@ -96,7 +98,9 @@ class BacktestEngine:
                  commission_per_lot: float = 0.0,
                  history_len: int = 120,
                  warmup: int = 30,
-                 compound: bool = False):
+                 compound: bool = False,
+                 mtf_confluence: bool = True,
+                 htf_warmup: int = 20):
         self.brain = brain
         self.sniper = sniper or sniper_engine
         self.trailing = trailing or trailing_stop
@@ -111,6 +115,11 @@ class BacktestEngine:
         self.history_len = history_len
         self.warmup = warmup
         self.compound = compound
+        # Multi-timeframe confluence: only enter when the higher-timeframe
+        # direction agrees with the lower-timeframe trigger (wait for TFs
+        # to agree before trading).
+        self.mtf_confluence = mtf_confluence
+        self.htf_warmup = htf_warmup
         self.train_epochs = 60
         self.train_batch = 32
         self.train_seed = 0
@@ -127,6 +136,14 @@ class BacktestEngine:
     def _point_for(self, pos: "Position") -> float:
         p = pos.point or self.point
         return p if p > 0 else 1e-9
+
+    @staticmethod
+    def _to_epoch(iso: str) -> float:
+        import time as _time
+        try:
+            return _time.mktime(_time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
+        except (ValueError, TypeError):
+            return 0.0
 
     def _train_on(self, train_candles: List[Candle]) -> None:
         """Train the brain's ensemble on a window of candles (walk-forward)."""
@@ -149,6 +166,7 @@ class BacktestEngine:
 
     def run(self, candles: List[Candle], quotes: Optional[List[Quote]] = None,
             *, symbol: str = "", timeframe: str = "",
+            htf_candles: Optional[List[Candle]] = None,
             forward_test: bool = False, forward_frac: float = 0.2
             ) -> BacktestResult:
         if not candles:
@@ -157,6 +175,8 @@ class BacktestEngine:
                                   0, symbol=symbol, timeframe=timeframe,
                                   mode="empty")
         candles = sorted(candles, key=lambda c: c.open_time)
+        htf_candles = sorted(htf_candles, key=lambda c: c.open_time) \
+            if htf_candles else []
         quotes_by_sym = {}
         if quotes:
             for q in quotes:
@@ -193,6 +213,11 @@ class BacktestEngine:
         position: Optional[Position] = None
         idx = 0
         last_a: Optional[float] = None
+        # multi-timeframe confluence state
+        htf_hist: List[Candle] = []
+        htf_ptr: int = 0
+        htf_dir: str = ""
+        confluence_filtered = 0
 
         for c in run_candles:
             idx += 1
@@ -209,6 +234,30 @@ class BacktestEngine:
             else:
                 last_a = _a
             a = _a if _a else (self._point(c) * 10)
+
+            # --- advance the higher-timeframe series to bars closed before
+            #     this LTF bar opens, and derive the HTF direction.
+            c_open_epoch = self._to_epoch(c.open_time)
+            while htf_ptr < len(htf_candles):
+                hb = htf_candles[htf_ptr]
+                if self._to_epoch(hb.close_time) <= c_open_epoch:
+                    htf_hist.append(hb)
+                    if len(htf_hist) > self.history_len:
+                        htf_hist = htf_hist[-self.history_len:]
+                    htf_ptr += 1
+                else:
+                    break
+            if len(htf_hist) >= self.htf_warmup:
+                _hcloses = [x.close for x in htf_hist]
+                _hhighs = [x.high for x in htf_hist]
+                _hlows = [x.low for x in htf_hist]
+                _hprop = self.brain.decide(
+                    symbol=c.symbol, closes=_hcloses, highs=_hhighs,
+                    lows=_hlows, orderflow={}, footprint={},
+                    agent_scores={}, regime="")
+                htf_dir = _hprop.direction
+            else:
+                htf_dir = ""
 
             # --- manage an open position against this candle -------------
             if position is not None:
@@ -275,20 +324,31 @@ class BacktestEngine:
                     orderflow={}, footprint={}, agent_scores={},
                     regime="")
                 if prop.direction in ("BUY", "SELL"):
-                    bias = self.brain.get_entry_bias(c.symbol, "")
-                    snip = self.sniper.plan(
-                        symbol=c.symbol, direction=prop.direction,
-                        closes=closes, highs=highs, lows=lows, atr_val=a,
-                        of_features={}, fp_features={}, regime="",
-                        uncertainty=prop.uncertainty,
-                        conviction=prop.conviction,
-                        confirm_bias=bias.get("confirm_bias", 0.0),
-                        quality_floor=bias.get("quality_floor", 0.0))
-                    fill = self._entry_fill(snip, c, prop.direction)
-                    if fill is not None:
-                        sizing_equity = equity if self.compound else self.equity
-                        position = self._open_position(
-                            c, snip, fill, prop, a, sizing_equity)
+                    # Multi-timeframe confluence: wait until the HTF agrees
+                    # with the LTF trigger before entering. Only applies when
+                    # a higher-timeframe series was supplied; otherwise the
+                    # platform trades every trigger as before. If the HTF has
+                    # not yet formed a direction, or it disagrees, skip this
+                    # bar (no entry) and wait for the timeframes to agree.
+                    if self.mtf_confluence and htf_candles and (
+                            not htf_dir or htf_dir != prop.direction):
+                        confluence_filtered += 1
+                    else:
+                        bias = self.brain.get_entry_bias(c.symbol, "")
+                        snip = self.sniper.plan(
+                            symbol=c.symbol, direction=prop.direction,
+                            closes=closes, highs=highs, lows=lows,
+                            atr_val=a, of_features={}, fp_features={},
+                            regime="", uncertainty=prop.uncertainty,
+                            conviction=prop.conviction,
+                            confirm_bias=bias.get("confirm_bias", 0.0),
+                            quality_floor=bias.get("quality_floor", 0.0))
+                        fill = self._entry_fill(snip, c, prop.direction)
+                        if fill is not None:
+                            sizing_equity = equity if self.compound \
+                                else self.equity
+                            position = self._open_position(
+                                c, snip, fill, prop, a, sizing_equity)
 
         # --- close any position left open at end of data -------------------
         if position is not None:
@@ -319,6 +379,8 @@ class BacktestEngine:
             max_open_drawdown=0.0, trades_reported=reported_trades,
             symbol=symbol or (candles[0].symbol if candles else ""),
             timeframe=timeframe or (candles[0].timeframe if candles else ""),
+            htf=(htf_candles[0].timeframe if htf_candles else ""),
+            confluence_filtered=confluence_filtered,
             mode=mode, details=details)
 
     # ------------------------------------------------------------------
