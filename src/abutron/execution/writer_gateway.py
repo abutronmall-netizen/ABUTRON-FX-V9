@@ -138,6 +138,7 @@ class SingleWriterGateway:
             state_machine.move(candidate["candidate_id"], "SEND", "DISPATCHED")
             nonce = make_nonce("ABUTRON_REQ")
             request = {
+                "kind": "order_handoff",
                 "request_id": nonce,
                 "candidate_id": candidate["candidate_id"],
                 "connection_id": connection_id,

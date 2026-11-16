@@ -25,3 +25,6 @@ vendor/abutron-apex/apex11/state/
 vendor/abutron-apex/state/
 # Vendored APEX default log/decision journal dir (relative to CWD)
 /state/
+# Source helpers live in a package directory named data (not runtime data).
+!vendor/abutron-apex/apex11/apex/data/
+!vendor/abutron-apex/apex11/apex/data/*.py

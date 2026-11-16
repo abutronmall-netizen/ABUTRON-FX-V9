@@ -37,8 +37,14 @@ class ManagerRequest:
 
     def verified(self, secret: str) -> bool:
         sig = self.raw.get("signed", "")
-        msg = self.raw.get("request_id", "") + "|" + \
-            self.raw.get("connection_id", "")
+        request_id = self.raw.get("request_id", "")
+        connection_id = self.raw.get("connection_id", "")
+        candidate_id = self.raw.get("candidate_id", "")
+        # Candidate-bound order handoffs use the same canonical payload as
+        # SingleWriterGateway. Legacy signed calls remain verifiable only when
+        # they do not assert a candidate/order identity.
+        msg = (f"{request_id}|{candidate_id}|{connection_id}"
+               if candidate_id else f"{request_id}|{connection_id}")
         return hmac_verify(secret, msg, sig)
 
 

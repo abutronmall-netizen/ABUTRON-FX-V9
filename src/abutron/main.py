@@ -64,8 +64,11 @@ class ApexRuntime:
         def _status(req):
             return {"status": "ok", "connection_id": req.connection_id}
         def _order(req):
-            return {"status": "ack", "ticket": 1000 + int(
-                req.raw.get("request_id", "0")[-4:] or "0")}
+            # No authenticated MT5 OrderSend/receipt adapter is wired to this
+            # manager socket yet. Explicitly reject rather than fabricating a
+            # ticket; the dispatcher must only record broker-native evidence.
+            return {"status": "reject",
+                    "reason": "NATIVE_ORDER_TRANSPORT_UNAVAILABLE"}
         manager_socket.register("status", _status)
         manager_socket.register("order", _order)
         manager_socket.register("order_handoff", _order)

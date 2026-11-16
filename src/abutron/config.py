@@ -55,10 +55,9 @@ BRAIN_ENSEMBLE_SEED = int(os.getenv("ABUTRON_BRAIN_SEED", "0"))
 BRAIN_MODEL_DIR = os.getenv("ABUTRON_BRAIN_DIR",
                             os.path.join(DATA_ROOT, "brain"))
 
-# LIVE trading is ENABLED. This platform is built for aggressive DEMO + LIVE
-# trading on both brokers (Deriv + FP Markets). Fail-closed LIVE gating has
-# been removed per the new design directive.
-LIVE_TRADING_ENABLED = os.getenv("ABUTRON_LIVE_TRADING_ENABLED", "true").lower() in (
+# LIVE is opt-in and stays disabled unless the deployment owner explicitly
+# enables it. A valid demo/native order path must be verified separately.
+LIVE_TRADING_ENABLED = os.getenv("ABUTRON_LIVE_TRADING_ENABLED", "false").lower() in (
     "1", "true", "yes")
 
 # ---------------------------------------------------------------------------

@@ -141,15 +141,19 @@ def test_connect_duplicate_account(client, crm_svc):
     assert "DUPLICATE_ACCOUNT_OWNER" in r.json()["detail"]
 
 
-def test_live_enabled_by_default(client, crm_svc):
-    """Aggressive mode: LIVE connects are accepted directly (no gate)."""
+def test_live_disabled_by_default(client, crm_svc, monkeypatch):
+    """LIVE must remain opt-in until the owner enables it explicitly."""
+    from abutron import config as cfgmod
+    from abutron.crm import controls as crmmod
+    monkeypatch.setattr(cfgmod, "LIVE_TRADING_ENABLED", False)
+    monkeypatch.setattr(crmmod, "LIVE_TRADING_ENABLED", False)
     _seed_user(crm_svc, "alice", "owner_a", "pw123")
     client.post("/api/client/login", json={"username": "alice", "password": "pw123"})
     r = client.post("/api/client/connect-account", json={
         "broker": "deriv", "environment": "live", "server": "Deriv-Live",
         "mt5_login": 555})
-    assert r.status_code == 200
-    assert r.json()["environment"] == "live"
+    assert r.status_code == 400
+    assert "LIVE_NOT_APPROVED" in r.json()["detail"]
 
 
 # -- tenant isolation -----------------------------------------------------
@@ -302,9 +306,12 @@ def test_live_on_grants_immediately(crm_svc):
         crmmod.LIVE_TRADING_ENABLED = old_ctrl
 
 
-def test_live_connect_launches_terminal_and_connects(client, crm_svc):
-    """A new LIVE account: portal connect succeeds -> MT5 terminal launched
-    -> live session CONNECTED (the terminal is the broker session)."""
+def test_live_connect_launches_terminal_and_connects(client, crm_svc, monkeypatch):
+    """Explicit opt-in permits LIVE linking; it still does not trade."""
+    from abutron import config as cfgmod
+    from abutron.crm import controls as crmmod
+    monkeypatch.setattr(cfgmod, "LIVE_TRADING_ENABLED", True)
+    monkeypatch.setattr(crmmod, "LIVE_TRADING_ENABLED", True)
     _seed_user(crm_svc, "alice", "owner_a", "pw123")
     client.post("/api/client/login",
                 json={"username": "alice", "password": "pw123"})

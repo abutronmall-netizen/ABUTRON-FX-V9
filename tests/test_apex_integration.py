@@ -78,6 +78,13 @@ def test_instrument_manifest_deriv():
     assert manifest[0]["symbol"] == "Volatility 100 Index.0"
 
 
+def test_default_deriv_manifest_restores_all_13_symbols():
+    from abutron.apex_integration import DEFAULT_DERIV_SYMBOLS
+    manifest = build_instrument_manifest([dict(_deriv_account(), symbols="")])
+    assert len(DEFAULT_DERIV_SYMBOLS) == 13
+    assert {m["symbol"] for m in manifest} == set(DEFAULT_DERIV_SYMBOLS)
+
+
 def test_instrument_manifest_fp():
     manifest = build_instrument_manifest([_fp_account()])
     assert len(manifest) == 2
@@ -95,8 +102,40 @@ def test_bridge_rejects_unknown_symbol(apex_int):
     assert "unknown" in (r.get("reason") or "").lower()
 
 
+class _ReadyBrain:
+    """Deterministic trained-brain stand-in for candidate contract tests."""
+    trained = True
+    VERSION = "test-trained"
+
+    def decide(self, **kwargs):
+        class Proposal:
+            direction = "BUY"
+            trained = True
+            blockers = []
+            conviction = 0.8
+            confidence = 0.8
+            uncertainty = 0.1
+
+            def to_dict(self):
+                return {"direction": self.direction, "trained": True,
+                        "conviction": self.conviction}
+        return Proposal()
+
+    def get_entry_bias(self, symbol, regime):
+        return {"confirm_bias": 0.0, "quality_floor": 0.0}
+
+    def size_position(self, **kwargs):
+        risk = kwargs["equity"] * kwargs["risk_pct"]
+        return {"lots": 10.0, "risk_usd": risk, "reason": "OK"}
+
+
+def _install_ready_brain(apex_int):
+    apex_int.brain = _ReadyBrain()
+
+
 def test_full_pipeline_produces_ready_candidate(apex_int):
-    """Closed candles -> APEX signal -> fail-closed review -> READY candidate."""
+    """Closed candles -> trained brain -> fail-closed review -> READY candidate."""
+    _install_ready_brain(apex_int)
     manifest = build_instrument_manifest([_deriv_account()])
     acct = _deriv_account()
     ready = None
@@ -126,11 +165,14 @@ def test_full_pipeline_produces_ready_candidate(apex_int):
     assert cand["broker"] == "deriv"
     assert cand["symbol"] == "Volatility 100 Index.0"
     assert cand["volume_lots"] >= 1.0
+    assert ready["review"]["risk_budget_usd"] == pytest.approx(50.0)
+    assert ready["review"]["risk_fraction"] == pytest.approx(0.005)
     assert len(cand["signal_id"]) == 64
 
 
 def test_fail_closed_blocks_without_attestation(apex_int):
     """Without native attestation gates, a candidate is BLOCKED (fail-closed)."""
+    _install_ready_brain(apex_int)
     manifest = build_instrument_manifest([_deriv_account()])
     acct = _deriv_account()
     blocked = False
@@ -272,6 +314,7 @@ _NATIVE_GEOMETRY = {
 
 
 def _run_until_ready(apex_int, *, n=130, risk_pct=0.5, geometry=None):
+    _install_ready_brain(apex_int)
     acct = dict(_deriv_account(), per_trade_risk_pct=risk_pct)
     manifest = build_instrument_manifest([acct])
     geom = dict(_NATIVE_GEOMETRY) if geometry is None else geometry

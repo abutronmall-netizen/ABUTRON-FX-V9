@@ -119,23 +119,21 @@ execution, broker-native reconciliation, and three operator surfaces
   enrollment opens a per-account MT5 terminal in `CONNECTING`, then the
   broker password is submitted **only** to an isolated `Mt5Verifier` for a
   one-shot native login — never persisted or returned. A verified identity
-  sets a worker binding and `CONNECTED`. **For a new LIVE account, once the
-  portal connect succeeds the MT5 terminal is launched and the live session
-  is activated (CONNECTED) automatically** — the terminal IS the broker
-  session. Trading ON grants trading **immediately** for both DEMO and LIVE:
-  `request_on` sets `desired_on=1 / effective_on=1` together (no pending
-  broker-ACK gate). LIVE is **enabled by default**
-  (`ABUTRON_LIVE_TRADING_ENABLED=true`) — DEMO and LIVE both trade, for
-  both brokers (FP Markets + Deriv).
+  sets a worker binding and `CONNECTED`. LIVE account linking is disabled by
+  default; setting `ABUTRON_LIVE_TRADING_ENABLED=true` is a separate deployment
+  opt-in, and CONNECTED does not switch trading ON. Client trading switches
+  remain OFF until explicitly requested. This is not proof of a working native
+  order path or authorization to trade LIVE.
 - **Order flow** — tick-level aggressor flow, cumulative delta, imbalance,
   absorption detection (overlay context fed to the decision journal).
 - **Volume footprint** — volume profile by price, POC, HVN/LVN, value area,
   cell-level buy/sell imbalance.
-- **Advisory candidate review** — the `candidate_contract.review_candidate`
-  check: account binding, native EA attestation, single-writer exclusivity,
-  per-trade risk, portfolio ceiling, broker calc-profit/order-check. Produces
-  a READY order candidate — never an order. The review verdict is recorded
-  for traceability but never blocks a trade (fail-closed gating removed).
+- **Fail-closed candidate review** — the versioned V9 review checks account
+  binding, native EA attestation, single-writer exclusivity, account-defined
+  per-trade risk and portfolio ceiling, and broker calc-profit/order-check.
+  It can produce a READY *candidate*, never a broker order; missing evidence
+  blocks it. The legacy main manager rejects order handoffs until a genuine
+  authenticated MT5 OrderSend/receipt adapter is installed.
 - **Native execution** — per-account single-writer MQL5 EA
   (`ApexNativeWriter`), signed activation revisions, binary SHA256 pins,
   ACK / UNKNOWN / REJECTED receipts, at-most-once reservation on the
@@ -328,10 +326,11 @@ forward-test, or live use. More candles = more stable OOS accuracy.
 | Deriv | DEMO (6207, 7593, 9244) | Synthetic indices via MT5 |
 | FP Markets | DEMO (0512, 1636, 1622, 2582) | FX/CFD, `.r` symbol suffix |
 
-DEMO and LIVE are both enabled for both brokers. request_on grants
-trading immediately in either environment — no separate LIVE activation or
-promotion step. The only requirement to trade is a CONNECTED broker session
-and an active license.
+LIVE is disabled by default (`ABUTRON_LIVE_TRADING_ENABLED=false`). Even
+when deployment-level LIVE linking is explicitly enabled, CONNECTED is not a
+trade authorization; the account switch and all native evidence gates still
+apply. Order submission remains unavailable until the manager is connected to
+a genuine account-bound MT5 writer that returns broker-native receipts.
 
 ## Security
 

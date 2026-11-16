@@ -155,8 +155,8 @@ class CrmService:
         if not isinstance(mt5_login, int) or mt5_login <= 0:
             raise CrmError("CREDENTIAL_INVALID: invalid MT5 account number")
 
-        # DEMO/LIVE: both are enabled. Fail-closed LIVE gating has been
-        # removed — LIVE connects are accepted directly (aggressive mode).
+        # LIVE account linking is owner opt-in and remains disabled by
+        # default; a configuration flag alone does not prove execution safety.
         if environment == "live" and not LIVE_TRADING_ENABLED:
             raise CrmError("LIVE_NOT_APPROVED: LIVE trading is not enabled "
                            "for this deployment")
