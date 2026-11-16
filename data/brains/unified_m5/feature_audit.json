@@ -1,0 +1,2153 @@
+{
+  "version": "signals_v2_causal_proxy_v1",
+  "rows": 162615,
+  "symbols": 26,
+  "slots": {
+    "of_imbalance": {
+      "index": 10,
+      "nonzero_ratio": 0.999631,
+      "mean": -0.000215,
+      "min": -1.0,
+      "max": 1.0
+    },
+    "of_delta_pct": {
+      "index": 11,
+      "nonzero_ratio": 0.999631,
+      "mean": -0.000134,
+      "min": -1.0,
+      "max": 1.0
+    },
+    "of_absorption_bias": {
+      "index": 12,
+      "nonzero_ratio": 0.99976,
+      "mean": 0.002905,
+      "min": -1.0,
+      "max": 1.0
+    },
+    "fp_va_imbalance": {
+      "index": 13,
+      "nonzero_ratio": 0.999699,
+      "mean": 0.000704,
+      "min": -1.0,
+      "max": 1.0
+    },
+    "fp_poc_vol_pct": {
+      "index": 14,
+      "nonzero_ratio": 1.0,
+      "mean": 0.168508,
+      "min": 0.167579,
+      "max": 0.172756
+    },
+    "trend_score": {
+      "index": 19,
+      "nonzero_ratio": 0.996962,
+      "mean": -0.011061,
+      "min": -1.0,
+      "max": 1.0
+    },
+    "meanrev_score": {
+      "index": 20,
+      "nonzero_ratio": 0.993733,
+      "mean": 0.001452,
+      "min": -0.9,
+      "max": 0.9
+    },
+    "breakout_score": {
+      "index": 21,
+      "nonzero_ratio": 0.999502,
+      "mean": -0.001369,
+      "min": -0.1,
+      "max": 0.1
+    },
+    "carry_score": {
+      "index": 22,
+      "nonzero_ratio": 0.996937,
+      "mean": -0.003293,
+      "min": -1.0,
+      "max": 1.0
+    }
+  },
+  "all_slots_nonzero": true,
+  "per_symbol": {
+    "AUDUSD.r": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3254,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.997849,
+          "mean": -0.014163,
+          "std": 0.658514,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.997849,
+          "mean": -0.013459,
+          "std": 0.649613,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.999385,
+          "mean": 0.011942,
+          "std": 0.390931,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.998463,
+          "mean": -0.008727,
+          "std": 0.652255,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168849,
+          "std": 0.001591,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.994161,
+          "mean": -0.041595,
+          "std": 0.234695,
+          "min": -0.921406,
+          "max": 0.985984
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.988015,
+          "mean": 0.021192,
+          "std": 0.112845,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.99539,
+          "mean": -0.014986,
+          "std": 0.057504,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.994161,
+          "mean": -0.0046,
+          "std": 0.031425,
+          "min": -0.134231,
+          "max": 0.2491
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "EURUSD.r": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3239,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.999691,
+          "mean": -0.015499,
+          "std": 0.662772,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.999691,
+          "mean": -0.014038,
+          "std": 0.653715,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.005171,
+          "std": 0.387476,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": -0.013218,
+          "std": 0.655667,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168756,
+          "std": 0.001526,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.994134,
+          "mean": -0.012822,
+          "std": 0.263186,
+          "min": -0.815247,
+          "max": 0.9146
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.987651,
+          "mean": 0.010953,
+          "std": 0.1374,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.99753,
+          "mean": -0.004875,
+          "std": 0.061751,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993825,
+          "mean": -0.001196,
+          "std": 0.026518,
+          "min": -0.089775,
+          "max": 0.208524
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "GBPUSD.r": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3246,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.999076,
+          "mean": -0.009596,
+          "std": 0.657902,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.999076,
+          "mean": -0.008676,
+          "std": 0.647732,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.998768,
+          "mean": -0.001105,
+          "std": 0.388855,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.999076,
+          "mean": -0.007132,
+          "std": 0.651728,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168808,
+          "std": 0.001565,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.994147,
+          "mean": -0.009727,
+          "std": 0.248286,
+          "min": -0.775473,
+          "max": 0.882389
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.987677,
+          "mean": 0.010529,
+          "std": 0.126571,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.999076,
+          "mean": -0.000436,
+          "std": 0.060323,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993839,
+          "mean": -0.000887,
+          "std": 0.024371,
+          "min": -0.107633,
+          "max": 0.189809
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "NZDUSD.r": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3250,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.998462,
+          "mean": -0.01678,
+          "std": 0.657107,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.998462,
+          "mean": -0.0156,
+          "std": 0.645959,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.998769,
+          "mean": -0.002134,
+          "std": 0.397067,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.998462,
+          "mean": -0.014842,
+          "std": 0.653061,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168825,
+          "std": 0.001584,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.994154,
+          "mean": -0.03411,
+          "std": 0.24272,
+          "min": -0.851183,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.987692,
+          "mean": 0.013409,
+          "std": 0.112518,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.996,
+          "mean": -0.011952,
+          "std": 0.060946,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.994154,
+          "mean": -0.003511,
+          "std": 0.046835,
+          "min": -0.424602,
+          "max": 0.472061
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "USDCHF.r": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3253,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.996926,
+          "mean": 0.021221,
+          "std": 0.655929,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.996926,
+          "mean": 0.021661,
+          "std": 0.649131,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.997848,
+          "mean": 0.004552,
+          "std": 0.387393,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.997541,
+          "mean": 0.020032,
+          "std": 0.650661,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168829,
+          "std": 0.001602,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.994159,
+          "mean": -0.018196,
+          "std": 0.26829,
+          "min": -0.913691,
+          "max": 0.808782
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.988011,
+          "mean": -0.010252,
+          "std": 0.131833,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.997233,
+          "mean": 0.011954,
+          "std": 0.060456,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.994159,
+          "mean": 0.001522,
+          "std": 0.030865,
+          "min": -0.13704,
+          "max": 0.11787
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "USDJPY.r": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3253,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.996926,
+          "mean": 0.05256,
+          "std": 0.644441,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.996926,
+          "mean": 0.052388,
+          "std": 0.63662,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.998463,
+          "mean": 0.021747,
+          "std": 0.38448,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.998156,
+          "mean": 0.05538,
+          "std": 0.637278,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168878,
+          "std": 0.00159,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.994159,
+          "mean": -0.025459,
+          "std": 0.231332,
+          "min": -0.865391,
+          "max": 0.792155
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.988011,
+          "mean": -0.015003,
+          "std": 0.111744,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.999078,
+          "mean": 0.018561,
+          "std": 0.058477,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993852,
+          "mean": 0.001376,
+          "std": 0.02364,
+          "min": -0.138362,
+          "max": 0.071842
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "XAUUSD.r": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3160,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": -0.030124,
+          "std": 0.64502,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": -0.030127,
+          "std": 0.645018,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.004179,
+          "std": 0.369798,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": -0.028114,
+          "std": 0.634569,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168866,
+          "std": 0.001571,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.993987,
+          "mean": -0.004516,
+          "std": 0.290084,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.987658,
+          "mean": 0.014172,
+          "std": 0.105068,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.012409,
+          "std": 0.060592,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993987,
+          "mean": -0.00614,
+          "std": 0.090617,
+          "min": -0.647078,
+          "max": 0.431488
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "BTCUSD": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3257,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": -0.023211,
+          "std": 0.65184,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": -0.023246,
+          "std": 0.651806,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.00064,
+          "std": 0.394515,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": -0.020505,
+          "std": 0.645963,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168865,
+          "std": 0.001604,
+          "min": 0.167579,
+          "max": 0.172748
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.994166,
+          "mean": -0.078854,
+          "std": 0.353365,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.988026,
+          "mean": 0.015133,
+          "std": 0.115485,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.007246,
+          "std": 0.057355,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.994166,
+          "mean": -0.020428,
+          "std": 0.155954,
+          "min": -1.0,
+          "max": 0.817984
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "XTIUSD": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3145,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.99682,
+          "mean": 0.000259,
+          "std": 0.619513,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.99682,
+          "mean": 0.001146,
+          "std": 0.60113,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.998092,
+          "mean": 0.002661,
+          "std": 0.377288,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.997138,
+          "mean": 0.001291,
+          "std": 0.611798,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168961,
+          "std": 0.001601,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.993959,
+          "mean": -0.033042,
+          "std": 0.359523,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.987281,
+          "mean": 0.001827,
+          "std": 0.104857,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.995866,
+          "mean": 0.001304,
+          "std": 0.059457,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993641,
+          "mean": -0.015736,
+          "std": 0.183071,
+          "min": -1.0,
+          "max": 0.620493
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "US30": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3154,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.998732,
+          "mean": 0.023375,
+          "std": 0.620105,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.998732,
+          "mean": 0.02336,
+          "std": 0.619826,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.998732,
+          "mean": 0.021957,
+          "std": 0.366697,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.999049,
+          "mean": 0.027179,
+          "std": 0.607374,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168992,
+          "std": 0.00162,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.993976,
+          "mean": -0.007226,
+          "std": 0.301034,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.987635,
+          "mean": -0.004024,
+          "std": 0.109628,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.999366,
+          "mean": 0.00528,
+          "std": 0.063624,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993976,
+          "mean": -0.000626,
+          "std": 0.078333,
+          "min": -0.628802,
+          "max": 0.650318
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "US500": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3161,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.997786,
+          "mean": 0.011052,
+          "std": 0.62773,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.997786,
+          "mean": 0.01098,
+          "std": 0.627556,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.998418,
+          "mean": 0.020266,
+          "std": 0.364628,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.997786,
+          "mean": 0.015109,
+          "std": 0.613407,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168955,
+          "std": 0.001601,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.993989,
+          "mean": -0.025677,
+          "std": 0.293111,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.987662,
+          "mean": 0.00094,
+          "std": 0.101939,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.997786,
+          "mean": 0.003351,
+          "std": 0.062905,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993989,
+          "mean": -0.003229,
+          "std": 0.086061,
+          "min": -0.714531,
+          "max": 0.682107
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "US100": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 3154,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.002256,
+          "std": 0.630858,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.002256,
+          "std": 0.630858,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": 0.021224,
+          "std": 0.360614,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.007972,
+          "std": 0.617003,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168934,
+          "std": 0.001602,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.993976,
+          "mean": -0.037356,
+          "std": 0.299844,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.987635,
+          "mean": 0.007408,
+          "std": 0.105584,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.999683,
+          "mean": -0.001997,
+          "std": 0.061688,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993976,
+          "mean": -0.008445,
+          "std": 0.135873,
+          "min": -1.0,
+          "max": 0.94052
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "GER40": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 2929,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 0.998976,
+          "mean": 0.030551,
+          "std": 0.634471,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 0.998976,
+          "mean": 0.030544,
+          "std": 0.634462,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 0.999317,
+          "mean": 0.031249,
+          "std": 0.369244,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 0.998976,
+          "mean": 0.035053,
+          "std": 0.622409,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.16893,
+          "std": 0.0016,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.993513,
+          "mean": 0.02287,
+          "std": 0.2688,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.986343,
+          "mean": -0.011184,
+          "std": 0.117518,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.998634,
+          "mean": 0.007781,
+          "std": 0.065151,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.993513,
+          "mean": 0.006206,
+          "std": 0.074687,
+          "min": -0.29489,
+          "max": 0.690565
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Boom 1000 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": -0.597588,
+          "std": 0.730294,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": -0.597588,
+          "std": 0.730294,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.090486,
+          "std": 0.177735,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": -0.613781,
+          "std": 0.716933,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.167753,
+          "std": 0.000643,
+          "min": 0.167579,
+          "max": 0.172753
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.035329,
+          "std": 0.274796,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": 0.024537,
+          "std": 0.130383,
+          "min": -0.9,
+          "max": 0.784136
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.009587,
+          "std": 0.065635,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.0026,
+          "std": 0.063574,
+          "min": -0.127355,
+          "max": 0.286639
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Boom 600 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": -0.453791,
+          "std": 0.784515,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": -0.453791,
+          "std": 0.784515,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.07109,
+          "std": 0.237213,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": -0.472869,
+          "std": 0.768272,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.16793,
+          "std": 0.000943,
+          "min": 0.167579,
+          "max": 0.172738
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.037833,
+          "std": 0.276069,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": 0.012953,
+          "std": 0.116777,
+          "min": -0.9,
+          "max": 0.835058
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.001645,
+          "std": 0.065641,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.000185,
+          "std": 0.083252,
+          "min": -0.197682,
+          "max": 0.324071
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Boom 300 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": -0.281727,
+          "std": 0.779522,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": -0.281727,
+          "std": 0.779522,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.040229,
+          "std": 0.333197,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": -0.300691,
+          "std": 0.771084,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168263,
+          "std": 0.001318,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.035611,
+          "std": 0.501233,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": 0.008176,
+          "std": 0.070514,
+          "min": -0.9,
+          "max": 0.827974
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.999893,
+          "mean": -0.009812,
+          "std": 0.064593,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.019242,
+          "std": 0.316683,
+          "min": -1.0,
+          "max": 1.0
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Boom 150 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": -0.168151,
+          "std": 0.74335,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": -0.165724,
+          "std": 0.739114,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.022716,
+          "std": 0.383901,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": -0.181141,
+          "std": 0.739906,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168502,
+          "std": 0.001463,
+          "min": 0.167579,
+          "max": 0.172754
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.015666,
+          "std": 0.177632,
+          "min": -0.71821,
+          "max": 0.770846
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": 0.007785,
+          "std": 0.120409,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.004593,
+          "std": 0.062331,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.000274,
+          "std": 0.016883,
+          "min": -0.047822,
+          "max": 0.067914
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Crash 1000 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.582203,
+          "std": 0.739977,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.5822,
+          "std": 0.739978,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": 0.087262,
+          "std": 0.180405,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.599333,
+          "std": 0.727859,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.167753,
+          "std": 0.000651,
+          "min": 0.167579,
+          "max": 0.172755
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.05791,
+          "std": 0.28013,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": -0.014355,
+          "std": 0.11863,
+          "min": -0.787645,
+          "max": 0.882028
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": 0.001866,
+          "std": 0.065968,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.003164,
+          "std": 0.066171,
+          "min": -0.370136,
+          "max": 0.12408
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Crash 600 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.453333,
+          "std": 0.785799,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.453333,
+          "std": 0.785799,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": 0.067371,
+          "std": 0.236351,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.472143,
+          "std": 0.770199,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.16792,
+          "std": 0.000932,
+          "min": 0.167579,
+          "max": 0.172752
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.038602,
+          "std": 0.278434,
+          "min": -1.0,
+          "max": 0.999339
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": -0.018648,
+          "std": 0.12391,
+          "min": -0.853581,
+          "max": 0.680221
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": 0.004394,
+          "std": 0.06493,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.000196,
+          "std": 0.083584,
+          "min": -0.310241,
+          "max": 0.198655
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Crash 300 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.273462,
+          "std": 0.780517,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.273462,
+          "std": 0.780517,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": 0.043213,
+          "std": 0.331876,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.293606,
+          "std": 0.771807,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.16826,
+          "std": 0.001303,
+          "min": 0.167579,
+          "max": 0.172755
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.015684,
+          "std": 0.484115,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": -0.000841,
+          "std": 0.072669,
+          "min": -0.837765,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.001778,
+          "std": 0.063476,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.008053,
+          "std": 0.301704,
+          "min": -1.0,
+          "max": 0.873241
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Crash 150 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.162995,
+          "std": 0.744374,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.160154,
+          "std": 0.740331,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": 0.023557,
+          "std": 0.388244,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.175758,
+          "std": 0.74191,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168487,
+          "std": 0.001447,
+          "min": 0.167579,
+          "max": 0.172749
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.028373,
+          "std": 0.185756,
+          "min": -0.750316,
+          "max": 0.720906
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": -0.004634,
+          "std": 0.113409,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.001763,
+          "std": 0.063823,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.000665,
+          "std": 0.016954,
+          "min": -0.067405,
+          "max": 0.052125
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Volatility 10 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.002356,
+          "std": 0.668051,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.002362,
+          "std": 0.668048,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": 0.002808,
+          "std": 0.382421,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.002588,
+          "std": 0.657369,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168824,
+          "std": 0.001592,
+          "min": 0.167579,
+          "max": 0.172754
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.006196,
+          "std": 0.187366,
+          "min": -0.844007,
+          "max": 0.859409
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": 0.001345,
+          "std": 0.120097,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.002313,
+          "std": 0.063222,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.000695,
+          "std": 0.030346,
+          "min": -0.105131,
+          "max": 0.103307
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Volatility 25 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.008487,
+          "std": 0.667524,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.008487,
+          "std": 0.667524,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.00165,
+          "std": 0.384469,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.006816,
+          "std": 0.656742,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168815,
+          "std": 0.001577,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.014945,
+          "std": 0.242135,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": -0.005482,
+          "std": 0.120114,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": 0.002932,
+          "std": 0.061329,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.003653,
+          "std": 0.075681,
+          "min": -0.270474,
+          "max": 0.35352
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Volatility 50 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.007604,
+          "std": 0.671557,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.007604,
+          "std": 0.671557,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": 0.00793,
+          "std": 0.384096,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.008653,
+          "std": 0.660586,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168799,
+          "std": 0.001579,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.004078,
+          "std": 0.312734,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": -0.004835,
+          "std": 0.104514,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": 0.002582,
+          "std": 0.062941,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.003141,
+          "std": 0.150018,
+          "min": -0.565337,
+          "max": 0.457685
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Volatility 75 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": -0.007419,
+          "std": 0.662994,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": -0.007419,
+          "std": 0.662994,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": -0.005922,
+          "std": 0.385661,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": -0.007785,
+          "std": 0.652667,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168834,
+          "std": 0.001579,
+          "min": 0.167579,
+          "max": 0.172754
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": 0.003481,
+          "std": 0.395284,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": -0.001074,
+          "std": 0.081122,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 1.0,
+          "mean": -0.000149,
+          "std": 0.061514,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.003109,
+          "std": 0.226042,
+          "min": -0.78986,
+          "max": 0.784029
+        }
+      },
+      "all_slots_nonzero": true
+    },
+    "Volatility 100 Index.0": {
+      "version": "signals_v2_causal_proxy_v1",
+      "rows": 9320,
+      "market_features": 23,
+      "slots": {
+        "of_imbalance": {
+          "index": 10,
+          "nonzero_ratio": 1.0,
+          "mean": 0.004467,
+          "std": 0.671243,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_delta_pct": {
+          "index": 11,
+          "nonzero_ratio": 1.0,
+          "mean": 0.004467,
+          "std": 0.671243,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "of_absorption_bias": {
+          "index": 12,
+          "nonzero_ratio": 1.0,
+          "mean": 0.009659,
+          "std": 0.384176,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_va_imbalance": {
+          "index": 13,
+          "nonzero_ratio": 1.0,
+          "mean": 0.006857,
+          "std": 0.659916,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "fp_poc_vol_pct": {
+          "index": 14,
+          "nonzero_ratio": 1.0,
+          "mean": 0.168805,
+          "std": 0.001574,
+          "min": 0.167579,
+          "max": 0.172756
+        },
+        "trend_score": {
+          "index": 19,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.015605,
+          "std": 0.493077,
+          "min": -1.0,
+          "max": 1.0
+        },
+        "meanrev_score": {
+          "index": 20,
+          "nonzero_ratio": 0.995815,
+          "mean": 0.00101,
+          "std": 0.073894,
+          "min": -0.9,
+          "max": 0.9
+        },
+        "breakout_score": {
+          "index": 21,
+          "nonzero_ratio": 0.999785,
+          "mean": -0.001812,
+          "std": 0.062341,
+          "min": -0.1,
+          "max": 0.1
+        },
+        "carry_score": {
+          "index": 22,
+          "nonzero_ratio": 0.997961,
+          "mean": -0.007532,
+          "std": 0.305129,
+          "min": -1.0,
+          "max": 1.0
+        }
+      },
+      "all_slots_nonzero": true
+    }
+  }
+}

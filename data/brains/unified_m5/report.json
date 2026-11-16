@@ -1,0 +1,744 @@
+{
+  "n_samples": 162589,
+  "n_train": 130088,
+  "n_val": 32501,
+  "final_loss": 0.647827166345784,
+  "val_accuracy": 0.5802898372357773,
+  "val_direction_accuracy": 0.5802898372357773,
+  "calibrated": true,
+  "feature_version": "nexus_v1",
+  "notes": [
+    "epochs=12",
+    "unified_symbols=26"
+  ],
+  "per_symbol_accuracy": {
+    "AUDUSD.r": 0.5446,
+    "EURUSD.r": 0.5595,
+    "GBPUSD.r": 0.5485,
+    "NZDUSD.r": 0.5716,
+    "USDCHF.r": 0.4785,
+    "USDJPY.r": 0.4846,
+    "XAUUSD.r": 0.5483,
+    "BTCUSD": 0.5407,
+    "XTIUSD": 0.535,
+    "US30": 0.5016,
+    "US500": 0.4889,
+    "US100": 0.4937,
+    "GER40": 0.4906,
+    "Boom 1000 Index.0": 0.7772,
+    "Boom 600 Index.0": 0.6962,
+    "Boom 300 Index.0": 0.5953,
+    "Boom 150 Index.0": 0.5738,
+    "Crash 1000 Index.0": 0.7687,
+    "Crash 600 Index.0": 0.6978,
+    "Crash 300 Index.0": 0.5963,
+    "Crash 150 Index.0": 0.5845,
+    "Volatility 10 Index.0": 0.4954,
+    "Volatility 25 Index.0": 0.5024,
+    "Volatility 50 Index.0": 0.5008,
+    "Volatility 75 Index.0": 0.518,
+    "Volatility 100 Index.0": 0.4949
+  },
+  "signal_data_version": "signals_v2_causal_proxy_v1",
+  "signal_sources": {
+    "version": "signals_v2_causal_proxy_v1",
+    "per_symbol": {
+      "AUDUSD.r": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "AUDUSD.r",
+        "bars": 3254,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3254
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3254
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "EURUSD.r": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "EURUSD.r",
+        "bars": 3239,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3239
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3239
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "GBPUSD.r": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "GBPUSD.r",
+        "bars": 3246,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3246
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3246
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "NZDUSD.r": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "NZDUSD.r",
+        "bars": 3250,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3250
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3250
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "USDCHF.r": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "USDCHF.r",
+        "bars": 3253,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3253
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3253
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "USDJPY.r": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "USDJPY.r",
+        "bars": 3253,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3253
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3253
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "XAUUSD.r": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "XAUUSD.r",
+        "bars": 3160,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3160
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3160
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "BTCUSD": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "BTCUSD",
+        "bars": 3257,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3257
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3257
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "XTIUSD": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "XTIUSD",
+        "bars": 3145,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3145
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3145
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "US30": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "US30",
+        "bars": 3154,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3154
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3154
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "US500": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "US500",
+        "bars": 3161,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3161
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3161
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "US100": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "US100",
+        "bars": 3154,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 3154
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 3154
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "GER40": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "GER40",
+        "bars": 2929,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 2929
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 2929
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Boom 1000 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Boom 1000 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Boom 600 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Boom 600 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Boom 300 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Boom 300 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Boom 150 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Boom 150 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Crash 1000 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Crash 1000 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Crash 600 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Crash 600 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Crash 300 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Crash 300 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Crash 150 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Crash 150 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Volatility 10 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Volatility 10 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Volatility 25 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Volatility 25 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Volatility 50 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Volatility 50 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Volatility 75 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Volatility 75 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      },
+      "Volatility 100 Index.0": {
+        "version": "signals_v2_causal_proxy_v1",
+        "symbol": "Volatility 100 Index.0",
+        "bars": 9320,
+        "window": 120,
+        "orderflow": {
+          "true_tick_bars": 0,
+          "depth_bars": 0,
+          "proxy_bars": 9320
+        },
+        "footprint": {
+          "true_tick_bars": 0,
+          "proxy_bars": 9320
+        },
+        "gemma": {
+          "source": "deterministic_apex",
+          "reason": "GEMMA_NOT_REQUESTED_FOR_THIS_PASS"
+        },
+        "honest_limitations": [
+          "OHLCV proxies are not exchange depth or true volume footprint",
+          "carry is a slow-drift proxy; no swap/rate feed is present",
+          "Gemma gateway scores are optional; deterministic APEX-style scores are the offline fallback"
+        ]
+      }
+    },
+    "generated_by": "scripts/train_unified.py"
+  },
+  "feature_audit": {
+    "version": "signals_v2_causal_proxy_v1",
+    "rows": 162615,
+    "symbols": 26,
+    "slots": {
+      "of_imbalance": {
+        "index": 10,
+        "nonzero_ratio": 0.999631,
+        "mean": -0.000215,
+        "min": -1.0,
+        "max": 1.0
+      },
+      "of_delta_pct": {
+        "index": 11,
+        "nonzero_ratio": 0.999631,
+        "mean": -0.000134,
+        "min": -1.0,
+        "max": 1.0
+      },
+      "of_absorption_bias": {
+        "index": 12,
+        "nonzero_ratio": 0.99976,
+        "mean": 0.002905,
+        "min": -1.0,
+        "max": 1.0
+      },
+      "fp_va_imbalance": {
+        "index": 13,
+        "nonzero_ratio": 0.999699,
+        "mean": 0.000704,
+        "min": -1.0,
+        "max": 1.0
+      },
+      "fp_poc_vol_pct": {
+        "index": 14,
+        "nonzero_ratio": 1.0,
+        "mean": 0.168508,
+        "min": 0.167579,
+        "max": 0.172756
+      },
+      "trend_score": {
+        "index": 19,
+        "nonzero_ratio": 0.996962,
+        "mean": -0.011061,
+        "min": -1.0,
+        "max": 1.0
+      },
+      "meanrev_score": {
+        "index": 20,
+        "nonzero_ratio": 0.993733,
+        "mean": 0.001452,
+        "min": -0.9,
+        "max": 0.9
+      },
+      "breakout_score": {
+        "index": 21,
+        "nonzero_ratio": 0.999502,
+        "mean": -0.001369,
+        "min": -0.1,
+        "max": 0.1
+      },
+      "carry_score": {
+        "index": 22,
+        "nonzero_ratio": 0.996937,
+        "mean": -0.003293,
+        "min": -1.0,
+        "max": 1.0
+      }
+    },
+    "all_slots_nonzero": true
+  }
+}
