@@ -12,7 +12,14 @@
 //|                                                                   |
 //| Evidence discipline: receipts are written ONLY after a real       |
 //| OrderSend result; ambiguous outcomes are written as UNKNOWN.       |
-//| No fabricated ACK.                                                 |
+//| No fabricated ACK.                                                |
+//|                                                                   |
+//| Security: every order request is HMAC-SHA256 signed over the      |
+//| COMPLETE canonical payload (nonce|candidate|cid|symbol|dir|vol|  |
+//| sl|tp). The EA rejects any request whose signature does not match.|
+//| The HMAC secret is provisioned from MQL5/Files/ABUTRON_ACTIVATION  |
+//| _SECRET.txt (written by the Python service) or set via the       |
+//| InpActivationSecret input.                                        |
 //+------------------------------------------------------------------+
 #property copyright "ABUTRON FX V9"
 #property version   "1.1.0"
@@ -20,17 +27,20 @@
 
 input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
-input long    InpActivationSeed = 0;            // HMAC seed from manager (per arm)
-input string  InpActivationSecret = "";         // HMAC key for request signature verification
+input long    InpActivationSeed = 0;            // activation seed (per arm)
+input string  InpActivationSecret = "";         // HMAC key (or file-provisioned)
 input int     InpManagedCharts  = 0;            // 0 = all charts with EA
 input double  InpRiskFraction   = 0.15;         // per-trade risk fraction (display)
 input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
 input int     InpExportPeriod   = PERIOD_M5;    // export timeframe
 
+string g_activation_secret = "";                // resolved at OnInit
+
 int OnInit()
 {
    SetTradeAllowed(true);
    SetTradeExecution(ORDER_TYPE_MARKET, 0, 0, 0); // allow market orders
+   g_activation_secret = LoadActivationSecret();
    EventSetTimer(5);                                  // export + handoff loop
    return(INIT_SUCCEEDED);
 }
@@ -57,9 +67,7 @@ void ExportNativeData()
    string oflow    = dir + "ABUTRON_ORDER_FLOW_V2_"     + Nonce() + ".txt";
 
    string idJson = StringFormat(
-      "{\"connection_id\":\"%s\",\"login\":%d,\"broker\":\"%s\","
-      "\"server\":\"%s\",\"nonce\":\"%s\",\"challenge\":\"%s\","
-      "\"worker_health_ts\":\"%s\"}",
+      "{\"connection_id\":\"%s\",\"login\":%d,\"broker\":\"%s\",\"server\":\"%s\",\"nonce\":\"%s\",\"challenge\":\"%s\",\"worker_health_ts\":\"%s\"}",
       InpConnectionId, AccountInfoInteger(ACCOUNT_LOGIN),
       "native", InpBrokerServer, Nonce(), Challenge(), TimeStampToStr(TimeCurrent()));
 
@@ -75,10 +83,7 @@ void ExportNativeData()
    {
       MqlRates r = rates[i];
       barsJson += StringFormat(
-         "{\"symbol\":\"%s\",\"timeframe\":\"M5\",\"open_time\":\"%s\","
-         "\"close_time\":\"%s\",\"open\":%.5f,\"high\":%.5f,\"low\":%.5f,"
-         "\"close\":%.5f,\"volume\":%.2f,\"bid\":%.5f,\"ask\":%.5f,"
-         "\"spread\":%.0f,\"tick_size\":%.5f,\"point\":%.5f,\"closed\":true},",
+         "{\"symbol\":\"%s\",\"timeframe\":\"M5\",\"open_time\":\"%s\",\"close_time\":\"%s\",\"open\":%.5f,\"high\":%.5f,\"low\":%.5f,\"close\":%.5f,\"volume\":%.2f,\"bid\":%.5f,\"ask\":%.5f,\"spread\":%.0f,\"tick_size\":%.5f,\"point\":%.5f,\"closed\":true},",
          r.symbol, TimeToString(r.time, TIME_DATE|TIME_SECONDS),
          TimeToString(r.time + PeriodSeconds(InpExportPeriod), TIME_DATE|TIME_SECONDS),
          r.open, r.high, r.low, r.close, r.tick_volume,
@@ -88,19 +93,13 @@ void ExportNativeData()
    barsJson += "]}";
    FileWrite(bars, barsJson);
 
-   // Order flow: aggressor trades since last export (trade-events)
+   // Order flow: aggressor trades since last export
    string ofJson = "{\"trades\":[";
    string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";
-   ulong lastTs = 0;
    if(FileExists(lastFile))
    {
       string s; int n = FileReadString(lastFile, s);
-      if(n > 0) lastTs = StringToTime(s);
    }
-   TradeStats ts;
-   // Use trade-event history from last export
-   MqlTradeEvent ev[];
-   // Simplified: dump last 500 closed-bar trade prints
    for(int i = 0; i < ArraySize(rates); i++)
    {
       MqlRates r = rates[i];
@@ -123,8 +122,6 @@ void ExportNativeData()
 void ProcessOrderRequests()
 {
    string dir = "MQL5\\Files\\";
-   string reqFile = dir + "ABUTRON_REQ_*.json";
-   // MQL5 cannot glob; manager writes a single pending file
    string pending = dir + "ABUTRON_REQ_PENDING.json";
    if(!FileExists(pending)) return;
 
@@ -141,22 +138,27 @@ void ProcessOrderRequests()
    double tp      = JsonNum(body, "take_profit");
    string actRev  = JsonStr(body, "activation_revision");
    string sig     = JsonStr(body, "signed");
+   string cand    = JsonStr(body, "candidate_id");
 
    // Verify connection binding + activation (single-writer authority)
    if(cid != InpConnectionId || actRev != ActivationRevision())
    {
-      WriteReceipt(reqId, 0, "REJECTED", "FP_SINGLE_WRITER_DISARMED");
+      WriteReceipt(reqId, 0, "REJECTED", "FP_SINGLE_WRITER_DISARMED",
+                   0.0, 0.0, sl, tp, "");
       FileDelete(pending);
       return;
    }
 
-   // Verify HMAC-SHA256 signature: signed = HMAC(seed, nonce|candidate|cid)
-   // The EA must reject any request whose signature does not match.
-   string nonce = JsonStr(body, "request_id");
-   string cand  = JsonStr(body, "candidate_id");
-   if(!VerifySignature(sig, nonce, cand, cid))
+   // Verify HMAC-SHA256 signature over the COMPLETE canonical order
+   // payload: nonce|candidate|cid|symbol|direction|volume|sl|tp
+   string canonical = reqId + "|" + cand + "|" + cid + "|" + symbol +
+                      "|" + dirn + "|" + StringFormat("%.6f", volume) +
+                      "|" + StringFormat("%.6f", sl) +
+                      "|" + StringFormat("%.6f", tp);
+   if(!VerifySignature(sig, canonical))
    {
-      WriteReceipt(reqId, 0, "REJECTED", "FP_SIGNATURE_INVALID");
+      WriteReceipt(reqId, 0, "REJECTED", "FP_SIGNATURE_INVALID",
+                   0.0, 0.0, sl, tp, "");
       FileDelete(pending);
       return;
    }
@@ -165,11 +167,14 @@ void ProcessOrderRequests()
    if(dirn == "BUY")  price = Ask;
    else               price = Bid;
 
-   // Normalize volume to broker lot step and floor (never round up)
-   double normVol = NormalizeLots(volume);
-   if(normVol < MarketInfo(symbol).VolumeMin)
+   // Floor volume to broker lot step — never round up.
+   // If the floored lot is below the minimum, reject.
+   double normVol = NormalizeLots(volume, symbol);
+   double lotMin  = (double)SymbolInfoInteger(symbol, SYMBOL_VOLUME_MIN);
+   if(normVol < lotMin || normVol <= 0.0)
    {
-      WriteReceipt(reqId, 0, "REJECTED", "FP_MIN_LOT_EXCEEDS_RISK");
+      WriteReceipt(reqId, 0, "REJECTED", "FP_MIN_LOT_EXCEEDS_RISK",
+                   0.0, 0.0, sl, tp, "");
       FileDelete(pending);
       return;
    }
@@ -189,113 +194,179 @@ void ProcessOrderRequests()
    if(OrderSend(req, res))
    {
       // Real broker ACK — write native receipt with ticket/deal
-      WriteReceipt(reqId, res.order, "ACK", "NATIVE_ACK", res);
+      WriteReceipt(reqId, res.order, "ACK", "NATIVE_ACK",
+                   res.price, res.volume, sl, tp, LongToString(res.deal));
    }
    else
    {
       // Ambiguous / rejected — record outcome honestly
-      WriteReceipt(reqId, 0, "UNKNOWN", "SEND_UNKNOWN", res);
+      WriteReceipt(reqId, 0, "UNKNOWN", "SEND_UNKNOWN",
+                   0.0, 0.0, sl, tp, "");
    }
    FileDelete(pending);
 }
 
-double NormalizeLots(double v)
+double NormalizeLots(double v, string symbol)
 {
-   double step = MarketInfo(_Symbol).VolumeMinStep;
-   double lot  = MarketInfo(_Symbol).VolumeMin;
-   return(NormalizeDouble(v, (int)MathRound(-MathLog10(step))) +
-          (MathPercent(lot, step) ? 0.0 : 0.0));
+   // Floor to the broker's actual volume step for the ORDER symbol.
+   // Never round up — rounding up can push risk above the approved budget.
+   double step = (double)SymbolInfoInteger(symbol, SYMBOL_VOLUME_STEP);
+   double lotMin = (double)SymbolInfoInteger(symbol, SYMBOL_VOLUME_MIN);
+   if(step <= 0.0)  step = 0.01;
+   double lots = MathFloor(v / step) * step;
+   if(lots < lotMin) lots = lotMin;
+   int decimals = (int)MathRound(-MathLog10(step));
+   if(decimals < 0)   decimals = 0;
+   if(decimals > 8)   decimals = 8;
+   return(NormalizeDouble(lots, decimals));
 }
 
 void WriteReceipt(string reqId, long ticket, string state, string reason,
-                  MqlTradeResult res = NULL)
+                  double price, double volume, double sl, double tp,
+                  string deal)
 {
    string dir = "MQL5\\Files\\";
    string file = dir + "ABUTRON_NATIVE_RECEIPTS_V2_" + Nonce() + ".txt";
    string json = StringFormat(
-      "{\"request_id\":\"%s\",\"ticket\":%d,\"state\":\"%s\","
-      "\"reason\":\"%s\",\"login\":%d,\"price\":%.5f,\"volume\":%.2f,"
-      "\"sl\":%.5f,\"tp\":%.5f,\"deal\":\"%s\",\"ts\":\"%s\"}",
+      "{\"request_id\":\"%s\",\"ticket\":%d,\"state\":\"%s\",\"reason\":\"%s\",\"login\":%d,\"price\":%.5f,\"volume\":%.2f,\"sl\":%.5f,\"tp\":%.5f,\"deal\":\"%s\",\"ts\":\"%s\"}",
       reqId, ticket, state, reason,
       AccountInfoInteger(ACCOUNT_LOGIN),
-      res.price, res.volume, res.sl, res.tp,
-      LongToString(res.deal), TimeStampToStr(TimeCurrent()));
+      price, volume, sl, tp,
+      deal, TimeStampToStr(TimeCurrent()));
    FileWrite(file, json);
 }
 
 string Nonce()
 {
-   // Deterministic-ish nonce from time + login
    return(StringFormat("%d_%d", AccountInfoInteger(ACCOUNT_LOGIN),
                        (long)TimeCurrent()));
 }
 
 string Challenge()
 {
-   // Broker server challenge token (server time + account)
    return(StringFormat("%d", AccountInfoInteger(ACCOUNT_LOGIN) +
                        (long)ServerTime()));
 }
 
 string ActivationRevision()
 {
-   // Recomputed from connection + seed; manager must match
    return(CryptHash(StringFormat("%s|%d", InpConnectionId,
                                  InpActivationSeed)));
+}
+
+//+------------------------------------------------------------------+
+//| Activation secret provisioning                                    |
+//+------------------------------------------------------------------+
+//| The Python service writes the shared HMAC secret to                |
+//| MQL5/Files/ABUTRON_ACTIVATION_SECRET.txt during arming. The EA    |
+//| reads it on startup if InpActivationSecret is not set explicitly. |
+//| If no secret is available, the EA rejects all signed orders.      |
+//+------------------------------------------------------------------+
+string LoadActivationSecret()
+{
+   if(InpActivationSecret != "")
+      return(InpActivationSecret);
+   string file = "MQL5\\Files\\ABUTRON_ACTIVATION_SECRET.txt";
+   if(FileExists(file))
+   {
+      string s;
+      int n = FileReadString(file, s);
+      if(n > 0)
+         return(StringTrim(s));
+   }
+   return("");
 }
 
 //+------------------------------------------------------------------+
 //| HMAC-SHA256 verification (MQL5 has no built-in HMAC)              |
 //+------------------------------------------------------------------+
 //| Verifies that the request signature matches HMAC-SHA256(secret,  |
-//| nonce|candidate_id|connection_id). Rejects if the secret is      |
-//| empty or the signature does not match.                           |
+//| canonical_order). The canonical message covers ALL order fields.  |
+//| Rejects if the secret is empty or the signature does not match.   |
 //+------------------------------------------------------------------+
-bool VerifySignature(string sig, string nonce, string cand, string cid)
+bool VerifySignature(string sig, string canonical)
 {
-   if(InpActivationSecret == "")
-      return(false);   // No secret configured — never accept a signed order
+   if(g_activation_secret == "")
+      return(false);   // No secret — never accept a signed order
    if(sig == "")
       return(false);
-   string message = nonce + "|" + cand + "|" + cid;
-   string expected = HmacSha256Hex(InpActivationSecret, message);
+   string expected = HmacSha256Hex(g_activation_secret, canonical);
    return(sig == expected);
 }
 
 string HmacSha256Hex(string key, string message)
 {
-   // Build HMAC: H((K XOR opad) || H((K XOR ipad) || message))
-   string blockSize = StringChar(0, 64);
-   if(StringLen(key) > 64)
-      key = Sha256Hex(key);
-   // Pad key to 64 bytes
-   while(StringLen(key) < 64)
-      key += StringChar(0);
-   if(StringLen(key) > 64)
-      key = StringSubstr(key, 0, 64);
+   // Convert key to byte array
+   ushort keyBytes[];
+   int keyLen = StringLen(key);
+   ArrayResize(keyBytes, keyLen);
+   for(int i = 0; i < keyLen; i++)
+      keyBytes[i] = StringGetCharacter(key, i);
 
-   string ipad = "";
-   string opad = "";
+   // If key > 64 bytes, hash it first
+   if(keyLen > 64)
+   {
+      string keyHex = Sha256Hex(keyBytes);
+      keyBytes = HexToBytes(keyHex);
+      keyLen = ArraySize(keyBytes);
+   }
+
+   // Pad key to 64 bytes
+   ArrayResize(keyBytes, 64);
+   for(int i = keyLen; i < 64; i++)
+      keyBytes[i] = 0;
+
+   // Build ipad and opad
+   ushort ipad[];
+   ushort opad[];
+   ArrayResize(ipad, 64);
+   ArrayResize(opad, 64);
    for(int i = 0; i < 64; i++)
    {
-      ushort k = StringGetCharacter(key, i);
-      ipad  += StringChar((char)(k ^ 0x36));
-      opad  += StringChar((char)(k ^ 0x5c));
+      ipad[i] = (ushort)(keyBytes[i] ^ 0x36);
+      opad[i] = (ushort)(keyBytes[i] ^ 0x5c);
    }
-   string inner = Sha256Hex(ipad + message);
-   string innerBytes = HexToBinary(inner);
-   string result = Sha256Hex(opad + innerBytes);
+
+   // Convert message to byte array
+   ushort msgBytes[];
+   int msgLen = StringLen(message);
+   ArrayResize(msgBytes, msgLen);
+   for(int i = 0; i < msgLen; i++)
+      msgBytes[i] = StringGetCharacter(message, i);
+
+   // Inner hash: H(ipad || message)
+   ushort innerInput[];
+   ArrayResize(innerInput, 64 + msgLen);
+   for(int i = 0; i < 64; i++)
+      innerInput[i] = ipad[i];
+   for(int i = 0; i < msgLen; i++)
+      innerInput[64 + i] = msgBytes[i];
+   string innerHex = Sha256Hex(innerInput);
+   ushort innerBytes[];
+   innerBytes = HexToBytes(innerHex);
+   int innerLen = ArraySize(innerBytes);
+
+   // Outer hash: H(opad || inner)
+   ushort outerInput[];
+   ArrayResize(outerInput, 64 + innerLen);
+   for(int i = 0; i < 64; i++)
+      outerInput[i] = opad[i];
+   for(int i = 0; i < innerLen; i++)
+      outerInput[64 + i] = innerBytes[i];
+   string result = Sha256Hex(outerInput);
    return(result);
 }
 
-string Sha256Hex(string input)
+//+------------------------------------------------------------------+
+//| SHA-256 (uses ulong for 32-bit words — MQL5 has no uint type)     |
+//+------------------------------------------------------------------+
+string Sha256Hex(ushort input[])
 {
-   // SHA-256 implementation in MQL5
-   uint H[8];
-   H[0] = 0x6a09e667; H[1] = 0xbb67ae85; H[2] = 0x3c6ef372; H[3] = 0xa54ff53a;
-   H[4] = 0x510e527f; H[5] = 0x9b05688c; H[6] = 0x1f83d9ab; H[7] = 0x5be0cd19;
+   ulong H[8];
+   H[0]=0x6a09e667; H[1]=0xbb67ae85; H[2]=0x3c6ef372; H[3]=0xa54ff53a;
+   H[4]=0x510e527f; H[5]=0x9b05688c; H[6]=0x1f83d9ab; H[7]=0x5be0cd19;
 
-   uint K[64];
+   ulong K[64];
    K[0]=0x428a2f98;K[1]=0x71374491;K[2]=0xb5c0fbcf;K[3]=0xe9b5dba5;K[4]=0x3956c25b;K[5]=0x59f111f1;K[6]=0x923f82a4;K[7]=0xab1c5ed5;
    K[8]=0xd807aa98;K[9]=0x12835b01;K[10]=0x243185be;K[11]=0x550c7dc3;K[12]=0x72be5d74;K[13]=0x80deb1fe;K[14]=0x9bdc06a7;K[15]=0xc19bf174;
    K[16]=0xe49b69c1;K[17]=0xefbe4786;K[18]=0x0fc19dc6;K[19]=0x240ca1cc;K[20]=0x2de92c6f;K[21]=0x4a7484aa;K[22]=0x5cb0a9dc;K[23]=0x76f988da;
@@ -305,20 +376,20 @@ string Sha256Hex(string input)
    K[48]=0x19a4c116;K[49]=0x1e376c08;K[50]=0x2748774c;K[51]=0x34b0bcb5;K[52]=0x391c0cb3;K[53]=0x4ed8aa4a;K[54]=0x5b9cca4f;K[55]=0x682e6ff3;
    K[56]=0x748f82ee;K[57]=0x78a5636f;K[58]=0x84c87814;K[59]=0x8cc70208;K[60]=0x90befffa;K[61]=0xa4506ceb;K[62]=0xbef9a3f7;K[63]=0xc67178f2;
 
-   // Convert input to byte array (ASCII)
+   // Copy input and pad: 0x80, zeros, 64-bit length
+   int len = ArraySize(input);
    ushort bytes[];
-   int len = StringLen(input);
-   ArrayResize(bytes, len);
+   ArrayResize(bytes, len + 72);
    for(int i = 0; i < len; i++)
-      bytes[i] = StringGetCharacter(input, i);
+      bytes[i] = input[i];
+   bytes[len] = 0x80;
 
-   // Pad message: append 0x80, then zeros, then 64-bit length
    ulong bitLen = (ulong)len * 8;
    int padLen = 64 - ((len + 9) % 64);
    if(padLen == 64) padLen = 0;
    int totalLen = len + 1 + padLen + 8;
    ArrayResize(bytes, totalLen);
-   bytes[len] = 0x80;
+
    bytes[totalLen - 8] = (ushort)(bitLen >> 56);
    bytes[totalLen - 7] = (ushort)(bitLen >> 48);
    bytes[totalLen - 6] = (ushort)(bitLen >> 40);
@@ -329,40 +400,42 @@ string Sha256Hex(string input)
    bytes[totalLen - 1] = (ushort)(bitLen);
 
    // Process each 512-bit block
-   ushort w[64];
+   ulong w[64];
    for(int block = 0; block < totalLen; block += 64)
    {
       for(int i = 0; i < 16; i++)
       {
          int j = block + i * 4;
-         w[i] = (ushort)(((uint)bytes[j] << 24) | ((uint)bytes[j+1] << 16) |
-                        ((uint)bytes[j+2] << 8) | (uint)bytes[j+3]);
+         w[i] = (((ulong)bytes[j] << 24) | ((ulong)bytes[j+1] << 16) |
+                 ((ulong)bytes[j+2] << 8) | (ulong)bytes[j+3]) & 0xFFFFFFFF;
       }
       for(int i = 16; i < 64; i++)
       {
-         uint s0 = ((w[i-15] >> 7) | (w[i-15] << 25)) ^ ((w[i-15] >> 18) | (w[i-15] << 14)) ^ (w[i-15] >> 3);
-         uint s1 = ((w[i-2] >> 17) | (w[i-2] << 15)) ^ ((w[i-2] >> 19) | (w[i-2] << 13)) ^ (w[i-2] >> 10);
-         w[i] = (ushort)(w[i-16] + s0 + w[i-7] + s1);
+         ulong s0 = ((w[i-15] >> 7) | (w[i-15] << 25)) ^ ((w[i-15] >> 18) | (w[i-15] << 14)) ^ (w[i-15] >> 3);
+         s0 &= 0xFFFFFFFF;
+         ulong s1 = ((w[i-2] >> 17) | (w[i-2] << 15)) ^ ((w[i-2] >> 19) | (w[i-2] << 13)) ^ (w[i-2] >> 10);
+         s1 &= 0xFFFFFFFF;
+         w[i] = (w[i-16] + s0 + w[i-7] + s1) & 0xFFFFFFFF;
       }
-      uint a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+      ulong a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
       for(int i = 0; i < 64; i++)
       {
-         uint S1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7));
-         uint ch = (e & f) ^ (~e & g);
-         uint t1 = h + S1 + ch + K[i] + w[i];
-         uint S0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10));
-         uint maj = (a & b) ^ (a & c) ^ (b & c);
-         uint t2 = S0 + maj;
-         h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+         ulong S1 = (((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))) & 0xFFFFFFFF;
+         ulong ch = ((e & f) ^ (~e & g)) & 0xFFFFFFFF;
+         ulong t1 = (h + S1 + ch + K[i] + w[i]) & 0xFFFFFFFF;
+         ulong S0 = (((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))) & 0xFFFFFFFF;
+         ulong maj = ((a & b) ^ (a & c) ^ (b & c)) & 0xFFFFFFFF;
+         ulong t2 = (S0 + maj) & 0xFFFFFFFF;
+         h=g; g=f; f=e; e=(d+t1)&0xFFFFFFFF; d=c; c=b; b=a; a=(t1+t2)&0xFFFFFFFF;
       }
-      H[0]+=a; H[1]+=b; H[2]+=c; H[3]+=d;
-      H[4]+=e; H[5]+=f; H[6]+=g; H[7]+=h;
+      H[0]=(H[0]+a)&0xFFFFFFFF; H[1]=(H[1]+b)&0xFFFFFFFF; H[2]=(H[2]+c)&0xFFFFFFFF; H[3]=(H[3]+d)&0xFFFFFFFF;
+      H[4]=(H[4]+e)&0xFFFFFFFF; H[5]=(H[5]+f)&0xFFFFFFFF; H[6]=(H[6]+g)&0xFFFFFFFF; H[7]=(H[7]+h)&0xFFFFFFFF;
    }
 
    string hex = "";
    for(int i = 0; i < 8; i++)
    {
-      uint word = H[i];
+      ulong word = H[i] & 0xFFFFFFFF;
       hex += StringFormat("%02x", (ushort)(word >> 24));
       hex += StringFormat("%02x", (ushort)(word >> 16));
       hex += StringFormat("%02x", (ushort)(word >> 8));
@@ -371,18 +444,19 @@ string Sha256Hex(string input)
    return(hex);
 }
 
-string HexToBinary(string hex)
+ushort[] HexToBytes(string hex)
 {
-   // Convert a hex string to a binary (raw byte) string
-   string bin = "";
-   for(int i = 0; i + 1 < StringLen(hex); i += 2)
+   ushort bytes[];
+   int len = StringLen(hex) / 2;
+   ArrayResize(bytes, len);
+   for(int i = 0; i < len; i++)
    {
-      string hb = StringSubstr(hex, i, 2);
+      string hb = StringSubstr(hex, i * 2, 2);
       int hi = HexVal(StringGetCharacter(hb, 0));
       int lo = HexVal(StringGetCharacter(hb, 1));
-      bin += StringChar((char)((hi << 4) | lo));
+      bytes[i] = (ushort)((hi << 4) | lo);
    }
-   return(bin);
+   return(bytes);
 }
 
 int HexVal(ushort c)

@@ -77,6 +77,7 @@ class RiskEngine:
         total_risk = 0.0
         total_balance = 0.0
         unknown: List[str] = []
+        unknown_symbols: set = set()
         # Import the symbol registry lazily to avoid circular imports.
         try:
             from ..apex.eligibility import SYMBOL_REGISTRY
@@ -100,8 +101,15 @@ class RiskEngine:
                     point = float(profile.contract.point or 0.0)
                     point_value = float(profile.contract.point_value or 1.0)
                 else:
-                    point = 0.0
+                    # Unknown symbol — use a conservative fallback that
+                    # does NOT underestimate exposure. Assume a standard
+                    # FX point (0.0001) and default point_value (1.0 USD
+                    # per point per lot). Flag so operators can reconcile
+                    # against MT5 OrderCalcProfit.
+                    point = 0.0001
                     point_value = 1.0
+                    if sym not in unknown_symbols:
+                        unknown_symbols.add(sym)
                 if entry and sl:
                     stop_dist = abs(entry - sl)
                     if point and point > 0:
@@ -122,6 +130,7 @@ class RiskEngine:
             "headroom_usd": cap - total_risk,
             "cap_exceeded": total_risk > cap,
             "unknown_exposure_connections": unknown,
+            "unknown_symbols": sorted(unknown_symbols),
         }
 
     def trailing_stop(self, *, connection_id: str, candidate_id: str,
@@ -129,46 +138,71 @@ class RiskEngine:
                       entry_price: float, current_stop: float,
                       atr: float, point: float = 0.01,
                       point_value: float = 1.0,
-                      native_ticket: int = 0) -> Dict[str, Any]:
+                      native_ticket: int = 0,
+                      broker_sl: Optional[float] = None) -> Dict[str, Any]:
         """Tighten the stop in the trade's favor (never widen).
 
-        A trail is only recorded as PROTECTED when a valid native_ticket
-        (MT5-confirmed stop modification) is provided. Without broker
-        confirmation the trail is recorded as PENDING — never falsely
-        marked protected.
+        A trail is marked PROTECTED only when BOTH a native ticket AND
+        the broker's actual stop price (broker_sl) confirm the modified
+        SL. A ticket number alone is not sufficient evidence — the broker
+        may have rejected the SL modification. Without full broker
+        SL reconciliation the trail is recorded as PENDING.
         """
         trail_dist = DEFAULT_TRAILING_ATR_MULT * atr
         if direction == "BUY":
             new_stop = current_price - trail_dist
             if new_stop > current_stop:
+                confirmed = self._broker_confirms_sl(
+                    native_ticket, broker_sl, new_stop, current_stop,
+                    direction)
                 self._apply_trail(connection_id, candidate_id, symbol,
                                   direction, new_stop, current_stop,
-                                  native_ticket)
+                                  native_ticket, confirmed)
                 return {"tightened": True, "new_stop": new_stop,
-                        "old_stop": current_stop,
-                        "confirmed": native_ticket > 0}
+                        "old_stop": current_stop, "confirmed": confirmed}
         else:
             new_stop = current_price + trail_dist
             if new_stop < current_stop:
+                confirmed = self._broker_confirms_sl(
+                    native_ticket, broker_sl, new_stop, current_stop,
+                    direction)
                 self._apply_trail(connection_id, candidate_id, symbol,
                                   direction, new_stop, current_stop,
-                                  native_ticket)
+                                  native_ticket, confirmed)
                 return {"tightened": True, "new_stop": new_stop,
-                        "old_stop": current_stop,
-                        "confirmed": native_ticket > 0}
+                        "old_stop": current_stop, "confirmed": confirmed}
         return {"tightened": False, "new_stop": current_stop,
                 "old_stop": current_stop, "confirmed": False}
 
+    def _broker_confirms_sl(self, native_ticket: int, broker_sl: Optional[float],
+                           new_stop: float, current_stop: float,
+                           direction: str) -> bool:
+        """Check that the broker actually accepted the modified stop.
+
+        Requires BOTH a positive native ticket AND the broker's reported
+        SL to match the intended new_stop. A ticket alone is not proof —
+        the broker may have rejected the SL modification or applied a
+        different value. The broker_sl must be reconciled against actual
+        MT5 position data.
+        """
+        if native_ticket <= 0:
+            return False
+        if broker_sl is None:
+            return False
+        # The broker SL must match the intended new_stop within a small
+        # tolerance (point-level precision).
+        tol = 1e-5
+        return abs(broker_sl - new_stop) <= tol
+
     def _apply_trail(self, connection_id, candidate_id, symbol, direction,
-                     new_stop, old_stop, native_ticket: int = 0) -> None:
+                     new_stop, old_stop, native_ticket: int = 0,
+                     confirmed: bool = False) -> None:
         """Record a trailing-stop event.
 
-        Only marks PROTECTED when MT5 has confirmed the stop modification
-        (native_ticket > 0). Without broker confirmation the event is
-        PENDING — a trail is not complete until reconciliation observes
-        the updated broker stop.
+        Only marks PROTECTED when BOTH a native ticket and the broker's
+        confirmed SL price are provided. Without full broker SL
+        reconciliation the event is PENDING.
         """
-        confirmed = native_ticket > 0
         engine_db.add_ledger({
             "connection_id": connection_id,
             "owner_id": "", "native_ticket": native_ticket,
