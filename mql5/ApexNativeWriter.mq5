@@ -23,7 +23,7 @@
 //| InpActivationSecret input.                                        |
 //+------------------------------------------------------------------+
 #property copyright "ABUTRON FX V9"
-#property version   "1.1.0"
+#property version   "1.100"
 
 input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
@@ -67,7 +67,7 @@ void ExportNativeData()
    string idJson = StringFormat(
       "{\"connection_id\":\"%s\",\"login\":%d,\"broker\":\"%s\",\"server\":\"%s\",\"nonce\":\"%s\",\"challenge\":\"%s\",\"worker_health_ts\":\"%s\"}",
       InpConnectionId, AccountInfoInteger(ACCOUNT_LOGIN),
-      "native", InpBrokerServer, Nonce(), Challenge(), TimeStampToStr(TimeCurrent()));
+      "native", InpBrokerServer, Nonce(), Challenge(), TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
    WriteTextFile(identity, idJson);
 
    // --- Closed M5 bars (last 120) -----------------------------------
@@ -106,7 +106,7 @@ void ExportNativeData()
    if(FileIsExist(lastFile))
    {
       int h = FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
-      if(h > 0)
+      if(h != INVALID_HANDLE)
       {
          string s = FileReadString(h);
          FileClose(h);
@@ -301,7 +301,7 @@ double NormalizeLots(double v, string symbol)
 void WriteTextFile(string filename, string content)
 {
    int h = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
-   if(h > 0)
+   if(h != INVALID_HANDLE)
    {
       FileWriteString(h, content);
       FileClose(h);
@@ -322,7 +322,7 @@ void WriteReceipt(string reqId, long ticket, string state, string reason,
       reqId, ticket, state, reason,
       AccountInfoInteger(ACCOUNT_LOGIN),
       price, volume, sl, tp,
-      deal, TimeStampToStr(TimeCurrent()));
+      deal, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
    WriteTextFile(file, json);
 }
 
@@ -464,13 +464,13 @@ string HmacSha256Hex(string key, string message)
 //+------------------------------------------------------------------+
 //| SHA-256 (uses uint for 32-bit words — valid MQL5 type)            |
 //+------------------------------------------------------------------+
-string Sha256Hex(ushort input[], int inputLen)
+string Sha256Hex(const ushort &inputBytes[], int inputLen)
 {
-   if(inputLen < 0 || inputLen > ArraySize(input)) return("");
+   if(inputLen < 0 || inputLen > ArraySize(inputBytes)) return("");
    uchar data[], emptyKey[], digest[];
    ArrayResize(data, inputLen);
    for(int i = 0; i < inputLen; i++)
-      data[i] = (uchar)(input[i] & 0xFF);
+      data[i] = (uchar)(inputBytes[i] & 0xFF);
    int n = CryptEncode(CRYPT_HASH_SHA256, data, emptyKey, digest);
    if(n != 32) return("");
    string hex = "";
@@ -483,7 +483,7 @@ string Sha256Hex(ushort input[], int inputLen)
 //| Convert hex string to byte array (reference param — MQL5 cannot  |
 //| return arrays from functions)                                   |
 //+------------------------------------------------------------------+
-void HexToBytes(string hex, ushort bytes[])
+void HexToBytes(string hex, ushort &bytes[])
 {
    int len = StringLen(hex) / 2;
    ArrayResize(bytes, len);
