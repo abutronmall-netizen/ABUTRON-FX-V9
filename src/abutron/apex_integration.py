@@ -17,20 +17,21 @@ context fed into the decision journal.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import DATA_ROOT, RISKGUARD_ENABLED, DEFAULT_PER_TRADE_RISK_PCT
+from .config import (DATA_ROOT, RISKGUARD_ENABLED, DEFAULT_PER_TRADE_RISK_PCT,
+                     DEFAULT_PORTFOLIO_RISK_CAP_PCT, BRAIN_MODEL_DIR)
 from .events import EventLog, make_event
 from .ops.portal_ops import portal_ops
 from .risk.riskguard import RiskGuard, PortfolioState, TradeProposal
 from .selflearn.engine import SelfLearningEngine
-from .brain import make_brain, default_ensemble
-from .config import (BRAIN_ENSEMBLE_SEED, BRAIN_MC_SAMPLES, BRAIN_SIZE_CAP,
-                     CONTRACT_PER_TRADE_RISK_PCT, CONTRACT_PORTFOLIO_CEILING_PCT)
+from .brain import make_brain
+from .config import BRAIN_MC_SAMPLES, BRAIN_SIZE_CAP
 from .selflearn.features import build_feature_vector
 from .apex.sniper import SniperEntryEngine
 from .apex.trailing import TrailingStop
@@ -59,7 +60,7 @@ def _load_apex():
     from apex.core.models import Bar                    # noqa
     from abutron_replacement.bridge import (            # noqa
         AbutronApex11SignalBridge, CandleRejected, Instrument)
-    from abutron_replacement.candidate_contract import (  # noqa
+    from .apex.v9_candidate_contract import (  # noqa
         AccountGate, BrokerNativeRisk, review_candidate)
     return {
         "bridge": AbutronApex11SignalBridge,
@@ -91,7 +92,11 @@ class ApexManifestError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Instrument manifest builder
 # ---------------------------------------------------------------------------
-DEFAULT_DERIV_SYMBOLS = ["Volatility 100 Index.0"]
+DEFAULT_DERIV_SYMBOLS = [
+    *(f"{name} {level} Index.0" for name in ("Boom", "Crash")
+      for level in (150, 300, 600, 1000)),
+    *(f"Volatility {level} Index.0" for level in (10, 25, 50, 75, 100)),
+]
 DEFAULT_FP_SYMBOLS = ["GBPUSD", "EURUSD", "XAUUSD"]
 
 # Approved asset classes + brokers.
@@ -101,6 +106,25 @@ DEFAULT_FP_SYMBOLS = ["GBPUSD", "EURUSD", "XAUUSD"]
 # bridge could never be constructed. Keep these in lockstep with the
 # vendored contract.
 _ASSET_CLASS = {"deriv": "deriv_synthetic", "fpmarkets": "fx_index"}
+
+
+def _account_risk_fraction(account: Dict[str, Any], key: str,
+                           default_percent: float) -> float:
+    """Convert CRM percentage-points (for example 0.5 means 0.5%) to a fraction.
+
+    Invalid or nonpositive overrides become zero so candidate review and lot
+    sizing fail closed rather than silently substituting a larger default.
+    """
+    raw = account.get(key, default_percent)
+    if raw is None or raw == "":
+        raw = default_percent
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(value) or value <= 0:
+        return 0.0
+    return value / 100.0
 
 
 def build_instrument_manifest(accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -162,13 +186,21 @@ class ApexIntegration:
         self.selflearn.load()
         # Hardened pre-trade RiskGuard (opt-in, fail-closed).
         self.riskguard = RiskGuard()
-        # The NexusBrain — the AI calculation authority (lot sizing, entry
-        # bias). Owned here so settlement (reconciler) can feed trade
-        # outcomes back for self-learning.
-        self.brain = make_brain(
-            ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
-            size_cap=BRAIN_SIZE_CAP)
-        self.brain.ensemble.mc_samples = BRAIN_MC_SAMPLES
+        # Load only a persisted, calibrated model. A freshly initialized
+        # random ensemble or the deterministic fallback is not an acceptable
+        # live directional authority. Without an artifact, decisions HOLD.
+        from .brain.unified_adapter import load_unified_49
+        self.brain_load_error = "TRAINED_UNIFIED_BRAIN_NOT_CONFIGURED"
+        try:
+            self.brain = load_unified_49(
+                BRAIN_MODEL_DIR, mc_samples=BRAIN_MC_SAMPLES)
+            self.brain_load_error = ""
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            self.brain = make_brain(ensemble=None, size_cap=BRAIN_SIZE_CAP)
+            self.brain_load_error = (
+                f"TRAINED_BRAIN_UNAVAILABLE:{type(exc).__name__}")
+        self._signal_history: Dict[str, List[Dict[str, float]]] = {}
+        self._signal_history_ts: Dict[str, int] = {}
         # one-bar causal lag per symbol: (features, scores, regime, prev_close)
         self._pending: Dict[str, Dict[str, Any]] = {}
         # Sniper entry + trailing-stop geometry (the entry-precision layer).
@@ -193,6 +225,63 @@ class ApexIntegration:
     # ------------------------------------------------------------------
     def selflearn_health(self) -> Dict[str, Any]:
         return self.selflearn.health()
+
+    def _brain_direction(self, *, symbol: str, candle: Dict[str, Any],
+                         apex_decision: Dict[str, Any],
+                         orderflow_features: Optional[Dict[str, float]],
+                         footprint_features: Optional[Dict[str, float]]
+                         ) -> tuple[str, Dict[str, Any], str]:
+        """Return a trained-model BUY/SELL/HOLD; never use APEX direction.
+
+        History is kept causal and deduplicated by bar close time. A cold or
+        untrained brain abstains rather than falling back to random weights or
+        the bridge's direction.
+        """
+        try:
+            close_ts = int(float(candle["close_time_epoch"]))
+            bar = {key: float(candle[key]) for key in ("open", "high", "low", "close")}
+            bar["volume"] = float(candle.get("volume", 0.) or 0.)
+            bar["open_time"] = candle.get("open_time", "")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return "HOLD", {}, "BRAIN_INPUT_INVALID"
+        if close_ts > self._signal_history_ts.get(symbol, 0):
+            history = self._signal_history.setdefault(symbol, [])
+            history.append(bar)
+            del history[:-120]
+            self._signal_history_ts[symbol] = close_ts
+
+        if not self.brain.trained:
+            return "HOLD", {"trained": False,
+                             "model_version": self.brain.VERSION}, self.brain_load_error
+        history = self._signal_history.get(symbol, [])
+        if len(history) < 32:
+            return "HOLD", {"trained": True, "bars": len(history)}, \
+                "UNIFIED_BRAIN_WARMUP"
+
+        # Rebuild the causal full-signal feature slots used by training;
+        # missing true tick/depth data is explicitly represented by OHLCV
+        # proxies, rather than silently zeroing 9 learned feature slots.
+        from .brain.signals import latest_signal_features
+        snapshot = latest_signal_features(history, symbol=symbol,
+                                          use_gemma=False)
+        proposal = self.brain.decide(
+            symbol=symbol,
+            closes=[row["close"] for row in history],
+            highs=[row["high"] for row in history],
+            lows=[row["low"] for row in history],
+            orderflow=orderflow_features or snapshot["orderflow"],
+            footprint=footprint_features or snapshot["footprint"],
+            agent_scores=snapshot["agent_scores"],
+            regime=snapshot["regime"])
+        payload = proposal.to_dict()
+        if not proposal.trained:
+            return "HOLD", payload, "TRAINED_BRAIN_REQUIRED"
+        if any(str(reason).startswith("LOSS_PATTERN_REPEAT")
+               for reason in (proposal.blockers or [])):
+            return "HOLD", payload, "LOSS_PATTERN_REPEAT"
+        direction = proposal.direction if proposal.direction in ("BUY", "SELL") else "HOLD"
+        reason = "" if direction != "HOLD" else ";".join(proposal.blockers) or "UNIFIED_BRAIN_HOLD"
+        return direction, payload, reason
 
     # ------------------------------------------------------------------
     def _bridge_for(self, connection_id: str, account: Dict[str, Any],
@@ -280,7 +369,7 @@ class ApexIntegration:
             return {"status": "REJECTED", "reason": str(e),
                     "decision": None, "candidate": None, "blockers": [str(e)]}
 
-        status = decision["status"]
+        apex_status = decision["status"]
 
         # --- Self-learning AI: causal observe -> overlay loop -------------
         # 1) Settle the previous bar's outcome and update the learner.
@@ -290,6 +379,20 @@ class ApexIntegration:
         symbol = candle["symbol"]
         self._run_selflearn(symbol, candle, decision, orderflow_features,
                             footprint_features)
+
+        # The trained NexusBrain is the sole direction authority. The APEX
+        # bridge remains a causal feature/evidence source; its BUY/SELL is not
+        # allowed to create candidates. Missing/un-calibrated brain artifacts
+        # and insufficient history fail closed to HOLD.
+        status, brain_payload, brain_reason = self._brain_direction(
+            symbol=symbol, candle=candle, apex_decision=decision,
+            orderflow_features=orderflow_features,
+            footprint_features=footprint_features)
+        decision["apex_status"] = apex_status
+        decision["status"] = status
+        decision["brain"] = brain_payload
+        if brain_reason:
+            decision["reason"] = brain_reason
 
         self._record(connection_id, account, candle, status,
                      reason=decision.get("reason", ""),
@@ -312,13 +415,15 @@ class ApexIntegration:
         # it into a precise, trigger-based entry plan (LIMIT pullback or
         # CONFIRM continuation) with a tight invalidation and take-profit,
         # plus the trailing-stop leg and the brain-computed lot size.
+        risk_fraction = _account_risk_fraction(
+            account, "per_trade_risk_pct", DEFAULT_PER_TRADE_RISK_PCT)
+        portfolio_fraction = _account_risk_fraction(
+            account, "portfolio_cap_pct", DEFAULT_PORTFOLIO_RISK_CAP_PCT)
         plan = self.build_entry_plan(
             symbol=symbol, candle=candle, side=status, decision=decision,
             orderflow_features=orderflow_features,
             footprint_features=footprint_features, equity=equity,
-            risk_pct=float(account.get("per_trade_risk_pct",
-                                       DEFAULT_PER_TRADE_RISK_PCT)
-                           or DEFAULT_PER_TRADE_RISK_PCT),
+            risk_pct=risk_fraction,
             native_geometry=native_geometry)
         review_geom = self.review_geometry(
             candle=candle, plan=plan, native_geometry=native_geometry)
@@ -329,8 +434,8 @@ class ApexIntegration:
         native = self._build_native(review_geom, status, candle)
         review = self._apex["review_candidate"](
             signal=decision, gate=gate, native=native, now=int(time.time()),
-            per_trade_risk_pct=CONTRACT_PER_TRADE_RISK_PCT,
-            portfolio_ceiling_pct=CONTRACT_PORTFOLIO_CEILING_PCT)
+            per_trade_risk_pct=risk_fraction,
+            portfolio_ceiling_pct=portfolio_fraction)
 
         if not review["engineering_gates_passed"]:
             self._record(connection_id, account, candle, "BLOCKED",
@@ -726,12 +831,12 @@ class ApexIntegration:
             "bar_open": candle.get("open_time", ""),
             "replay_key": signal_id,
             "direction": side,
-            "conviction": float(ready.get("review", {}).get("risk_budget_usd", 0.0)
-                               / max(1.0, account.get("equity", 1.0))),
+            "conviction": float((ready.get("decision", {}).get("brain", {})
+                                  or {}).get("conviction", 0.0) or 0.0),
             "regime": (ready.get("decision", {}).get("regime", {}) or {}).get(
                 "regime", ""),
             "agent_votes": str(ready.get("decision", {})),
-            "risk_fraction": 0.001,
+            "risk_fraction": float(ready.get("review", {}).get("risk_fraction", 0.0)),
             "stop_risk_usd": float(ready.get("review", {}).get(
                 "nominal_stop_risk_usd", 0.0)),
             "volume": float(cand.get("volume_lots", 0.0)),
