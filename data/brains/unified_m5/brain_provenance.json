@@ -1,0 +1,23 @@
+{
+  "artifact": "nexus_brain.json",
+  "type": "unified_master_brain",
+  "trained_at": "2026-11-16",
+  "timeframe": "M5",
+  "members": 3,
+  "symbols": 26,
+  "online_updates": 163585,
+  "online_enabled": true,
+  "nn_online_lr": 0.001,
+  "training_stages": [
+    "offline_base: train_unified.py --epochs 80 (162589 samples, Deriv+FP market data)",
+    "online_bar_training: train_online.py (161835 causal per-bar updates)",
+    "trade_history_online: train_from_trades.py --mode online (875 trades, 0 skipped)",
+    "trade_history_offline: train_from_trades.py --mode offline --epochs 20 (875 trades, 0 skipped, final_loss=0.6815)"
+  ],
+  "data_sources": {
+    "market_data": "abutronmall-netizen/market-data @ 8a08ecf (Deriv 2026-10-22..11-15, FP-Markets 2026-10-28..11-13)",
+    "trade_history": "abutronmall-netizen/abutron-pay @ trade-history-2026-11-15 (9 broker/account MT5 deal logs, 875 closed trades)"
+  },
+  "paper_trade_aggregate": "7797 trades across 26 symbols, total PnL +9892.71 on $1000/symbol, positive expectancy (pf>2) on all FX symbols",
+  "feature_vector": "49-dim (23 market features + 26 symbol one-hot)"
+}
