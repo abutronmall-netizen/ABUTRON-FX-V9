@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from ..brain import make_brain, default_ensemble
 from ..brain.trainer import load_brain
-from ..brain.unified import load_unified
-from ..config import BRAIN_ENSEMBLE_SEED, BRAIN_SIZE_CAP
+from ..brain.unified import load_unified, unified_brain_dir
+from ..config import (BRAIN_ENSEMBLE_SEED, BRAIN_MODEL_DIR,
+                      BRAIN_SIZE_CAP, GEMMA_ENABLED, MARKET_DATA_DIR,
+                      RUNTIME_RULES_PATH)
 from ..apex.sniper import SniperEntryEngine
 from .loader import MarketDataLoader
 from .engine import BacktestEngine
@@ -56,7 +59,8 @@ def _print_report(r) -> None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="ABUTRON FX backtest / forward test")
-    ap.add_argument("--data", required=True, help="market-data directory")
+    ap.add_argument("--data", default=MARKET_DATA_DIR,
+                    help="linked market-data directory (scripts/link_all.sh)")
     ap.add_argument("--broker", default="deriv",
                     choices=["deriv", "fpmarkets"])
     ap.add_argument("--symbol", default=None)
@@ -85,10 +89,10 @@ def main(argv=None) -> int:
     ap.add_argument("--require-momentum", action="store_true",
                     help="skip entries opposed by an extreme RSI / momentum")
     ap.add_argument("--min-atr-pct", type=float, default=0.0,
-                    help="skip entries when ATR% is below this (volatility)")
+                    help="skip entries when ATR percent is below this (volatility)")
     ap.add_argument("--max-atr-pct", type=float, default=0.0,
-                    help="skip entries when ATR% is above this (volatility)")
-    ap.add_argument("--brain", default=None,
+                    help="skip entries when ATR percent is above this (volatility)")
+    ap.add_argument("--brain", default=BRAIN_MODEL_DIR,
                     help="path to a trained brain dir (from train.py) to load "
                          "instead of an untrained ensemble")
     ap.add_argument("--forward", action="store_true",
@@ -97,6 +101,16 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true",
                     help="list available symbols/timeframes and exit")
     ap.add_argument("--json", action="store_true", help="emit JSON report")
+    ap.add_argument("--export-trades", default=None,
+                    help="write every closed paper trade (with entry features) "
+                         "for scripts/replay_results.py")
+    ap.add_argument("--runtime-rules", default=RUNTIME_RULES_PATH,
+                    help="optimized non-neural sniper/trailing rules JSON")
+    ap.add_argument("--gemma", action="store_true",
+                    help="attempt the optional Gemma agent-score gateway")
+    ap.add_argument("--persist-brain", action="store_true",
+                    help="allow backtest per-bar learning to mutate the "
+                         "loaded brain (default: isolated deep copy)")
     args = ap.parse_args(argv)
 
     loader = MarketDataLoader(args.data)
@@ -127,28 +141,30 @@ def main(argv=None) -> int:
               "--list.")
         return 1
 
-    print(f"Loaded {len(candles)} candles"
-          + (f", {len(quotes)} quotes" if quotes else "") + ".")
+    # Under --json, stdout must stay a single parseable object: logs to stderr.
+    _log = (lambda *a: print(*a, file=sys.stderr)) if args.json else print
+    _log(f"Loaded {len(candles)} candles"
+         + (f", {len(quotes)} quotes" if quotes else "") + ".")
 
     if args.brain:
         # Prefer the unified (49-dim market+symbol) brain; fall back to a
         # plain per-symbol ensemble brain if no unified checkpoint exists.
         brain = load_unified(args.brain)
         if brain is not None:
-            print(f"Loaded UNIFIED brain from {args.brain} "
+            _log(f"Loaded UNIFIED brain from {args.brain} "
                   f"({len(brain.ensemble.members)} members, "
                   f"{len(brain.symbol_ids)} symbols, "
                   f"online_updates={brain.online_updates}).")
         else:
             ensemble = load_brain(args.brain)
             brain = make_brain(ensemble=ensemble, size_cap=BRAIN_SIZE_CAP)
-            print(f"Loaded trained brain from {args.brain} "
+            _log(f"Loaded trained brain from {args.brain} "
                   f"({len(ensemble.members)} members, "
                   f"calibrated={ensemble._fitted}).")
     else:
         brain = make_brain(ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
                            size_cap=BRAIN_SIZE_CAP)
-        print("Using untrained brain ensemble (random fallback signals). "
+        _log("Using untrained brain ensemble (random fallback signals). "
               "Train first with: python -m abutron.backtest.train")
     sniper_kwargs = {}
     if args.tp_atr is not None:
@@ -164,7 +180,10 @@ def main(argv=None) -> int:
         require_trend_regime=args.require_trend,
         require_momentum=args.require_momentum,
         min_atr_pct=args.min_atr_pct,
-        max_atr_pct=args.max_atr_pct)
+        max_atr_pct=args.max_atr_pct,
+        runtime_rules_path=args.runtime_rules,
+        use_gemma_signals=bool(args.gemma or GEMMA_ENABLED),
+        persist_brain_changes=args.persist_brain)
     result = engine.run(
         candles, quotes, symbol=args.symbol or "",
         timeframe=args.timeframe or "",
@@ -175,6 +194,19 @@ def main(argv=None) -> int:
         print(json.dumps(result.to_dict(), indent=2, default=str))
     else:
         _print_report(result)
+    if args.export_trades:
+        out = os.path.abspath(args.export_trades)
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        payload = {
+            "source": "abutron.backtest.run",
+            "mode": result.mode,
+            "signal_sources": result.signal_sources,
+            "loss_guard_blocked": result.loss_guard_blocked,
+            "trades": result.details,
+        }
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, default=str)
+        _log(f"Exported {len(result.details)} paper trades -> {out}")
     return 0
 
 

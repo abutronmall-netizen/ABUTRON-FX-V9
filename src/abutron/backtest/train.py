@@ -31,6 +31,10 @@ import numpy as np
 from ..brain import default_ensemble, make_brain
 from ..brain.trainer import (TrainReport, prepare_samples, save_brain,
                              walk_forward_train)
+from ..brain.signals import (build_signal_bundle, load_depth_signals,
+                             load_tick_trades)
+from ..config import (DEPTH_SNAPSHOTS_PATH, GEMMA_ENABLED,
+                      MARKET_DATA_DIR, TICK_TRADES_PATH)
 from .loader import MarketDataLoader
 
 
@@ -102,7 +106,8 @@ def _multi_fold(ensemble, samples, *, epochs, batch_size, val_fraction,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Train the NexusBrain on market data and save the model")
-    ap.add_argument("--data", required=True, help="market-data directory")
+    ap.add_argument("--data", default=MARKET_DATA_DIR,
+                    help="linked market-data directory")
     ap.add_argument("--broker", default="deriv",
                     choices=["deriv", "fpmarkets"])
     ap.add_argument("--symbol", required=True)
@@ -119,6 +124,12 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None,
                     help="output dir (default data/brains/<symbol>_<tf>)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--ticks", default=TICK_TRADES_PATH,
+                    help="optional true aggressor tick trades CSV(.gz)")
+    ap.add_argument("--depth", default=DEPTH_SNAPSHOTS_PATH,
+                    help="optional depth snapshot CSV(.gz)")
+    ap.add_argument("--gemma", action="store_true",
+                    help="attempt the optional Gemma score gateway")
     args = ap.parse_args(argv)
 
     loader = MarketDataLoader(args.data)
@@ -136,9 +147,21 @@ def main(argv=None) -> int:
     closes = [c.close for c in candles]
     highs = [c.high for c in candles]
     lows = [c.low for c in candles]
-    samples = prepare_samples(closes, highs, lows, horizon=args.horizon)
+    ticks = (load_tick_trades(args.ticks, symbol=args.symbol)
+             if args.ticks else {})
+    depth = (load_depth_signals(args.depth, symbol=args.symbol)
+             if args.depth else {})
+    bundle = build_signal_bundle(
+        candles, symbol=args.symbol, tick_trades=ticks, depth=depth,
+        use_gemma=bool(args.gemma or GEMMA_ENABLED))
+    samples = prepare_samples(
+        closes, highs, lows, horizon=args.horizon,
+        market_features=bundle.market_features)
     print(f"Loaded {len(candles)} candles -> {len(samples)} training samples "
-          f"(horizon={args.horizon}).")
+          f"(horizon={args.horizon}, all_signal_slots_live="
+          f"{bundle.audit['all_slots_nonzero']}).")
+    print(f"  orderflow={bundle.sources['orderflow']} "
+          f"gemma={bundle.sources['gemma']['source']}")
 
     ensemble = default_ensemble(seed=args.seed)
     if args.folds and args.folds > 1:

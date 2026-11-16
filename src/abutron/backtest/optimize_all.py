@@ -24,9 +24,24 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 from ..brain import make_brain, default_ensemble
+from ..brain.unified import SYMBOL_UNIVERSE
 from ..apex.sniper import SniperEntryEngine
+from ..apex.runtime_rules import DEFAULT_TRAIL_K, write_runtime_rules
 from .loader import MarketDataLoader
 from .engine import BacktestEngine
+
+
+def _canonical_symbol(symbol: str) -> str:
+    """Map a broker-specific symbol to the brain universe when possible."""
+    low = symbol.strip().lower()
+    for sym in SYMBOL_UNIVERSE:
+        if sym.lower() == low:
+            return sym
+    for sym in SYMBOL_UNIVERSE:
+        base = sym.split(".")[0].lower()
+        if low.startswith(base) or base.startswith(low):
+            return sym
+    return symbol
 
 
 def _slug(symbol: str) -> str:
@@ -174,6 +189,9 @@ def main(argv=None) -> int:
                          "untrained ensemble")
     ap.add_argument("--out", default=None,
                     help="write JSON results to this path")
+    ap.add_argument("--runtime-rules-out", default=None,
+                    help="write held-out validated non-neural rules JSON "
+                         "(set ABUTRON_RUNTIME_RULES to this path)")
     ap.add_argument("--json", action="store_true",
                     help="also print full JSON after the table")
     args = ap.parse_args(argv)
@@ -223,6 +241,42 @@ def main(argv=None) -> int:
               f"{r['tp']:4.1f} {r['sl']:4.1f} {filt:4} {r['test_trades']:4d} "
               f"{r['test_wr']:6.1f}% {r['test_pf']:6.2f} {r['test_exp']:8.2f} "
               f"{r['test_dd']:6.2f}%")
+    if args.runtime_rules_out:
+        symbols: dict = {}
+        for r in ok:
+            if (r["test_trades"] < args.min_trades or
+                    r["test_exp"] <= 0 or r["test_pf"] <= 1.0):
+                continue
+            rule = {
+                "tp_atr_mult": float(r["tp"]),
+                "invalidation_atr_frac": float(r["sl"]),
+                "min_conviction": float(r["conv"]),
+                "require_trend": bool(r["trend"]),
+                "require_momentum": bool(r["mom"]),
+                "trail_k": DEFAULT_TRAIL_K,
+                "validation": {
+                    "held_out_trades": int(r["test_trades"]),
+                    "held_out_win_rate": float(r["test_wr"]),
+                    "held_out_profit_factor": float(r["test_pf"]),
+                    "held_out_expectancy_usd": float(r["test_exp"]),
+                    "held_out_max_dd_pct": float(r["test_dd"]),
+                },
+            }
+            symbols[r["symbol"]] = rule
+            canonical = _canonical_symbol(r["symbol"])
+            if canonical != r["symbol"]:
+                symbols.setdefault(canonical, rule)
+        path = write_runtime_rules(
+            args.runtime_rules_out, symbols,
+            metadata={
+                "source": "abutron.backtest.optimize_all",
+                "timeframe": args.timeframe, "htf": args.htf,
+                "grid": args.grid, "equity": args.equity,
+                "risk_pct": args.risk_pct,
+                "min_trades": args.min_trades,
+                "note": "Execution rules only; never neural weights",
+            })
+        print(f"\nValidated runtime rules for {len(symbols)} symbol keys -> {path}")
     if args.out:
         with open(args.out, "w") as fh:
             json.dump(out, fh, indent=2, default=str)

@@ -20,15 +20,20 @@ candle that hits both SL and TP is treated as SL-first).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+import copy
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..brain import NexusBrain
 from ..brain.trainer import prepare_samples, walk_forward_train
+from ..brain.signals import (build_signal_bundle, latest_signal_features,
+                             online_learn_from_bundle)
 from ..brain.risk import RiskPolicy
+from ..config import GEMMA_ENABLED, RUNTIME_RULES_PATH
 from ..apex.eligibility import SymbolEligibility
 from ..apex.sniper import SniperEntryEngine, sniper_engine
 from ..apex.trailing import TrailingStop, trailing_stop
+from ..apex.runtime_rules import runtime_rule_for, trail_k_for
 from ..apex.indicators import atr
 from ..feeds.feed_quality import Candle, Quote
 
@@ -50,6 +55,7 @@ class Position:
     open_time: str
     highest_high: float
     lowest_low: float
+    regime: str = ""
     point: float = 0.0
     pnl_usd: float = 0.0
     closed: bool = False
@@ -88,6 +94,8 @@ class BacktestResult:
     days_traded: int = 0
     mode: str = "backtest"
     details: List[Dict] = field(default_factory=list)
+    loss_guard_blocked: int = 0
+    signal_sources: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {k: v for k, v in self.__dict__.items()}
@@ -117,7 +125,11 @@ class BacktestEngine:
                  max_atr_pct: float = 9.99,
                  require_momentum: bool = False,
                  risk_policy: Optional[RiskPolicy] = None,
-                 eligibility: Optional[SymbolEligibility] = None):
+                 eligibility: Optional[SymbolEligibility] = None,
+                 trail_k: Optional[float] = None,
+                 runtime_rules_path: Optional[str] = None,
+                 use_gemma_signals: bool = False,
+                 persist_brain_changes: bool = False):
         self.brain = brain
         self.sniper = sniper or sniper_engine
         self.trailing = trailing or trailing_stop
@@ -153,6 +165,15 @@ class BacktestEngine:
         self.train_epochs = 60
         self.train_batch = 32
         self.train_seed = 0
+        self.trail_k = trail_k
+        self.runtime_rules_path = runtime_rules_path or RUNTIME_RULES_PATH
+        self.use_gemma_signals = bool(use_gemma_signals or GEMMA_ENABLED)
+        # Backtests learn per bar on an isolated copy by default, so repeated
+        # evaluation runs never mutate the shared trained brain. Training
+        # scripts opt in to persistence when they intend to refine it.
+        self.persist_brain_changes = bool(persist_brain_changes)
+        self._signal_bundle = None
+        self._signal_index: Dict[str, int] = {}
         self._train_report = None
         self._train_error = ""
 
@@ -167,16 +188,9 @@ class BacktestEngine:
         p = pos.point or self.point
         return p if p > 0 else 1e-9
 
-    def _entry_allowed(self, prop, closes, highs, lows, a, idx) -> tuple:
-        """Return (allowed: bool, reason: str) for high-precision entry
-        filters. Delegates to the shared ``apply_entry_filters`` so the
-        backtest and the live APEX engine select trades identically.
-
-        Filters remove low-probability setups to raise win rate; a
-        rejected entry is skipped (counted by the caller). Computed on a
-        rolling window of history UP TO the current bar ``idx``
-        (point-in-time, no lookahead).
-        """
+    def _entry_allowed(self, prop, closes, highs, lows, a, idx,
+                       symbol: str = "") -> tuple:
+        """Return (allowed, reason), including optimized runtime rules."""
         from ..apex.geometry import SymbolGeometry, apply_entry_filters
         geom = SymbolGeometry(
             tp_atr_mult=0.0,
@@ -186,6 +200,18 @@ class BacktestEngine:
             min_conviction=self.min_conviction,
             min_atr_pct=self.min_atr_pct,
             max_atr_pct=self.max_atr_pct)
+        rule = runtime_rule_for(symbol, self.runtime_rules_path) if symbol else {}
+        if rule:
+            geom = replace(
+                geom,
+                require_trend=geom.require_trend or bool(rule.get("require_trend", False)),
+                require_momentum=geom.require_momentum or bool(rule.get("require_momentum", False)),
+                min_conviction=max(geom.min_conviction,
+                                   float(rule.get("min_conviction", 0.0) or 0.0)),
+                min_atr_pct=max(geom.min_atr_pct,
+                                float(rule.get("min_atr_pct", 0.0) or 0.0)),
+                max_atr_pct=(float(rule.get("max_atr_pct", geom.max_atr_pct))
+                             if rule.get("max_atr_pct") else geom.max_atr_pct))
         return apply_entry_filters(prop, closes, highs, lows, a, geom, idx)
 
     @staticmethod
@@ -196,13 +222,44 @@ class BacktestEngine:
         except (ValueError, TypeError):
             return 0.0
 
+    @staticmethod
+    def _trade_detail(pos: "Position", pnl: float, c: "Candle",
+                      reason: str) -> Dict[str, Any]:
+        """Export one paper trade with the exact brain features at entry."""
+        return {
+            "source": "paper_backtest",
+            "symbol": pos.symbol, "timeframe": pos.timeframe,
+            "direction": pos.direction, "entry_type": pos.entry_type,
+            "entry_quality": round(float(pos.entry_quality), 6),
+            "regime": pos.regime,
+            "entry": float(pos.entry_price),
+            "exit": float(pos.close_price or getattr(c, "close", 0.0)),
+            "pnl": round(float(pnl), 6), "reason": reason,
+            "opened_at": pos.open_time, "closed_at": c.open_time,
+            "lots": float(pos.lots), "point": float(pos.point),
+            "features": [float(v) for v in pos.features],
+        }
+
+    @staticmethod
+    def _directional_return(pos: "Position", exit_price: float) -> float:
+        """Positive when the market moved UP (the brain's class-1 label)."""
+        return (float(exit_price) - float(pos.entry_price)) \
+            if pos.direction == "BUY" else \
+            (float(pos.entry_price) - float(exit_price))
+
     def _train_on(self, train_candles: List[Candle]) -> None:
         """Train the brain's ensemble on a window of candles (walk-forward)."""
         try:
             closes = [c.close for c in train_candles]
             highs = [c.high for c in train_candles]
             lows = [c.low for c in train_candles]
-            samples = prepare_samples(closes, highs, lows, horizon=1)
+            bundle = build_signal_bundle(
+                train_candles,
+                symbol=train_candles[0].symbol if train_candles else "",
+                use_gemma=self.use_gemma_signals)
+            samples = prepare_samples(
+                closes, highs, lows, horizon=1,
+                market_features=bundle.market_features)
             if len(samples) < 50:
                 return
             report = walk_forward_train(
@@ -220,6 +277,36 @@ class BacktestEngine:
             htf_candles: Optional[List[Candle]] = None,
             forward_test: bool = False, forward_frac: float = 0.2
             ) -> BacktestResult:
+        """Run an isolated evaluation/training pass.
+
+        Per-bar online learning still happens on every closed candle, but on
+        a deep copy of the brain unless ``persist_brain_changes`` is set.
+        This makes backtests reproducible and prevents one optimizer combo
+        from contaminating the next.
+        """
+        original_brain = self.brain
+        original_sniper = self.sniper
+        original_trail_k = self.trail_k
+        if not self.persist_brain_changes:
+            self.brain = copy.deepcopy(original_brain)
+            self.sniper = copy.deepcopy(original_sniper)
+        try:
+            return self._run_impl(
+                candles, quotes, symbol=symbol, timeframe=timeframe,
+                htf_candles=htf_candles, forward_test=forward_test,
+                forward_frac=forward_frac)
+        finally:
+            if not self.persist_brain_changes:
+                self.brain = original_brain
+                self.sniper = original_sniper
+                self.trail_k = original_trail_k
+
+    def _run_impl(self, candles: List[Candle],
+                  quotes: Optional[List[Quote]] = None,
+                  *, symbol: str = "", timeframe: str = "",
+                  htf_candles: Optional[List[Candle]] = None,
+                  forward_test: bool = False, forward_frac: float = 0.2
+                  ) -> BacktestResult:
         if not candles:
             return BacktestResult(self.equity, self.equity, 0.0, 0.0, 0, 0,
                                   0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0,
@@ -228,6 +315,27 @@ class BacktestEngine:
         candles = sorted(candles, key=lambda c: c.open_time)
         htf_candles = sorted(htf_candles, key=lambda c: c.open_time) \
             if htf_candles else []
+        run_symbol = symbol or (candles[0].symbol if candles else "")
+        # One causal signal bundle for the full series. Row i uses only bars
+        # 0..i, so using the full array here never leaks future information.
+        self._signal_bundle = build_signal_bundle(
+            candles, symbol=run_symbol, use_gemma=self.use_gemma_signals)
+        self._signal_index = {t: i for i, t in
+                              enumerate(self._signal_bundle.bar_times)}
+        # Apply optimized sniper/trailing rules when a rules file is present.
+        rule = runtime_rule_for(run_symbol, self.runtime_rules_path)
+        if rule:
+            self.sniper = SniperEntryEngine(
+                tp_atr_mult=float(rule.get("tp_atr_mult",
+                                           self.sniper.tp_atr_mult)),
+                invalidation_atr_frac=float(
+                    rule.get("invalidation_atr_frac",
+                             self.sniper.invalidation_atr_frac)),
+                pullback_atr_max=float(rule.get("pullback_atr_max",
+                                                self.sniper.pullback_atr_max)))
+            if self.trail_k is None:
+                self.trail_k = trail_k_for(run_symbol,
+                                           path=self.runtime_rules_path)
         quotes_by_sym = {}
         if quotes:
             for q in quotes:
@@ -276,6 +384,7 @@ class BacktestEngine:
         confluence_filtered = 0
         entry_filtered = 0
         equity_filtered = 0
+        loss_guard_blocked = 0
 
         for c in run_candles:
             idx += 1
@@ -304,11 +413,12 @@ class BacktestEngine:
             # the PREVIOUS bar predict this bar's move. Causal (no
             # look-ahead) and runs on every closed bar, so the brain
             # self-trains continuously, not just on settled trades.
-            if len(closes) >= 30:
+            s_idx = self._signal_index.get(c.open_time)
+            if len(closes) >= 30 and s_idx is not None and s_idx > 0:
                 _prev_close = closes[-2]
-                self.brain.online_learn(
-                    symbol=c.symbol, closes=closes[:-1],
-                    highs=highs[:-1], lows=lows[:-1],
+                online_learn_from_bundle(
+                    self.brain, symbol=c.symbol,
+                    bundle=self._signal_bundle, index=s_idx - 1,
                     realised_return=closes[-1] - _prev_close)
 
             # --- advance the higher-timeframe series to bars closed before
@@ -327,10 +437,15 @@ class BacktestEngine:
                 _hcloses = [x.close for x in htf_hist]
                 _hhighs = [x.high for x in htf_hist]
                 _hlows = [x.low for x in htf_hist]
+                _hsig = latest_signal_features(
+                    htf_hist, symbol=c.symbol,
+                    use_gemma=self.use_gemma_signals)
                 _hprop = self.brain.decide(
                     symbol=c.symbol, closes=_hcloses, highs=_hhighs,
-                    lows=_hlows, orderflow={}, footprint={},
-                    agent_scores={}, regime="")
+                    lows=_hlows, orderflow=_hsig.get("orderflow", {}),
+                    footprint=_hsig.get("footprint", {}),
+                    agent_scores=_hsig.get("agent_scores", {}),
+                    regime=_hsig.get("regime", ""))
                 htf_dir = _hprop.direction
             else:
                 htf_dir = ""
@@ -360,17 +475,18 @@ class BacktestEngine:
                     equity += pnl
                     daily_pnl += pnl
                     self.brain.learn_from_trade(
-                        symbol=position.symbol, regime="",
+                        symbol=position.symbol, regime=position.regime,
                         direction=position.direction,
                         entry_type=position.entry_type,
-                        entry_quality=position.entry_quality, pnl=pnl)
+                        entry_quality=position.entry_quality, pnl=pnl,
+                        features=position.features)
                     # True online neural learning: nudge the brain's own
                     # weights toward the realised move using the features
                     # captured at entry (self-learning from each trade).
                     if position.features:
                         self.brain.online_learn_features(
                             position.features,
-                            closed[0] - position.entry_price,
+                            self._directional_return(position, closed[0]),
                             symbol=position.symbol)
                     if pnl > 0:
                         wins += 1; total_win += pnl; consec_losses = 0
@@ -387,12 +503,8 @@ class BacktestEngine:
                         else:
                             reported_losses += 1
                     if closed[2]:
-                        details.append({
-                            "symbol": position.symbol,
-                            "direction": position.direction,
-                            "entry": position.entry_price,
-                            "exit": closed[0], "pnl": round(pnl, 2),
-                            "reason": closed[1], "closed_at": c.open_time})
+                        details.append(self._trade_detail(
+                            position, pnl, c, closed[1]))
                     position = None
 
             max_equity = max(max_equity, equity)
@@ -416,11 +528,22 @@ class BacktestEngine:
                 if not _elig.eligible:
                     equity_filtered += 1
                 else:
+                    sig = (self._signal_bundle.at(s_idx)
+                           if s_idx is not None else
+                           latest_signal_features(
+                               history, symbol=c.symbol,
+                               use_gemma=self.use_gemma_signals))
                     prop = self.brain.decide(
                         symbol=c.symbol, closes=closes, highs=highs, lows=lows,
-                        orderflow={}, footprint={}, agent_scores={},
-                        regime="")
-                    if prop.direction in ("BUY", "SELL"):
+                        orderflow=sig.get("orderflow", {}),
+                        footprint=sig.get("footprint", {}),
+                        agent_scores=sig.get("agent_scores", {}),
+                        regime=sig.get("regime", ""))
+                    if prop.direction not in ("BUY", "SELL"):
+                        if any("LOSS_PATTERN_REPEAT" in b
+                               for b in (prop.blockers or [])):
+                            loss_guard_blocked += 1
+                    else:
                         # Daily profit-stop / loss-cap: once the daily target is
                         # reached or the loss cap hit, stop trading for the day.
                         # Never raises risk to chase the target (tier risk is fixed).
@@ -431,7 +554,8 @@ class BacktestEngine:
                             # High-precision entry filter (win-rate optimisation):
                             # drop low-probability setups before the confluence gate.
                             _ok, _reason = self._entry_allowed(
-                                prop, closes, highs, lows, a, idx)
+                                prop, closes, highs, lows, a, idx,
+                                symbol=c.symbol)
                             if not _ok:
                                 entry_filtered += 1
                             elif self.mtf_confluence and htf_candles and (
@@ -446,8 +570,11 @@ class BacktestEngine:
                                 snip = self.sniper.plan(
                                     symbol=c.symbol, direction=prop.direction,
                                     closes=closes, highs=highs, lows=lows,
-                                    atr_val=a, of_features={}, fp_features={},
-                                    regime="", uncertainty=prop.uncertainty,
+                                    atr_val=a,
+                                    of_features=sig.get("orderflow", {}),
+                                    fp_features=sig.get("footprint", {}),
+                                    regime=prop.regime,
+                                    uncertainty=prop.uncertainty,
                                     conviction=prop.conviction,
                                     confirm_bias=bias.get("confirm_bias", 0.0),
                                     quality_floor=bias.get("quality_floor", 0.0))
@@ -466,15 +593,18 @@ class BacktestEngine:
             equity += pnl
             daily_pnl += pnl
             self.brain.learn_from_trade(
-                symbol=position.symbol, regime="",
+                symbol=position.symbol, regime=position.regime,
                 direction=position.direction,
                 entry_type=position.entry_type,
-                entry_quality=position.entry_quality, pnl=pnl)
+                entry_quality=position.entry_quality, pnl=pnl,
+                features=position.features)
             if position.features:
                 self.brain.online_learn_features(
                     position.features,
-                    last.close - position.entry_price,
+                    self._directional_return(position, last.close),
                     symbol=position.symbol)
+            details.append(self._trade_detail(
+                position, pnl, last, "END_OF_DATA"))
             if last and idx > report_from:
                 reported_trades += 1
                 reported_pnl += pnl
@@ -505,7 +635,9 @@ class BacktestEngine:
             equity_filtered=equity_filtered,
             daily_stopped=daily_stopped,
             days_traded=days_traded,
-            mode=mode, details=details)
+            mode=mode, details=details,
+            loss_guard_blocked=loss_guard_blocked,
+            signal_sources=self._signal_bundle.sources)
 
     # ------------------------------------------------------------------
     def _entry_fill(self, snip, c: Candle, direction: str):
@@ -549,10 +681,13 @@ class BacktestEngine:
         if sizing.get("lots", 0.0) <= 0.0:
             return None
         lots = sizing["lots"]
+        trail_k = (self.trail_k if self.trail_k is not None
+                   else trail_k_for(c.symbol, path=self.runtime_rules_path,
+                                    default=TrailingStop.DEFAULT_K))
         trail = self.trailing.plan(
             direction=prop.direction, highs=[c.high], lows=[c.low],
-            atr_val=a, entry_price=fill[0],
-            trail_k=TrailingStop.DEFAULT_K)
+            atr_val=a, entry_price=fill[0], trail_k=trail_k,
+            symbol=c.symbol)
         return Position(
             symbol=c.symbol, timeframe=c.timeframe,
             direction=prop.direction, entry_price=fill[0], lots=lots,
@@ -560,7 +695,8 @@ class BacktestEngine:
             trail_k=trail.trail_k, trail_atr=trail.trail_atr,
             trail_stop=snip.invalidation,  # starts at invalidation
             entry_type=snip.entry_type, entry_quality=snip.entry_quality,
-            open_time=c.open_time, highest_high=c.high, lowest_low=c.low,
+            regime=prop.regime, open_time=c.open_time,
+            highest_high=c.high, lowest_low=c.low,
             point=self._point(c),
             features=list(prop.features))
 

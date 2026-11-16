@@ -54,29 +54,33 @@ class MarketDataLoader:
         d = os.path.join(self.data_dir, "Deriv")
         if not os.path.isdir(d):
             return []
-        gz_path = self._assemble_deriv(d)
+        gz_path = self._assemble_chunks(d)
         candles = self._read_candles_gz(gz_path, broker="deriv",
                                         symbol_col="symbol",
                                         use_broker_symbol=False)
         return self._filter(candles, symbol, timeframe)
 
-    def _assemble_deriv(self, d: str) -> Optional[str]:
-        """Concatenate the ordered part-* chunks into one gzip stream.
+    def _assemble_chunks(self, d: str) -> Optional[str]:
+        """Concatenate ordered ``candles.csv.gz.part-*`` chunks.
 
-        Writes to a per-process temp file and atomically replaces the
-        assembled file, so concurrent workers never read a torn/partial
-        stream (which would raise gzip EOFError).
+        Both Deriv and FP-Markets split their gzip stream into byte chunks.
+        A single ``candles.csv.gz`` is also accepted. The per-process temp
+        file is atomically replaced so concurrent workers never read a torn
+        gzip stream (which would raise EOFError).
         """
+        single = os.path.join(d, "candles.csv.gz")
         parts = sorted(f for f in os.listdir(d) if ".part-" in f)
+        if not parts:
+            return single if os.path.isfile(single) else None
         out = os.path.join(d, "_assembled.csv.gz")
-        # skip if a complete assembled file already exists (cache)
-        if os.path.exists(out):
+        newest = max(os.path.getmtime(os.path.join(d, p)) for p in parts)
+        if os.path.isfile(out) and os.path.getmtime(out) >= newest:
             return out
         tmp = os.path.join(d, f"._assembled.{os.getpid()}.tmp.gz")
         try:
             with open(tmp, "wb") as w:
-                for p in parts:
-                    with open(os.path.join(d, p), "rb") as r:
+                for part in parts:
+                    with open(os.path.join(d, part), "rb") as r:
                         w.write(r.read())
             os.replace(tmp, out)  # atomic on POSIX
         finally:
@@ -86,6 +90,10 @@ class MarketDataLoader:
                 except OSError:
                     pass
         return out
+
+    # Backwards-compatible name used by older callers.
+    def _assemble_deriv(self, d: str) -> Optional[str]:
+        return self._assemble_chunks(d)
 
     # ------------------------------------------------------------------
     # FP Markets
@@ -97,7 +105,7 @@ class MarketDataLoader:
         if not os.path.isdir(d):
             return [], []
         candles = self._read_candles_gz(
-            os.path.join(d, "candles.csv.gz"), broker="fpmarkets",
+            self._assemble_chunks(d), broker="fpmarkets",
             symbol_col="broker_symbol", use_broker_symbol=True)
         candles = self._filter(candles, symbol, timeframe)
         quotes = self._read_quotes_gz(os.path.join(d, "quotes.csv.gz"))
@@ -111,6 +119,8 @@ class MarketDataLoader:
         candles: List[Candle] = []
         seen = set()
         max_dec: Dict[Tuple[str, str], int] = {}
+        if not path or not os.path.isfile(path):
+            return candles
         with gzip.open(path, "rt", encoding="utf-8", newline="") as fh:
             header = fh.readline().strip().split(",")
             idx = {c: i for i, c in enumerate(header)}
@@ -139,7 +149,9 @@ class MarketDataLoader:
                         high=_parse_float(f[idx["high"]]),
                         low=_parse_float(f[idx["low"]]),
                         close=_parse_float(f[idx["close"]]),
-                        volume=0.0, tick_size=0.0, point=0.0, closed=True,
+                        volume=(_parse_float(f[idx["volume"]])
+                                if "volume" in idx else 0.0),
+                        tick_size=0.0, point=0.0, closed=True,
                     )
                 except KeyError:
                     continue
@@ -148,15 +160,23 @@ class MarketDataLoader:
                     continue
                 seen.add(key)
                 candles.append(candle)
-        # assign point size = smallest price increment (10^-max_decimals)
+        # Assign point size = smallest price increment (10^-max_decimals).
+        # The public OHLCV dataset has no volume column; create a bounded,
+        # deterministic range/body volume proxy for the candle-proxy signals.
         for c in candles:
             d = max_dec.get((c.symbol, c.timeframe), 0)
             c.point = 10.0 ** (-d) if d else 0.0
+            if c.volume <= 0:
+                ref = max(c.point, abs(c.close) * 1e-5, 1e-9)
+                c.volume = 1.0 + min(20.0,
+                    ((c.high - c.low) + abs(c.close - c.open)) / ref)
         candles.sort(key=lambda c: (c.symbol, c.timeframe, c.open_time))
         return candles
 
     def _read_quotes_gz(self, path: str) -> List[Quote]:
         quotes: List[Quote] = []
+        if not path or not os.path.isfile(path):
+            return quotes
         with gzip.open(path, "rt", encoding="utf-8", newline="") as fh:
             header = fh.readline().strip().split(",")
             idx = {c: i for i, c in enumerate(header)}
