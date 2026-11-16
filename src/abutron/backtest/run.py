@@ -22,6 +22,7 @@ import sys
 
 from ..brain import make_brain, default_ensemble
 from ..brain.trainer import load_brain
+from ..brain.unified import load_unified
 from ..config import BRAIN_ENSEMBLE_SEED, BRAIN_SIZE_CAP
 from ..apex.sniper import SniperEntryEngine
 from .loader import MarketDataLoader
@@ -130,11 +131,20 @@ def main(argv=None) -> int:
           + (f", {len(quotes)} quotes" if quotes else "") + ".")
 
     if args.brain:
-        ensemble = load_brain(args.brain)
-        brain = make_brain(ensemble=ensemble, size_cap=BRAIN_SIZE_CAP)
-        print(f"Loaded trained brain from {args.brain} "
-              f"({len(ensemble.members)} members, "
-              f"calibrated={ensemble._fitted}).")
+        # Prefer the unified (49-dim market+symbol) brain; fall back to a
+        # plain per-symbol ensemble brain if no unified checkpoint exists.
+        brain = load_unified(args.brain)
+        if brain is not None:
+            print(f"Loaded UNIFIED brain from {args.brain} "
+                  f"({len(brain.ensemble.members)} members, "
+                  f"{len(brain.symbol_ids)} symbols, "
+                  f"online_updates={brain.online_updates}).")
+        else:
+            ensemble = load_brain(args.brain)
+            brain = make_brain(ensemble=ensemble, size_cap=BRAIN_SIZE_CAP)
+            print(f"Loaded trained brain from {args.brain} "
+                  f"({len(ensemble.members)} members, "
+                  f"calibrated={ensemble._fitted}).")
     else:
         brain = make_brain(ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
                            size_cap=BRAIN_SIZE_CAP)

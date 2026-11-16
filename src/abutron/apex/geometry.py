@@ -112,9 +112,9 @@ def apply_entry_filters(prop, closes, highs, lows, a, geom: SymbolGeometry,
         price = closes[i]
         if price:
             atr_pct = (a / price) * 100.0
-            if atr_pct < geom.min_atr_pct:
+            if geom.min_atr_pct > 0 and atr_pct < geom.min_atr_pct:
                 return False, f"LOW_VOL({atr_pct:.3f}%)"
-            if atr_pct > geom.max_atr_pct:
+            if geom.max_atr_pct > 0 and atr_pct > geom.max_atr_pct:
                 return False, f"HIGH_VOL({atr_pct:.3f}%)"
     # rolling window up to the current bar (point-in-time, no lookahead)
     end = (idx + 1) if (0 <= idx < n) else n
