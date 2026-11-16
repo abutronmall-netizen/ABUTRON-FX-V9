@@ -34,8 +34,15 @@ sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.t
 
 # 3. Data dirs (root-owned, native evidence)
 echo "==> data directories"
-sudo mkdir -p "$DATA_DIR"/{native,decisions,receipts,ledger,state,mt5}
+sudo mkdir -p "$DATA_DIR"/{native,decisions,receipts,ledger,state,mt5,links,brains/unified_m5}
 sudo chown -R "$APP_USER:$APP_USER" "$DATA_DIR"
+
+# 3b. Link training datasets (market-data + trade-history -> data/links/).
+# The checked-in trained brain ships in the repo copy; datasets are
+# cloned by scripts/link_all.sh (git-ignored, never committed).
+echo "==> linking training datasets"
+sudo -u "$APP_USER" bash "$APP_DIR/scripts/link_all.sh" || \
+    echo "    (link step skipped — run: bash $APP_DIR/scripts/link_all.sh)"
 
 # 4. MT5 terminal directory + Wine prefixes
 echo "==> wine/MT5 runtime"
@@ -52,6 +59,8 @@ sudo systemctl enable abutron-portal.service abutron-dispatch.service \
     abutron-reconcile.timer abutron-health.timer
 
 echo "==> done. Next:"
+echo "    # train / retrain the unified brain (see docs/INSTALL_AND_LINK.md):"
+echo "    PYTHONPATH=src $APP_DIR/.venv/bin/python -m scripts.train_unified"
 echo "    sudo systemctl start abutron-portal.service"
 echo "    sudo systemctl start abutron-mt5-worker@<connection_id>"
 echo "    Portal: http://<host>:${ABUTRON_PORTAL_PORT:-19743}/"
