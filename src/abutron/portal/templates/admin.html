@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% set active = 'admin' %}
+{% block title %}ABUTRON · Admin CRM{% endblock %}
+{% block topright %}<span class="pill"><span class="dot"></span>Admin CRM</span>{% endblock %}
+{% block content %}
+<div class="hero">
+  <span class="eyebrow">ABUTRON · ADMIN CRM</span>
+  <h1>Platform <em>administration.</em></h1>
+  <p>Account ownership, broker linkage, EA binary pins, licensing, entitlements and
+  activation. Activation is pin-verified — effective ON only when the registered EA
+  SHA-256 matches the native writer's activation revision.</p>
+</div>
+
+<div class="stats">
+  <div class="stat"><span>Registered accounts</span><b id="stTotal">—</b><small>all broker connections</small></div>
+  <div class="stat"><span>Connected</span><b id="stConn">—</b><small>broker session confirmed</small></div>
+  <div class="stat"><span>Effective ON</span><b id="stOn" style="color:var(--ok)">—</b><small>pin-verified activation</small></div>
+  <div class="stat"><span>By broker</span><b id="stBroker">—</b><small>Deriv · FP Markets</small></div>
+</div>
+
+<div class="section-title"><h2>Accounts</h2><span class="hint"><a href="#" onclick="load();return false;">↻ Refresh</a></span></div>
+<div class="tbl-wrap" id="accounts"></div>
+
+<div class="section-title"><h2>Operations</h2><span class="hint">Register · Link · Arm · License · Users</span></div>
+<div class="grid">
+  <div class="card">
+    <span class="eyebrow">REGISTER</span>
+    <h3 style="margin-top:6px">New account</h3>
+    <p class="sub">Create a broker connection record scoped to an owner.</p>
+    <form onsubmit="return regAcct(event)">
+      <div class="form-row">
+        <div><label>Connection ID <input id="r_cid" type="text" placeholder="conn_xxx" required></label></div>
+        <div><label>Broker <select id="r_broker"><option value="deriv">Deriv</option><option value="fpmarkets">FP Markets</option></select></label></div>
+        <div><label>MT5 login <input id="r_login" type="number" required></label></div>
+        <div><label>Owner ID <input id="r_owner" type="text" required></label></div>
+        <div><label>Environment <select id="r_env"><option value="demo">demo</option><option value="live">live</option></select></label></div>
+        <div><label>Server <input id="r_server" type="text" placeholder="Deriv-Demo"></label></div>
+        <div><label>Display name <input id="r_name" type="text"></label></div>
+        <div><label>Per-trade risk % <input id="r_pt" type="number" step="0.01" value="0.15"></label></div>
+        <div><label>Portfolio cap % <input id="r_cap" type="number" step="0.01" value="0.20"></label></div>
+      </div>
+      <button type="submit">Register account</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <span class="eyebrow">LINK &amp; ARM</span>
+    <h3 style="margin-top:6px">Bind EA pin &amp; arm writer</h3>
+    <p class="sub">Link a compiled EA SHA-256, then arm the single writer.</p>
+    <form onsubmit="return linkArm(event)">
+      <div class="field"><label>Connection ID <input id="l_cid" type="text" required></label></div>
+      <div class="form-row">
+        <div><label>EA SHA-256 <input id="l_sha" type="text" placeholder="64-hex pin" required></label></div>
+        <div><label>Server <input id="l_server" type="text" placeholder="broker server"></label></div>
+      </div>
+      <button type="submit" class="sec" style="width:100%;justify-content:center">Link EA pin</button>
+      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+      <div class="field"><label>Arm writer — Connection ID <input id="a_cid" type="text" required></label></div>
+      <div class="form-row">
+        <div><label>EA path <input id="a_path" type="text" placeholder="/path/ApexNativeWriter.ex5"></label></div>
+        <div><label>Expected SHA-256 <input id="a_sha" type="text"></label></div>
+        <div><label>Activation revision <input id="a_rev" type="text"></label></div>
+      </div>
+      <button type="submit" onclick="event.preventDefault();armWriter()" class="ok" style="width:100%;justify-content:center">Arm writer</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <span class="eyebrow">LICENSES &amp; USERS</span>
+    <h3 style="margin-top:6px">Entitlement management</h3>
+    <p class="sub">Grant licenses and create portal users.</p>
+    <form onsubmit="return grantLic(event)">
+      <div class="form-row">
+        <div><label>License ID <input id="lic_id" type="text" required></label></div>
+        <div><label>Owner ID <input id="lic_owner" type="text" required></label></div>
+        <div><label>Tier <select id="lic_tier"><option>standard</option><option>pro</option><option>enterprise</option></select></label></div>
+        <div><label>Expires at <input id="lic_exp" type="text" placeholder="2027-11-13T00:00:00Z"></label></div>
+      </div>
+      <button type="submit" class="sec" style="width:100%;justify-content:center">Grant license</button>
+    </form>
+    <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+    <form onsubmit="return createUser(event)">
+      <div class="form-row">
+        <div><label>Username <input id="u_name" type="text" required></label></div>
+        <div><label>Role <select id="u_role"><option value="client">client</option><option value="admin">admin</option><option value="operator">operator</option></select></label></div>
+        <div><label>Password <input id="u_pass" type="password" required></label></div>
+        <div><label>Owner ID <input id="u_owner" type="text"></label></div>
+      </div>
+      <button type="submit" style="width:100%;justify-content:center">Create user</button>
+    </form>
+  </div>
+</div>
+
+<script>
+function pillCls(on) { return on ? 'ok' : 'muted'; }
+
+async function load() {
+  const el = document.getElementById('accounts');
+  try {
+    const list = await ABUTRON.api('/api/admin/accounts');
+    document.getElementById('stTotal').textContent = list.length;
+    document.getElementById('stConn').textContent = list.filter(a=>a.conn_status==='CONNECTED').length;
+    document.getElementById('stOn').textContent = list.filter(a=>a.effective_on).length;
+    const deriv = list.filter(a=>a.broker==='deriv').length;
+    const fp = list.filter(a=>a.broker==='fpmarkets').length;
+    document.getElementById('stBroker').textContent = `${deriv} / ${fp}`;
+    if (!list.length) { el.innerHTML = '<div class="empty">No accounts registered yet.</div>'; return; }
+    el.innerHTML = `<table>
+      <tr><th>Account</th><th>Broker</th><th>Owner</th><th>Env</th><th>Status</th>
+          <th>Desired / Effective</th><th>EA pin</th><th>Actions</th></tr>
+      ${list.map(a => `<tr>
+        <td><b>${ABUTRON.esc(a.display_name || a.connection_id)}</b><br>
+            <span class="muted" style="font-size:12px">${ABUTRON.esc(a.connection_id)} · login ${ABUTRON.esc(a.mt5_login)}</span></td>
+        <td>${ABUTRON.esc(a.broker)}</td>
+        <td>${ABUTRON.esc(a.owner_id)}</td>
+        <td>${ABUTRON.esc(a.environment)}</td>
+        <td><span class="pill ${a.conn_status==='CONNECTED'?'ok':a.conn_status==='ERROR'?'bad':'warn'}" style="padding:2px 9px"><span class="dot"></span>${ABUTRON.esc(a.conn_status||'—')}</span></td>
+        <td><span class="pill ${pillCls(a.desired_on)}" style="padding:2px 9px">${a.desired_on?'ON':'off'}</span>
+            <span class="pill ${pillCls(a.effective_on)}" style="padding:2px 9px;margin-left:4px">${a.effective_on?'ON':'off'}</span></td>
+        <td><span style="font-family:monospace;font-size:11px">${ABUTRON.esc((a.ea_sha256||'—').slice(0,12))}</span></td>
+        <td>
+          <button class="sm sec" onclick="confirmOn('${ABUTRON.esc(a.connection_id)}','${ABUTRON.esc(a.activation_revision||'')}','${ABUTRON.esc(a.ea_sha256||'')}')">Confirm ON</button>
+        </td>
+      </tr>`).join('')}
+    </table>`;
+  } catch (e) { el.innerHTML = `<div class="empty">${ABUTRON.esc(e.message)}</div>`; }
+}
+async function regAcct(e) {
+  e.preventDefault();
+  try {
+    await ABUTRON.api('/api/admin/accounts', {method:'POST', body: JSON.stringify({
+      connection_id: r_cid.value, broker: r_broker.value, mt5_login: Number(r_login.value),
+      owner_id: r_owner.value, environment: r_env.value, server: r_server.value,
+      display_name: r_name.value, per_trade_risk_pct: Number(r_pt.value),
+      portfolio_cap_pct: Number(r_cap.value)})});
+    ABUTRON.toast('Account registered'); load();
+  } catch (err) { ABUTRON.toast(err.message, 'bad'); }
+  return false;
+}
+async function linkArm(e) {
+  e.preventDefault();
+  try {
+    await ABUTRON.api('/api/admin/accounts/'+l_cid.value+'/link', {method:'POST',
+      body: JSON.stringify({ea_sha256: l_sha.value, server: l_server.value})});
+    ABUTRON.toast('EA pin linked'); load();
+  } catch (err) { ABUTRON.toast(err.message, 'bad'); }
+  return false;
+}
+async function armWriter() {
+  try {
+    await ABUTRON.api('/api/admin/accounts/'+a_cid.value+'/arm', {method:'POST',
+      body: JSON.stringify({ea_path: a_path.value, expected_sha256: a_sha.value,
+        activation_revision: a_rev.value})});
+    ABUTRON.toast('Writer armed');
+  } catch (err) { ABUTRON.toast(err.message, 'bad'); }
+}
+async function confirmOn(cid, rev, sha) {
+  try {
+    const q = new URLSearchParams({connection_id:cid, activation_revision:rev, ea_sha256:sha});
+    await ABUTRON.api('/api/admin/confirm-effective-on?'+q, {method:'POST'});
+    ABUTRON.toast('Effective ON confirmed (pin-verified)'); load();
+  } catch (err) { ABUTRON.toast(err.message, 'bad'); }
+}
+async function grantLic(e) {
+  e.preventDefault();
+  try {
+    await ABUTRON.api('/api/admin/licenses', {method:'POST', body: JSON.stringify({
+      license_id: lic_id.value, owner_id: lic_owner.value, tier: lic_tier.value,
+      expires_at: lic_exp.value})});
+    ABUTRON.toast('License granted');
+  } catch (err) { ABUTRON.toast(err.message, 'bad'); }
+  return false;
+}
+async function createUser(e) {
+  e.preventDefault();
+  try {
+    await ABUTRON.api('/api/admin/users', {method:'POST', body: JSON.stringify({
+      username: u_name.value, role: u_role.value, password: u_pass.value, owner_id: u_owner.value})});
+    ABUTRON.toast('User created');
+    u_name.value=''; u_pass.value='';
+  } catch (err) { ABUTRON.toast(err.message, 'bad'); }
+  return false;
+}
+load();
+</script>
+{% endblock %}

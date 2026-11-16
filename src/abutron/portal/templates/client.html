@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% set active = 'client' %}
+{% block title %}ABUTRON · Client Portal{% endblock %}
+{% block topright %}
+  {% if authed %}<span class="pill ok"><span class="dot"></span>Signed in</span>{% endif %}
+{% endblock %}
+{% block content %}
+<div class="hero">
+  <span class="eyebrow">ABUTRON · CLIENT WORKSPACE</span>
+  <h1>Your trading accounts. <em>One secure workspace.</em></h1>
+  <p>Link an existing MT5 trading account by broker, environment, server and login.
+  Each account gets its own dedicated terminal. Trading stays OFF until an independent
+  broker worker confirms activation.</p>
+  <div class="notice"><span class="nd"></span>
+    <div><strong>Security:</strong> your broker MT5 password is used for the isolated
+    terminal session only — it is never stored, logged, or shown back. Connection and
+    trading authorization are separate: a verified login does not switch trading ON.</div>
+  </div>
+</div>
+
+{% if not authed %}
+<div class="card" style="max-width:460px;margin-top:22px">
+  <span class="eyebrow">SECURE SIGN-IN</span>
+  <h3 style="margin-top:6px">Sign in to ABUTRON</h3>
+  <p class="sub">Use the credentials issued for your client account.</p>
+  <form id="login" onsubmit="return doLogin(event)">
+    <div class="field"><label>Username <input id="u" type="text" autocomplete="username" required></label></div>
+    <div class="field"><label>Password <input id="p" type="password" autocomplete="current-password" required></label></div>
+    <button type="submit" style="width:100%;justify-content:center">Sign in →</button>
+    <p id="login-msg" class="muted" style="margin-top:10px;min-height:16px"></p>
+  </form>
+</div>
+
+{% else %}
+<div class="stats">
+  <div class="stat"><span>Broker connections</span><b id="stConn">—</b><small id="stConnSub">linked accounts</small></div>
+  <div class="stat"><span>Connected / verified</span><b id="stVerified">—</b><small>broker session confirmed</small></div>
+  <div class="stat"><span>DEMO trading</span><b id="stDemo" style="color:var(--warn)">OFF</b><small>per-account switches below</small></div>
+  <div class="stat"><span>Effective ON</span><b id="stOn">—</b><small>broker-acknowledged activation</small></div>
+</div>
+
+<div class="section-title">
+  <h2>Connect a trading account</h2>
+  <span class="hint">Enroll first — broker password is entered at verification</span>
+</div>
+<div class="card">
+  <form id="connect" onsubmit="return doConnect(event)">
+    <div class="form-row">
+      <div><label>Broker
+        <select id="cb_broker"><option value="deriv">Deriv</option><option value="fpmarkets">FP Markets</option></select>
+      </label></div>
+      <div><label>Environment
+        <select id="cb_env"><option value="demo">DEMO</option></select>
+      </label></div>
+      <div><label>MT5 server <input id="cb_server" type="text" placeholder="Deriv-Demo" required></label></div>
+      <div><label>Account login <input id="cb_login" type="number" placeholder="MT5 account number" required></label></div>
+      <div><label>Display name <input id="cb_name" type="text" placeholder="My FX account"></label></div>
+    </div>
+    <button type="submit">Enroll account</button>
+    <span class="muted" style="margin-left:12px">No password needed here — verification is separate</span>
+    <p id="connect-msg" class="muted" style="margin-top:10px;min-height:16px"></p>
+  </form>
+</div>
+
+<div class="section-title">
+  <h2>Your accounts</h2>
+  <span class="hint"><a href="#" onclick="load();return false;">↻ Refresh</a></span>
+</div>
+<div class="grid" id="accounts"></div>
+
+<script>
+const CS = (s) => ({
+  connected:'ok', connecting:'warn', authenticating:'warn',
+  connected_ok:'ok', error:'bad', disconnected:'muted', revoked:'bad',
+  not_linked:'muted', degraded:'warn'
+}[String(s||'').toLowerCase()] || 'muted');
+
+function statCard(a) {
+  const cs = CS(a.conn_status);
+  const connCls = a.conn_status === 'CONNECTED' ? 'ok' : (a.conn_status === 'ERROR' ? 'bad' : 'warn');
+  const effCls = a.effective_on ? 'ok' : 'muted';
+  const pos = (a.positions||[]).length;
+  const trades = (a.recent_trades||[]);
+  return `<div class="card">
+    <div class="row">
+      <div><h3>${ABUTRON.esc(a.display_name || a.connection_id)}</h3>
+        <div class="sub">${ABUTRON.esc(a.broker)} · login ${ABUTRON.esc(a.mt5_login)} · ${ABUTRON.esc(a.environment)}</div></div>
+      <span class="pill ${connCls}"><span class="dot"></span>${ABUTRON.esc(a.conn_status||'UNKNOWN')}</span>
+    </div>
+    <p class="muted" style="font-size:13px">
+      <span class="pill ${cs==='ok'?'ok':cs==='bad'?'bad':'warn'}" style="padding:2px 9px">${a.desired_on?'Requested ON':'Requested OFF'}</span>
+      <span class="pill ${effCls}" style="padding:2px 9px;margin-left:6px">${a.effective_on?'EFFECTIVE ON':'effective OFF'}</span>
+    </p>
+    <dl class="kv" style="margin:12px 0">
+      <dt>Open positions</dt><dd>${pos}</dd>
+      <dt>Risk</dt><dd>${a.per_trade_risk_pct}% per trade · ${a.portfolio_cap_pct}% cap</dd>
+      <dt>Server</dt><dd>${ABUTRON.esc(a.server || '—')}</dd>
+    </dl>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      ${a.conn_status==='CONNECTING' ? `<button class="sm" onclick="verifyAcct('${ABUTRON.esc(a.connection_id)}')">Verify broker login</button>` : ''}
+      ${a.conn_status==='CONNECTED' ? `<button class="ok sm" onclick="ctrl('${ABUTRON.esc(a.connection_id)}','on')">Request ON</button>` : ''}
+      ${a.conn_status==='CONNECTED' ? `<button class="danger sm" onclick="ctrl('${ABUTRON.esc(a.connection_id)}','off')">Request OFF</button>` : ''}
+      ${a.conn_status==='CONNECTED' ? `<button class="ghost sm" onclick="disconnectAcct('${ABUTRON.esc(a.connection_id)}')">Disconnect</button>` : ''}
+    </div>
+    ${a.conn_status==='CONNECTING' ? '<p class="muted" style="font-size:12px;margin:0 0 8px">Awaiting broker verification — enter your MT5 password to prove identity. Trading stays OFF.</p>' : ''}
+    ${a.control_note ? `<p class="muted" style="font-size:12px;margin:0 0 8px">${ABUTRON.esc(a.control_note)}</p>` : ''}
+    <h4 style="margin:0 0 6px;font-size:13px">Recent trades</h4>
+    ${trades.length ? `<div class="tbl-wrap"><table>
+      <tr><th>Ticket</th><th>Symbol</th><th>State</th></tr>
+      ${trades.map(t=>`<tr><td>${ABUTRON.esc(t.native_ticket||'—')}</td>
+        <td>${ABUTRON.esc(t.symbol)}</td><td>${ABUTRON.esc(t.execution_state)}</td></tr>`).join('')}
+    </table></div>` : '<div class="empty" style="padding:16px">No trades yet</div>'}
+  </div>`;
+}
+
+async function load() {
+  const el = document.getElementById('accounts');
+  try {
+    const data = await ABUTRON.api('/api/client/accounts');
+    const list = Array.isArray(data) ? data : [];
+    document.getElementById('stConn').textContent = list.length;
+    document.getElementById('stConnSub').textContent = `${list.filter(a=>a.conn_status==='CONNECTED').length} connected`;
+    document.getElementById('stVerified').textContent = list.filter(a=>a.conn_status==='CONNECTED').length;
+    document.getElementById('stOn').textContent = list.filter(a=>a.effective_on).length;
+    el.innerHTML = list.length ? list.map(statCard).join('')
+      : '<div class="empty" style="grid-column:1/-1">No accounts linked yet — connect one above.</div>';
+  } catch (e) {
+    el.innerHTML = `<div class="empty" style="grid-column:1/-1">${ABUTRON.esc(e.message)}</div>`;
+  }
+}
+async function ctrl(id, action) {
+  try {
+    await ABUTRON.api('/api/client/accounts/'+id+'/'+action, {method:'POST'});
+    ABUTRON.toast((action==='on'?'Requested ON':'Requested OFF')+' — '+
+      (action==='on'?'pending native broker ACK':'new entries blocked'));
+    load();
+  } catch (e) { ABUTRON.toast(e.message, 'bad'); }
+}
+async function verifyAcct(id) {
+  const pw = prompt('Enter your broker MT5 password to verify this DEMO account.\nIt is used only for the isolated verification and never stored.');
+  if (pw === null) return;
+  try {
+    const r = await ABUTRON.api('/api/client/accounts/'+id+'/verify', {method:'POST',
+      body: JSON.stringify({password: pw})});
+    ABUTRON.toast(r.conn_status==='CONNECTED' ? 'Broker identity verified — CONNECTED' : 'Verification: '+r.conn_status);
+    load();
+  } catch (e) { ABUTRON.toast(e.message, 'bad'); }
+}
+async function disconnectAcct(id) {
+  try {
+    await ABUTRON.api('/api/client/accounts/'+id+'/disconnect', {method:'POST'});
+    ABUTRON.toast('Account disconnected'); load();
+  } catch (e) { ABUTRON.toast(e.message, 'bad'); }
+}
+async function doLogin(e) {
+  e.preventDefault();
+  try {
+    await ABUTRON.api('/api/client/login', {method:'POST',
+      body: JSON.stringify({username: u.value, password: p.value})});
+    ABUTRON.toast('Signed in'); location.reload();
+  } catch (err) { document.getElementById('login-msg').textContent = err.message; }
+  return false;
+}
+async function doConnect(e) {
+  e.preventDefault();
+  const msg = document.getElementById('connect-msg');
+  msg.textContent = 'Enrolling…';
+  try {
+    const r = await ABUTRON.api('/api/client/connect-account', {method:'POST', body: JSON.stringify({
+      broker: cb_broker.value, environment: cb_env.value, server: cb_server.value,
+      mt5_login: Number(cb_login.value), display_name: cb_name.value })});
+    msg.textContent = `${r.conn_status} — enrolled. Verify the broker login to connect.`;
+    ABUTRON.toast('Account enrolled — verify to connect'); setTimeout(load, 500);
+  } catch (err) { msg.textContent = err.message; ABUTRON.toast(err.message, 'bad'); }
+  return false;
+}
+load();
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,221 @@
+"""Equity-tiered compounding + daily-target risk policy.
+
+This serves the small-account growth path the platform is designed for:
+start at **$50**, compound through milestones ($50 -> $100 -> $500 ->
+...), auto-scale lot size as equity grows, and apply a daily profit
+target + loss cap so a $50 starter grows sustainably instead of
+over-risking to chase a number.
+
+**Honest design (critical):** the daily target is a *profit-stop* — the
+engine stops trading for the day once the target is reached. The loss
+cap is a *hard stop*. **Neither ever increases per-trade risk to chase
+the target**; risk is always bounded by the equity tier. A fixed
+``$1000/day`` target on ``$50`` equity is not reachable at sane risk;
+the policy simply does not force it (it trades at tier risk all day and
+grows slowly) rather than over-risking into a blowup. ``$1000/day``
+becomes reachable only once equity is large enough that the strategy's
+expectancy supports it (see ``equity_for_daily_target``).
+
+Three pieces:
+
+* ``EquityTier`` / ``DEFAULT_TIERS`` — compounding milestones. Each tier
+  sets the per-trade ``risk_pct`` and ``lot_max``; as equity crosses a
+  milestone, risk and lot scale up automatically. The $50 -> $100 step
+  is the first tier transition.
+* ``RiskPolicy`` — resolves the tier for a given equity, applies the
+  daily profit-stop / loss-cap, and reports realistic expectations.
+* ``equity_for_daily_target`` — the equity at which a given daily target
+  is actually reachable at sane risk (used for honest goal-setting).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+
+@dataclass(frozen=True)
+class EquityTier:
+    """One compounding milestone.
+
+    ``min_equity``: equity at/above which this tier applies.
+    ``risk_pct``:  per-trade risk fraction at this tier.
+    ``lot_max``:   maximum lot size at this tier (auto lot scaling).
+    ``label``:     human-readable milestone name.
+    """
+    min_equity: float
+    risk_pct: float
+    lot_max: float = 50.0
+    label: str = ""
+
+
+# Default compounding ladder for the $50 -> $100 -> ... growth path.
+# Risk is held at 15% per trade across tiers (aggressive sniper risk as
+# requested for small accounts); lot_max scales with equity so the
+# position size grows with the account (auto lot sizing) while the
+# per-trade risk fraction stays fixed at 15%.
+DEFAULT_TIERS: Tuple[EquityTier, ...] = (
+    EquityTier(0.0,     0.15, 0.5,  "$50 starter"),
+    EquityTier(100.0,   0.15, 1.0,  "$100"),
+    EquityTier(500.0,   0.15, 2.0,  "$500"),
+    EquityTier(1000.0,  0.15, 5.0,  "$1k"),
+    EquityTier(5000.0,  0.15, 10.0, "$5k"),
+    EquityTier(10000.0, 0.15, 25.0, "$10k"),
+    EquityTier(25000.0, 0.15, 50.0, "$25k+"),
+)
+
+
+def tier_for_equity(equity: float,
+                    tiers: Tuple[EquityTier, ...] = DEFAULT_TIERS
+                    ) -> EquityTier:
+    """Return the tier whose ``min_equity`` is the largest value <= equity."""
+    chosen = tiers[0]
+    for cand in tiers:
+        if equity >= cand.min_equity:
+            chosen = cand
+    return chosen
+
+
+@dataclass
+class RiskPolicy:
+    """Equity-tiered compounding + daily target/loss-cap policy.
+
+    The policy is the single source of truth for how much to risk and
+    when to stop for the day. It is intentionally conservative: the
+    daily target is a *stop*, never a reason to raise risk.
+
+    **Extreme-low-drawdown cap.** ``dd_target`` is the maximum drawdown
+    the account is allowed to reach; ``max_consec_losses`` is the worst
+    consecutive-loss streak the sizing must survive. The per-trade risk
+    is capped so that ``max_consec_losses`` losses cannot breach
+    ``dd_target``: ``risk_pct <= dd_target / max_consec_losses``. With a
+    5% target and 5-loss streak that is **1% per trade** — extreme low
+    drawdown. The tier risk (e.g. 15%) is only an upper bound; the DD
+    target governs the actual sizing. ``dd_risk_scale`` adds a soft
+    runtime taper (1.0 -> 0.2) as real-time drawdown approaches the
+    target — risk is scaled, never hard-stopped (no fail-closed).
+    """
+    tiers: Tuple[EquityTier, ...] = DEFAULT_TIERS
+    target_pnl: Optional[float] = None      # daily profit-stop (None = off)
+    daily_loss_r: Optional[float] = None   # daily loss cap = N * per-trade risk (R)
+    # extreme-low-drawdown controls
+    dd_target: float = 0.05                # max drawdown (0.05 = 5%)
+    max_consec_losses: int = 5             # worst-case consecutive-loss streak
+
+    # -- tier resolution ------------------------------------------------
+    def dd_risk_pct(self) -> float:
+        """Per-trade risk that keeps worst-case DD under the target.
+
+        With ``max_consec_losses`` consecutive losses each risking
+        ``risk_pct``, the worst-case DD is ``max_consec_losses * risk_pct``.
+        Solving ``max_consec_losses * risk_pct <= dd_target`` gives the cap.
+        """
+        if self.max_consec_losses <= 0 or self.dd_target <= 0:
+            return float("inf")
+        return self.dd_target / self.max_consec_losses
+
+    def risk_pct_for(self, equity: float) -> float:
+        # The tier risk is the upper bound; the DD target caps the actual
+        # per-trade risk for extreme-low-drawdown trading.
+        return min(tier_for_equity(equity, self.tiers).risk_pct,
+                   self.dd_risk_pct())
+
+    def dd_risk_scale(self, equity: float, high_water: float) -> float:
+        """Soft runtime taper: 1.0 at 0% DD, tapering to 0.2 at the target.
+
+        Risk is *scaled* (never hard-stopped), so this is not a fail-closed
+        gate. Floors at 0.2 so the account keeps trading at reduced size
+        even deep in a drawdown.
+        """
+        if high_water <= 0 or equity >= high_water:
+            return 1.0
+        dd = (high_water - equity) / high_water
+        if dd <= 0:
+            return 1.0
+        if self.dd_target <= 0:
+            return 1.0
+        scale = 1.0 - (dd / self.dd_target)
+        return float(max(0.2, min(1.0, scale)))
+
+    def risk_pct_for_runtime(self, equity: float, high_water: float) -> float:
+        """Effective per-trade risk with the runtime DD taper applied."""
+        return self.risk_pct_for(equity) * self.dd_risk_scale(
+            equity, high_water)
+
+    def lot_max_for(self, equity: float) -> float:
+        return tier_for_equity(equity, self.tiers).lot_max
+
+    def tier_label(self, equity: float) -> str:
+        return tier_for_equity(equity, self.tiers).label
+
+    def loss_cap_for(self, equity: float) -> float:
+        # Expressed in R (multiples of the per-trade risk) so the cap
+        # scales with the tier risk and never conflicts with it. At 15%
+        # risk a fixed %-of-equity cap would be hit by the first loss;
+        # an R-multiple cap (e.g. 3R) allows a sensible number of losses.
+        if self.daily_loss_r is None:
+            return float("inf")
+        return self.daily_loss_r * equity * self.risk_pct_for(equity)
+
+    # -- daily stops ---------------------------------------------------
+    def allow_entry(self, equity: float, daily_pnl: float
+                    ) -> Tuple[bool, str]:
+        """Return (allowed, reason). False => stop trading for the day.
+
+        * ``daily_pnl >= target_pnl``  -> profit-stop (target reached).
+        * ``daily_pnl <= -loss_cap``   -> hard stop (loss cap hit).
+
+        Both are opt-in (``None`` disables). Risk is never raised to
+        chase the target; these are pure stops.
+        """
+        if self.target_pnl is not None and daily_pnl >= self.target_pnl:
+            return False, "DAILY_TARGET_REACHED"
+        if daily_pnl <= -self.loss_cap_for(equity):
+            return False, "DAILY_LOSS_CAP"
+        return True, "OK"
+
+    # -- honest expectations ------------------------------------------
+    def realistic_daily_pnl(self, equity: float, *, trades_per_day: int = 30,
+                            win_rate: float = 0.70,
+                            avg_win_rr: float = 0.8,
+                            avg_loss_rr: float = 1.0) -> float:
+        """Estimated net daily PnL at this equity under the sniper edge.
+
+        Expectancy per trade in R = win_rate*avg_win_rr - (1-win_rate)*
+        avg_loss_rr. Daily PnL = R_expectancy * trades * risk_usd.
+        This is an estimate for honest goal-setting, not a promise.
+        """
+        rr = win_rate * avg_win_rr - (1.0 - win_rate) * avg_loss_rr
+        risk_usd = equity * self.risk_pct_for(equity)
+        return rr * trades_per_day * risk_usd
+
+
+def equity_for_daily_target(
+    target_pnl: float, *,
+    trades_per_day: int = 30,
+    win_rate: float = 0.70,
+    avg_win_rr: float = 0.8,
+    avg_loss_rr: float = 1.0,
+    tiers: Tuple[EquityTier, ...] = DEFAULT_TIERS,
+    dd_cap: float = 0.01,
+) -> float:
+    """Equity at which ``target_pnl``/day is reachable at sane risk.
+
+    Solves expectancy = target for equity within each tier's range. The
+    per-trade risk is the DD-capped value (``min(tier_risk, dd_cap)``) so
+    the answer is consistent with ``RiskPolicy.realistic_daily_pnl`` (which
+    also uses the DD-capped risk). Returns ``inf`` if unreachable.
+    """
+    rr = win_rate * avg_win_rr - (1.0 - win_rate) * avg_loss_rr
+    if rr <= 0:
+        return float("inf")
+    # sorted ascending; last tier is the ceiling
+    ordered = sorted(tiers, key=lambda t: t.min_equity)
+    for i, t in enumerate(ordered):
+        risk_pct = min(t.risk_pct, dd_cap)
+        # equity needed so that rr * trades * risk_pct * equity == target
+        need = target_pnl / (rr * trades_per_day * risk_pct)
+        # this tier applies for equity in [t.min_equity, next.min_equity)
+        upper = ordered[i + 1].min_equity if i + 1 < len(ordered) else float("inf")
+        if t.min_equity <= need < upper:
+            return round(need, 2)
+    return float("inf")

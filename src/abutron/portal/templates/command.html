@@ -1,0 +1,318 @@
+{% extends "base.html" %}
+{% set active = 'command' %}
+{% block title %}ABUTRON · APEX Command Center{% endblock %}
+{% block topright %}<span class="pill"><span class="dot"></span>Operator</span>{% endblock %}
+{% block content %}
+<div class="hero">
+  <span class="eyebrow">ABUTRON · APEX COMMAND CENTER</span>
+  <h1>Trading operations <em>console.</em></h1>
+  <p>Engine health, risk gates, writer state, analytics and reconciliation. Truth derives
+  from reconciled broker-native facts — never from "service active" alone.</p>
+</div>
+
+<div class="cmd-layout">
+  <aside class="cmd-side">
+    <div class="side-label">WORKSPACE</div>
+    <nav class="side-nav">
+      <button class="navitem active" data-view="overview"><span>◫</span> Overview</button>
+      <button class="navitem" data-view="accounts"><span>▣</span> Accounts</button>
+      <button class="navitem" data-view="analytics"><span>◷</span> Analytics</button>
+      <button class="navitem" data-view="providers"><span>◇</span> Model Providers</button>
+    </nav>
+  </aside>
+  <section class="cmd-main">
+
+    <!-- ============ OVERVIEW ============ -->
+    <div class="view" id="view-overview">
+      <div class="section-title"><h2>Engine health</h2><span class="hint"><a href="#" onclick="loadHealth();return false;">↻ Refresh</a></span></div>
+      <div class="grid" id="health"></div>
+
+      <div class="grid" style="margin-top:16px">
+        <div class="card">
+          <span class="eyebrow">SELF-LEARNING AI</span>
+          <h3 style="margin-top:6px">Weight / trust learner</h3>
+          <div id="selflearn" class="muted">Loading…</div>
+        </div>
+        <div class="card">
+          <span class="eyebrow">RISKGUARD</span>
+          <h3 style="margin-top:6px">Fail-closed pre-trade limits</h3>
+          <div id="riskguard" class="muted">Loading…</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <span class="eyebrow">PAPER SIMULATOR</span>
+        <h3 style="margin-top:6px">Offline backtest</h3>
+        <p class="sub">Validate a strategy against a simulated stream — no broker or writer access.</p>
+        <form onsubmit="return runSim(event)" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="field" style="margin:0"><label>Bars</label><input id="sim_bars" type="number" value="120" style="width:90px"></div>
+          <div class="field" style="margin:0"><label>Symbol</label><input id="sim_sym" type="text" value="SIM" style="width:90px"></div>
+          <div class="field" style="margin:0"><label>Trend</label><input id="sim_trend" type="number" step="0.0001" value="0.0" style="width:110px"></div>
+          <div class="field" style="margin:0"><label>Volatility</label><input id="sim_vol" type="number" step="0.0001" value="0.0008" style="width:110px"></div>
+          <button type="submit">Run simulation</button>
+        </form>
+        <div id="sim_out" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <!-- ============ ACCOUNTS ============ -->
+    <div class="view" id="view-accounts" hidden>
+      <div class="section-title"><h2>Per-account console</h2><span class="hint">Select an account to inspect evidence</span></div>
+      <div class="grid" id="acct-list"></div>
+      <div id="acct-detail" class="muted" style="margin-top:16px">Select an account.</div>
+    </div>
+
+    <!-- ============ ANALYTICS ============ -->
+    <div class="view" id="view-analytics" hidden>
+      <div class="section-title"><h2>Performance analytics</h2><span class="hint"><a href="#" onclick="loadAnalytics();return false;">↻ Refresh</a></span></div>
+      <div class="stats" id="analytics-stats"></div>
+      <div class="grid" style="margin-top:16px">
+        <div class="card"><span class="eyebrow">LEADERBOARD</span><h3 style="margin-top:6px">Owner ranking</h3><div id="leaderboard" class="muted">Loading…</div></div>
+        <div class="card"><span class="eyebrow">RECEIPTS</span><h3 style="margin-top:6px">By execution / reconciled state</h3><div id="recon" class="muted">Loading…</div></div>
+      </div>
+      <div class="section-title" style="margin-top:24px"><h2>Runs / traces</h2></div>
+      <div class="tbl-wrap" id="runs"></div>
+    </div>
+
+    <!-- ============ PROVIDERS ============ -->
+    <div class="view" id="view-providers" hidden>
+      <div class="section-title"><h2>Model providers</h2><span class="hint">Non-secret LLM config only — secrets via env</span></div>
+      <div class="card">
+        <form onsubmit="return upsertProvider(event)">
+          <div class="form-row">
+            <div><label>Provider <select id="p_provider"><option>gemma</option><option>ollama</option><option>openai</option><option>custom</option></select></label></div>
+            <div><label>Base URL <input id="p_url" type="text" placeholder="http://127.0.0.1:11434/v1" required></label></div>
+            <div><label>Model <input id="p_model" type="text" placeholder="gemma2:9b" required></label></div>
+            <div><label>Env secret var <input id="p_secret" type="text" placeholder="ABUTRON_GEMMA_API_KEY"></label></div>
+            <div><label>Note <input id="p_note" type="text"></label></div>
+          </div>
+          <button type="submit">Save provider</button>
+        </form>
+      </div>
+      <div class="section-title" style="margin-top:16px"><h2>Registered</h2></div>
+      <div class="tbl-wrap" id="providers"></div>
+    </div>
+
+  </section>
+</div>
+
+<style>
+  .cmd-layout { display:grid; grid-template-columns:210px 1fr; gap:24px; margin-top:8px; align-items:start; }
+  .cmd-side { position:sticky; top:78px; }
+  .side-label { font-size:11px; font-weight:700; letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin:0 0 10px 8px; }
+  .side-nav { display:flex; flex-direction:column; gap:3px; }
+  .navitem { display:flex; align-items:center; gap:10px; text-align:left; padding:10px 12px;
+    border-radius:8px; background:transparent; color:var(--muted); border:1px solid transparent;
+    font-family:inherit; font-size:14px; font-weight:600; cursor:pointer; }
+  .navitem:hover { background:var(--panel); color:var(--fg); }
+  .navitem.active { background:linear-gradient(180deg,var(--panel-2),var(--panel)); color:#fff;
+    box-shadow:inset 0 0 0 1px var(--line-2); }
+  .navitem span { width:18px; text-align:center; }
+  @media (max-width:860px){ .cmd-layout { grid-template-columns:1fr; } .cmd-side { position:static; }
+    .side-nav { flex-direction:row; flex-wrap:wrap; } }
+</style>
+
+<script>
+let currentAcct = null;
+const views = { overview:loadHealth, accounts:loadAccounts, analytics:loadAnalytics, providers:loadProviders };
+
+document.querySelectorAll('.navitem').forEach(btn => btn.addEventListener('click', () => {
+  document.querySelectorAll('.navitem').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.view').forEach(v => v.hidden = true);
+  document.getElementById('view-' + btn.dataset.view).hidden = false;
+  views[btn.dataset.view]();
+}));
+
+// ---- health ----
+function healthCls(h) { return h.faults.length ? 'bad' : (h.overall==='BROKER_CONFIRMED'?'ok':'warn'); }
+async function loadHealth() {
+  const el = document.getElementById('health');
+  try {
+    const list = await ABUTRON.api('/api/command/health');
+    el.innerHTML = list.length ? list.map(h => `<div class="card">
+      <div class="row"><div><h3>${ABUTRON.esc(h.connection_id)}</h3>
+        <div class="sub">${h.desired_on?'Requested ON':'Requested OFF'} · ${h.effective_on?'EFFECTIVE ON':'effective OFF'}</div></div>
+        <span class="pill ${healthCls(h)}"><span class="dot"></span>${ABUTRON.esc(h.overall)}</span></div>
+      <dl class="kv">
+        <dt>Worker</dt><dd>${ABUTRON.esc(h.worker_status)}</dd>
+        <dt>Publisher</dt><dd>${ABUTRON.esc(h.publisher_status)}</dd>
+        <dt>Broker confirmed</dt><dd>${h.broker_confirmed?'✓ yes':'✕ no'}</dd>
+        <dt>Clock / disk</dt><dd>${h.clock_verified?'✓':'✕'} / ${h.disk_ok?'✓':'✕'}</dd>
+      </dl>
+      ${h.faults.length?`<p style="margin:10px 0 0"><span class="pill bad" style="padding:2px 9px">${h.faults.map(ABUTRON.esc).join(' · ')}</span></p>`:''}
+      <button class="sm sec" onclick="loadHealth()">Refresh</button>
+    </div>`).join('') : '<div class="empty" style="grid-column:1/-1">No accounts.</div>';
+  } catch (e) { el.innerHTML = `<div class="empty" style="grid-column:1/-1">${ABUTRON.esc(e.message)}</div>`; }
+  // selflearn + riskguard
+  try {
+    const sk = await ABUTRON.api('/api/command/selflearn');
+    document.getElementById('selflearn').innerHTML = `
+      <p>Updates: <b>${sk.model_updates}</b> · Observations: <b>${sk.observations}</b> · Skill cells: <b>${sk.skill_cells}</b></p>
+      <p class="muted">MSE (EMA): ${sk.mse_ema ?? '—'} · Execution authority:
+        <span class="pill bad" style="padding:2px 9px"><span class="dot"></span>NONE (weights only)</span></p>
+      ${sk.last_overlay?`<p class="muted">Last overlay: ×${sk.last_overlay.multiplier} · clipped ${sk.last_overlay.clipped}</p>`:'<p class="muted">Warming up — no overlay yet</p>'}
+      <button class="sm sec" onclick="saveSelflearn()">Save learned state</button>`;
+  } catch(e) {}
+  try {
+    const rg = await ABUTRON.api('/api/command/riskguard');
+    const L = rg.limits;
+    document.getElementById('riskguard').innerHTML = `
+      <dl class="kv">
+        <dt>Max position</dt><dd>${L.max_position_lots} lots</dd>
+        <dt>Per-trade risk</dt><dd>${L.max_risk_per_trade_pct}%</dd>
+        <dt>Concentration</dt><dd>${L.max_concentration_pct}%</dd>
+        <dt>Total exposure</dt><dd>${L.max_total_exposure_pct}%</dd>
+      </dl>
+      <p class="muted" style="margin-top:8px">Fail-closed: every READY candidate is gated before dispatch.</p>`;
+  } catch(e) {}
+}
+async function saveSelflearn() {
+  try { await ABUTRON.api('/api/command/selflearn/save', {method:'POST'}); ABUTRON.toast('Learned state saved'); }
+  catch(e) { ABUTRON.toast(e.message,'bad'); }
+}
+
+// ---- accounts ----
+async function loadAccounts() {
+  const el = document.getElementById('acct-list');
+  try {
+    const list = await ABUTRON.api('/api/command/health');
+    el.innerHTML = list.length ? list.map(h => `<div class="card">
+      <div class="row"><div><h3>${ABUTRON.esc(h.connection_id)}</h3>
+        <div class="sub">${ABUTRON.esc(h.overall)}</div></div>
+        <span class="pill ${healthCls(h)}"><span class="dot"></span>${h.effective_on?'ON':'off'}</span></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="sm" onclick="openAcct('${ABUTRON.esc(h.connection_id)}')">Inspect</button>
+        <button class="sm sec" onclick="dispatch('${ABUTRON.esc(h.connection_id)}')">Dispatch</button>
+        <button class="sm ghost" onclick="reconcile('${ABUTRON.esc(h.connection_id)}')">Reconcile</button>
+      </div></div>`).join('') : '<div class="empty" style="grid-column:1/-1">No accounts.</div>';
+    if (currentAcct) openAcct(currentAcct);
+  } catch (e) { el.innerHTML = `<div class="empty" style="grid-column:1/-1">${ABUTRON.esc(e.message)}</div>`; }
+}
+async function openAcct(cid) {
+  currentAcct = cid;
+  const el = document.getElementById('acct-detail');
+  el.innerHTML = '<div class="card">Loading evidence for '+ABUTRON.esc(cid)+'…</div>';
+  try {
+    const [cands, dec, rc, wr] = await Promise.all([
+      ABUTRON.api('/api/command/accounts/'+cid+'/candidates'),
+      ABUTRON.api('/api/command/accounts/'+cid+'/decisions'),
+      ABUTRON.api('/api/command/accounts/'+cid+'/receipts'),
+      ABUTRON.api('/api/command/accounts/'+cid+'/writer'),
+    ]);
+    el.innerHTML = `
+      <div class="grid">
+        <div class="card"><h3>Writer gateway</h3><pre style="white-space:pre-wrap;font-size:12.5px;margin:8px 0 0">${ABUTRON.esc(JSON.stringify(wr,null,2))}</pre></div>
+        <div class="card"><h3>Candidates (${cands.length})</h3>
+          ${cands.length?`<div class="tbl-wrap" style="margin-top:8px"><table>
+            <tr><th>Symbol</th><th>Side</th><th>Vol</th><th>Conviction</th><th>State</th></tr>
+            ${cands.slice(0,12).map(c=>`<tr><td>${ABUTRON.esc(c.symbol)}</td><td>${ABUTRON.esc(c.side)}</td>
+              <td>${c.volume_lots}</td><td>${c.conviction??'—'}</td><td>${ABUTRON.esc(c.execution_state||'—')}</td></tr>`).join('')}
+          </table></div>`:'<p class="muted">No candidates.</p>'}</div>
+        <div class="card"><h3>Decisions (${dec.length})</h3>
+          ${dec.length?`<div class="tbl-wrap" style="margin-top:8px"><table>
+            <tr><th>Status</th><th>Symbol</th><th>Signal</th></tr>
+            ${dec.slice(0,12).map(d=>`<tr><td>${ABUTRON.esc(d.status||d.execution_state||'—')}</td>
+              <td>${ABUTRON.esc(d.symbol||'—')}</td><td>${ABUTRON.esc(d.decision||d.signal||'—')}</td></tr>`).join('')}
+          </table></div>`:'<p class="muted">No decisions.</p>'}</div>
+        <div class="card"><h3>Receipts (${rc.length})</h3>
+          ${rc.length?`<div class="tbl-wrap" style="margin-top:8px"><table>
+            <tr><th>Ticket</th><th>Symbol</th><th>Exec</th><th>Recon</th></tr>
+            ${rc.slice(0,12).map(r=>`<tr><td>${ABUTRON.esc(r.native_ticket||'—')}</td>
+              <td>${ABUTRON.esc(r.symbol)}</td><td>${ABUTRON.esc(r.execution_state||'—')}</td>
+              <td>${ABUTRON.esc(r.reconciled_state||'—')}</td></tr>`).join('')}
+          </table></div>`:'<p class="muted">No receipts.</p>'}</div>
+      </div>`;
+  } catch (e) { el.innerHTML = `<div class="empty">${ABUTRON.esc(e.message)}</div>`; }
+}
+async function dispatch(cid) {
+  try { const r = await ABUTRON.api('/api/command/dispatch/'+cid, {method:'POST'}); ABUTRON.toast('Dispatched: '+(r.status||r.detail||'ok')); }
+  catch(e) { ABUTRON.toast(e.message,'bad'); }
+}
+async function reconcile(cid) {
+  try { const r = await ABUTRON.api('/api/command/reconcile/'+cid, {method:'POST'}); ABUTRON.toast('Reconciled: '+(r.status||r.detail||'ok')); }
+  catch(e) { ABUTRON.toast(e.message,'bad'); }
+}
+
+// ---- analytics ----
+async function loadAnalytics() {
+  try {
+    const a = await ABUTRON.api('/api/command/analytics');
+    document.getElementById('analytics-stats').innerHTML = `
+      <div class="stat"><span>Candidates</span><b>${a.candidates_total??0}</b><small>${ABUTRON.esc(JSON.stringify(a.candidates_by_state||{}))}</small></div>
+      <div class="stat"><span>Receipts</span><b>${a.receipts_total??0}</b><small>${a.receipts_by_reconciled?Object.keys(a.receipts_by_reconciled).length+' states':''}</small></div>
+      <div class="stat"><span>Win rate</span><b style="color:var(--ok)">${a.win_rate_pct??0}%</b><small>${a.trades_closed??0} closed · ${a.wins??0} wins</small></div>
+      <div class="stat"><span>Net P&amp;L</span><b style="color:${(a.net_pnl_usd??0)>=0?'var(--ok)':'var(--bad)'}">${(a.net_pnl_usd??0).toFixed(2)} USD</b><small>comm ${a.commission_usd??0} · swap ${a.swap_usd??0}</small></div>`;
+    const lb = await ABUTRON.api('/api/command/leaderboard');
+    document.getElementById('leaderboard').innerHTML = lb.length ? `<div class="tbl-wrap"><table>
+      <tr><th>Owner</th><th>P&amp;L</th><th>Trades</th><th>Wins</th></tr>
+      ${lb.map(r=>`<tr><td>${ABUTRON.esc(r.owner_id)}</td>
+        <td style="color:${r.realized_pnl_usd>=0?'var(--ok)':'var(--bad)'}">${r.realized_pnl_usd.toFixed(2)}</td>
+        <td>${r.trades}</td><td>${r.wins}</td></tr>`).join('')}</table></div>` : '<p class="muted">No ledger entries.</p>';
+    document.getElementById('recon').innerHTML = `
+      <p>By execution:</p><pre style="font-size:12.5px">${ABUTRON.esc(JSON.stringify(a.receipts_by_execution||{},null,2))}</pre>
+      <p style="margin-top:8px">By reconciled:</p><pre style="font-size:12.5px">${ABUTRON.esc(JSON.stringify(a.receipts_by_reconciled||{},null,2))}</pre>`;
+  } catch (e) {}
+  try {
+    const runs = await ABUTRON.api('/api/command/runs');
+    document.getElementById('runs').innerHTML = runs.length ? `<table>
+      <tr><th>Run</th><th>Symbol</th><th>Decision</th><th>Status</th><th>Regime</th><th>Conviction</th></tr>
+      ${runs.slice(0,30).map(r=>`<tr><td style="font-family:monospace;font-size:11px">${ABUTRON.esc(r.run_id||'—')}</td>
+        <td>${ABUTRON.esc(r.symbol||'—')}</td><td>${ABUTRON.esc(r.decision||'—')}</td>
+        <td>${ABUTRON.esc(r.status||'—')}</td><td>${ABUTRON.esc(r.regime||'—')}</td>
+        <td>${r.conviction??'—'}</td></tr>`).join('')}</table>` : '<div class="empty">No runs recorded.</div>';
+  } catch(e) {}
+}
+
+// ---- providers ----
+async function loadProviders() {
+  const el = document.getElementById('providers');
+  try {
+    const list = await ABUTRON.api('/api/command/model-providers');
+    el.innerHTML = list.length ? `<table>
+      <tr><th>ID</th><th>Provider</th><th>Base URL</th><th>Model</th><th>Secret var</th><th>Enabled</th><th></th></tr>
+      ${list.map(p=>`<tr><td style="font-family:monospace;font-size:11px">${ABUTRON.esc(p.provider_id)}</td>
+        <td>${ABUTRON.esc(p.provider)}</td><td>${ABUTRON.esc(p.base_url)}</td>
+        <td>${ABUTRON.esc(p.model)}</td><td>${ABUTRON.esc(p.env_secret_var||'—')}</td>
+        <td>${p.enabled?'<span class="pill ok" style="padding:2px 9px"><span class="dot"></span>on</span>':'<span class="pill muted" style="padding:2px 9px">off</span>'}</td>
+        <td><button class="sm danger" onclick="delProvider('${ABUTRON.esc(p.provider_id)}')">Delete</button></td></tr>`).join('')}</table>`
+      : '<div class="empty">No model providers registered.</div>';
+  } catch (e) { el.innerHTML = `<div class="empty">${ABUTRON.esc(e.message)}</div>`; }
+}
+async function upsertProvider(e) {
+  e.preventDefault();
+  try {
+    await ABUTRON.api('/api/command/model-providers', {method:'POST', body: JSON.stringify({
+      provider: p_provider.value, base_url: p_url.value, model: p_model.value,
+      env_secret_var: p_secret.value, note: p_note.value, enabled: 1})});
+    ABUTRON.toast('Provider saved'); loadProviders();
+  } catch (err) { ABUTRON.toast(err.message,'bad'); }
+  return false;
+}
+async function delProvider(id) {
+  try { await ABUTRON.api('/api/command/model-providers/'+id, {method:'DELETE'}); ABUTRON.toast('Provider deleted'); loadProviders(); }
+  catch(e) { ABUTRON.toast(e.message,'bad'); }
+}
+
+// ---- simulate ----
+async function runSim(e) {
+  e.preventDefault();
+  const out = document.getElementById('sim_out');
+  out.innerHTML = '<span class="muted">Running…</span>';
+  try {
+    const r = await ABUTRON.api('/api/command/simulate', {method:'POST', body: JSON.stringify({
+      bars: Number(sim_bars.value), symbol: sim_sym.value,
+      trend: Number(sim_trend.value), volatility: Number(sim_vol.value)})});
+    out.innerHTML = `<div class="grid" style="margin-top:8px">
+      <div class="stat"><span>Final equity</span><b>${r.final_equity.toFixed(2)}</b></div>
+      <div class="stat"><span>Return</span><b style="color:${r.return_pct>=0?'var(--ok)':'var(--bad)'}">${r.return_pct.toFixed(2)}%</b></div>
+      <div class="stat"><span>Trades</span><b>${r.trades}</b></div>
+      <div class="stat"><span>Rejected</span><b>${r.rejected}</b></div></div>
+      <p class="muted" style="margin-top:8px">Paper result — no broker or writer access.</p>`;
+  } catch (err) { out.innerHTML = `<span class="pill bad" style="padding:2px 9px">${ABUTRON.esc(err.message)}</span>`; }
+  return false;
+}
+
+loadHealth();
+</script>
+{% endblock %}
