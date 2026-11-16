@@ -189,22 +189,16 @@ class ApexIntegration:
         # Load only a persisted, calibrated model. A freshly initialized
         # random ensemble or the deterministic fallback is not an acceptable
         # live directional authority. Without an artifact, decisions HOLD.
-        from .brain import load_brain
-        trained_ensemble = None
-        self.brain_load_error = "TRAINED_BRAIN_NOT_CONFIGURED"
+        from .brain.unified_adapter import load_unified_49
+        self.brain_load_error = "TRAINED_UNIFIED_BRAIN_NOT_CONFIGURED"
         try:
-            trained_ensemble = load_brain(BRAIN_MODEL_DIR,
-                                          mc_samples=BRAIN_MC_SAMPLES)
-            if not trained_ensemble.members or not trained_ensemble._fitted:
-                raise ValueError("TRAINED_BRAIN_CALIBRATION_MISSING")
+            self.brain = load_unified_49(
+                BRAIN_MODEL_DIR, mc_samples=BRAIN_MC_SAMPLES)
             self.brain_load_error = ""
-        except Exception as exc:
-            trained_ensemble = None
-            self.brain_load_error = f"TRAINED_BRAIN_UNAVAILABLE:{type(exc).__name__}"
-        self.brain = make_brain(ensemble=trained_ensemble,
-                                size_cap=BRAIN_SIZE_CAP)
-        if self.brain.ensemble is not None:
-            self.brain.ensemble.mc_samples = BRAIN_MC_SAMPLES
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            self.brain = make_brain(ensemble=None, size_cap=BRAIN_SIZE_CAP)
+            self.brain_load_error = (
+                f"TRAINED_BRAIN_UNAVAILABLE:{type(exc).__name__}")
         self._signal_history: Dict[str, List[Dict[str, float]]] = {}
         self._signal_history_ts: Dict[str, int] = {}
         # one-bar causal lag per symbol: (features, scores, regime, prev_close)
@@ -246,6 +240,8 @@ class ApexIntegration:
         try:
             close_ts = int(float(candle["close_time_epoch"]))
             bar = {key: float(candle[key]) for key in ("open", "high", "low", "close")}
+            bar["volume"] = float(candle.get("volume", 0.) or 0.)
+            bar["open_time"] = candle.get("open_time", "")
         except (KeyError, TypeError, ValueError, OverflowError):
             return "HOLD", {}, "BRAIN_INPUT_INVALID"
         if close_ts > self._signal_history_ts.get(symbol, 0):
@@ -262,27 +258,26 @@ class ApexIntegration:
             return "HOLD", {"trained": True, "bars": len(history)}, \
                 "UNIFIED_BRAIN_WARMUP"
 
-        signals = apex_decision.get("signals") or []
-        agent_scores = {
-            str(item.get("agent", "")): float(item.get("score", 0.0) or 0.0)
-            for item in signals if isinstance(item, dict)
-        }
-        raw_regime = apex_decision.get("regime", "")
-        regime = (raw_regime.get("name", raw_regime.get("regime", ""))
-                  if isinstance(raw_regime, dict) else str(raw_regime or ""))
+        # Rebuild the causal full-signal feature slots used by training;
+        # missing true tick/depth data is explicitly represented by OHLCV
+        # proxies, rather than silently zeroing 9 learned feature slots.
+        from .brain.signals import latest_signal_features
+        snapshot = latest_signal_features(history, symbol=symbol,
+                                          use_gemma=False)
         proposal = self.brain.decide(
             symbol=symbol,
             closes=[row["close"] for row in history],
             highs=[row["high"] for row in history],
             lows=[row["low"] for row in history],
-            orderflow=orderflow_features,
-            footprint=footprint_features,
-            agent_scores=agent_scores,
-            regime=regime)
+            orderflow=orderflow_features or snapshot["orderflow"],
+            footprint=footprint_features or snapshot["footprint"],
+            agent_scores=snapshot["agent_scores"],
+            regime=snapshot["regime"])
         payload = proposal.to_dict()
         if not proposal.trained:
             return "HOLD", payload, "TRAINED_BRAIN_REQUIRED"
-        if "LOSS_PATTERN_REPEAT" in (proposal.blockers or []):
+        if any(str(reason).startswith("LOSS_PATTERN_REPEAT")
+               for reason in (proposal.blockers or [])):
             return "HOLD", payload, "LOSS_PATTERN_REPEAT"
         direction = proposal.direction if proposal.direction in ("BUY", "SELL") else "HOLD"
         reason = "" if direction != "HOLD" else ";".join(proposal.blockers) or "UNIFIED_BRAIN_HOLD"
