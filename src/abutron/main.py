@@ -62,8 +62,10 @@ class ApexRuntime:
         def _status(req):
             return {"status": "ok", "connection_id": req.connection_id}
         def _order(req):
-            return {"status": "ack", "ticket": 1000 + int(
-                req.raw.get("request_id", "0")[-4:] or "0")}
+            # The local MT5 session manager supports connection/status only.
+            # A synthetic ticket must never be reported as broker evidence.
+            return {"status": "reject",
+                    "reason": "NATIVE_BROKER_ORDER_WRITER_NOT_CONNECTED"}
         manager_socket.register("status", _status)
         manager_socket.register("order", _order)
         manager_socket.register("order_handoff", _order)

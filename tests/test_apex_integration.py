@@ -99,6 +99,15 @@ def test_full_pipeline_produces_ready_candidate(apex_int):
     """Closed candles -> APEX signal -> fail-closed review -> READY candidate."""
     manifest = build_instrument_manifest([_deriv_account()])
     acct = _deriv_account()
+    # Candidate geometry is BUY-specific. Use a deterministic trained BUY
+    # in this contract test; separate tests check actual model authority.
+    from types import SimpleNamespace
+    apex_int.brain = SimpleNamespace(
+        trained=True,
+        online_learn_features=lambda *a, **kw: {"updated": False},
+        decide=lambda **kw: SimpleNamespace(
+            direction="BUY", brain_version="unified_v1", trained=True,
+            confidence=0.9, conviction=0.8, blockers=[]))
     ready = None
     for i in range(130):
         candle = _closed_candle("Volatility 100 Index.0", i, 100.0)
@@ -188,7 +197,8 @@ def test_service_starts_without_vendored_apex():
                 "close_time_epoch": 1781000000.0,
                 "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05,
                 "volume": 10.0},
-        manifest=[{"broker": "deriv", "symbol": "Volatility 100 Index.0"}],
+        manifest=build_instrument_manifest([{
+            "broker": "deriv", "symbols": "Volatility 100 Index.0"}]),
         equity=10000.0)
     if not ai.apex_available():
         assert out["status"] == "APEX_VENDOR_MISSING"
