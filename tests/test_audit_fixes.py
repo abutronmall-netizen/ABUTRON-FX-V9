@@ -350,3 +350,63 @@ def test_position_risk_without_point_falls_back():
         atr=20.0, point_value=1.0, point=0.0)
     # Falls back: 1.0 * 0.001 * 1.0 = 0.001
     assert pr.stop_risk_usd == pytest.approx(0.001, rel=1e-3)
+
+
+# PR #17 follow-up: activation revision + native-source contract integrity.
+
+def test_activation_secret_missing_fails_provision(monkeypatch, tmp_path):
+    from abutron.execution.writer_gateway import SingleWriterGateway
+    from abutron.events import EventLog
+    monkeypatch.delenv("ABUTRON_ACTIVATION_SECRET", raising=False)
+    gateway = SingleWriterGateway(EventLog(str(tmp_path / "events.jsonl")))
+    assert gateway.provision_secret("conn", str(tmp_path), "rev-123") is False
+    assert not (tmp_path / "ABUTRON_ACTIVATION_SECRET.txt").exists()
+
+
+def test_arm_provisions_matching_revision_and_secret(monkeypatch, tmp_path):
+    import hashlib
+    import stat
+    from abutron.execution.writer_gateway import SingleWriterGateway
+    from abutron.events import EventLog
+    monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "random-test-fixture-key")
+    ea = tmp_path / "writer.ex5"
+    ea.write_bytes(b"not a broker binary - test fixture only")
+    gateway = SingleWriterGateway(EventLog(str(tmp_path / "events.jsonl")))
+    status = gateway.arm(
+        connection_id="conn-0512", ea_path=str(ea),
+        expected_sha256=hashlib.sha256(ea.read_bytes()).hexdigest(),
+        activation_revision="rev-123", broker="fpmarkets",
+        mql5_files_dir=str(tmp_path))
+    assert status.armed is True
+    assert (tmp_path / "ABUTRON_ACTIVATION_REVISION.txt").read_text().strip() == "rev-123"
+    assert (tmp_path / "ABUTRON_ACTIVATION_SECRET.txt").read_text().strip() == "random-test-fixture-key"
+    assert stat.S_IMODE((tmp_path / "ABUTRON_ACTIVATION_REVISION.txt").stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / "ABUTRON_ACTIVATION_SECRET.txt").stat().st_mode) == 0o600
+
+
+def test_disarmed_gateway_does_not_touch_native_delivery(monkeypatch, tmp_path):
+    from abutron.execution.writer_gateway import SingleWriterGateway
+    from abutron.events import EventLog
+    gateway = SingleWriterGateway(EventLog(str(tmp_path / "events.jsonl")))
+    def should_not_deliver(*args, **kwargs):
+        raise AssertionError("disarmed writer attempted socket delivery")
+    monkeypatch.setattr(gateway, "_deliver_to_ea", should_not_deliver)
+    outcome = gateway.send_order(
+        connection_id="conn", candidate={"candidate_id": "C1"},
+        account={}, broker="fpmarkets")
+    assert outcome["outcome"] == "REJECTED"
+    assert outcome["reason"] == "SINGLE_WRITER_NOT_ARMED"
+
+
+def test_native_writer_removes_known_invalid_mql_apis():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] /
+              "mql5/ApexNativeWriter.mq5").read_text()
+    for forbidden in ("SetTradeAllowed(", "SetTradeExecution(",
+                      "StringFindLast(", "CryptHash(",
+                      "Zero(req)", "Zero(res)", "StringTrim(s)"):
+        assert forbidden not in source
+    assert "CryptEncode(CRYPT_HASH_SHA256" in source
+    assert "SymbolInfoTick(symbol, currentTick)" in source
+    assert "ABUTRON_ACTIVATION_REVISION.txt" in source
+    assert 'string dir = "";' in source
