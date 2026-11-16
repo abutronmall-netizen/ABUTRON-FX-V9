@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -105,7 +106,8 @@ class SingleWriterGateway:
         # native writer can verify request signatures. Provisioning
         # failure is logged and downgrades the arm — the EA will reject
         # all orders without a valid secret, so arming is incomplete.
-        secret_ok = self.provision_secret(connection_id, mql5_files_dir)
+        secret_ok = status.armed and self.provision_secret(
+            connection_id, mql5_files_dir, activation_revision)
         if status.armed and not secret_ok:
             status.armed = False
             status.revision_ok = False
@@ -123,36 +125,40 @@ class SingleWriterGateway:
         return status
 
     def provision_secret(self, connection_id: str,
-                         mql5_files_dir: str) -> bool:
-        """Write the activation secret to MQL5/Files for the EA to read.
+                         mql5_files_dir: str,
+                         activation_revision: str = "") -> bool:
+        """Provision the exact shared secret and activation revision for MT5.
 
-        The EA reads MQL5/Files/ABUTRON_ACTIVATION_SECRET.txt on startup
-        (see LoadActivationSecret in ApexNativeWriter.mq5). This closes
-        the provisioning gap so existing terminals can verify signatures
-        without manual EA input configuration.
-
-        The secret file is written with 0600 permissions (owner-only)
-        to prevent other local processes from reading the HMAC key.
-        Provisioning failure during arming is logged and returned as
-        False — the caller should treat arming as incomplete.
+        Never use a known fallback secret. Files are replaced atomically with
+        owner-only permissions; the caller must provide the *trusted* account
+        terminal's MQL5/Files path. Failed provisioning must not arm trading.
         """
-        if not mql5_files_dir:
+        secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "")
+        if not mql5_files_dir or not secret:
             self.log.append(make_event(
                 "writer.secret_provision_failed", connection_id=connection_id,
-                reason_code="SECRET_PROVISION_FAILED",
-                payload={"error": "no mql5_files_dir"}))
+                reason_code="SECRET_NOT_CONFIGURED" if not secret else
+                            "MQL5_FILES_DIRECTORY_MISSING"))
             return False
-        secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation")
         try:
-            os.makedirs(mql5_files_dir, exist_ok=True)
-            path = os.path.join(mql5_files_dir,
-                                "ABUTRON_ACTIVATION_SECRET.txt")
-            # Write with restrictive permissions (owner read/write only)
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            try:
-                os.write(fd, (secret + "\n").encode())
-            finally:
-                os.close(fd)
+            if not os.path.isdir(mql5_files_dir) or os.path.islink(mql5_files_dir):
+                raise OSError("terminal MQL5/Files directory is not trusted")
+            def install_secret_file(name: str, value: str) -> None:
+                fd, tmp = tempfile.mkstemp(prefix=".abutron-", dir=mql5_files_dir)
+                try:
+                    os.fchmod(fd, 0o600)
+                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                        handle.write(value + "\n")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(tmp, os.path.join(mql5_files_dir, name))
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+            install_secret_file("ABUTRON_ACTIVATION_SECRET.txt", secret)
+            if activation_revision:
+                install_secret_file("ABUTRON_ACTIVATION_REVISION.txt",
+                                    activation_revision)
             self.log.append(make_event(
                 "writer.secret_provisioned", connection_id=connection_id,
                 execution_state="ARMED", reason_code="SECRET_PROVISIONED"))
@@ -161,7 +167,7 @@ class SingleWriterGateway:
             self.log.append(make_event(
                 "writer.secret_provision_failed", connection_id=connection_id,
                 reason_code="SECRET_PROVISION_FAILED",
-                payload={"error": str(exc)}))
+                payload={"error_type": type(exc).__name__}))
             return False
 
     def disarm(self, connection_id: str) -> None:
@@ -192,18 +198,16 @@ class SingleWriterGateway:
         Returns a dict with outcome: 'ACK' | 'UNKNOWN' | 'REJECTED'.
         """
         status = self.status(connection_id)
-        if not status.armed:
+        if not status.armed or not status.revision_ok:
             self.log.append(make_event(
-                "writer.send_advisory_disarmed", connection_id=connection_id,
+                "writer.send_disarmed", connection_id=connection_id,
                 broker=broker, order_request_id=candidate.get("candidate_id"),
-                execution_state="DISPATCHED",
-                reason_code="FP_SINGLE_WRITER_DISARMED_ADVISORY"))
-        if not status.revision_ok:
-            self.log.append(make_event(
-                "writer.send_advisory_mismatch", connection_id=connection_id,
-                broker=broker, order_request_id=candidate.get("candidate_id"),
-                execution_state="DISPATCHED",
-                reason_code="BINARY_SOURCE_MISMATCH_ADVISORY"))
+                execution_state="REJECTED",
+                reason_code="SINGLE_WRITER_NOT_ARMED"))
+            return {"outcome": "REJECTED", "reason": "SINGLE_WRITER_NOT_ARMED"}
+        secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "")
+        if not secret:
+            return {"outcome": "REJECTED", "reason": "ACTIVATION_SECRET_MISSING"}
 
         lock = self._lock_for(connection_id)
         if not lock.acquire(blocking=False):
@@ -244,7 +248,7 @@ class SingleWriterGateway:
                 # Canonical: nonce|candidate_id|connection_id|symbol|
                 #           direction|volume|stop_loss|take_profit
                 "signed": hmac_sign(
-                    os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation"),
+                    secret,
                     _canonical_order(nonce, candidate, connection_id)),
                 "created_at": utc_now(),
             }
