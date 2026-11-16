@@ -37,7 +37,7 @@ from ..risk.riskguard import RiskGuard, TradeProposal
 from ..risk.simulator import PaperTradingEngine
 
 
-def create_app(event_log: EventLog) -> FastAPI:
+def create_app(event_log: EventLog, *, signal_authority=None) -> FastAPI:
     app = FastAPI(title="ABUTRON FX V9", version="1.1.0")
 
     # Wire shared services
@@ -531,7 +531,10 @@ def create_app(event_log: EventLog) -> FastAPI:
     @app.get("/api/health")
     async def api_health():
         return {"status": "ok", "service": "ABUTRON-FX-V9",
-                "engine": "APEX 1.1"}
+                "engine": "APEX 1.1",
+                "signal_authority": "V9_NEXUS_V1",
+                "brain_model_ready": bool(signal_authority is not None
+                                         and signal_authority.brain is not None)}
 
     return app
 

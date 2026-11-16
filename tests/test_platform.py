@@ -321,7 +321,7 @@ class TestExecution:
         # SETTLED is terminal
         assert not sm.move("c1", "OPEN")
 
-    def test_single_writer_binary_mismatch_advisory(self):
+    def test_single_writer_binary_mismatch_rejected(self):
         log = EventLog(os.path.join(DATA_ROOT, "t_events.jsonl"))
         gw = SingleWriterGateway(log)
         # mismatch: expected pin won't match a nonexistent path
@@ -329,13 +329,16 @@ class TestExecution:
                     expected_sha256="deadbeef", activation_revision="x",
                     broker="fpmarkets")
         assert not st.armed
-        # Aggressive mode: a mismatched writer is ADVISORY — the order is
-        # still dispatched (no socket here -> UNKNOWN, never a fake ACK).
+        # A mismatched writer must be rejected before any native send.
         res = gw.send_order(connection_id="c1",
                             candidate={"candidate_id": "x", "symbol": "GBPUSD.r",
                                        "direction": "BUY", "volume": 1.0},
-                            account={"mt5_login": 7412582}, broker="fpmarkets")
-        assert res["outcome"] in ("UNKNOWN", "ACK", "REJECTED")
+                            account={"mt5_login": 7412582, "broker": "fpmarkets",
+                                     "environment": "demo",
+                                     "desired_on": True, "effective_on": True},
+                            broker="fpmarkets")
+        assert res["outcome"] == "REJECTED"
+        assert res["reason"] == "EA_WRITER_NOT_ATTESTED"
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +367,7 @@ class TestReconciliation:
             ticket=5001, login=6207, symbol="GBPUSD.r", volume=1.0,
             price=1.2500, stop_loss=1.2450, take_profit=1.2600,
             state="OPEN", realized_pnl=0.0, commission=7.0, swap=0.0,
-            balance=10000.0)]
+            balance=10000.0, deal_id="d1", direction="BUY")]
         report = rec.reconcile_account("conn1", history)
         assert report["matched"] == 1
 
@@ -399,9 +402,8 @@ class TestEngine:
             candles=[], quotes=[], account=account)
         assert result == []
 
-    def test_effective_off_does_not_block_decision_pass(self):
-        """Aggressive mode: the EFFECTIVE_OFF pre-flight gate is removed —
-        the decision pass runs identically whether effective_on is on or off."""
+    def test_effective_off_blocks_internal_decision_pass(self):
+        """The older APEX engine must honour CRM OFF and reserve no entries."""
         from abutron.brain import make_brain, default_ensemble
         fixed_brain = make_brain(ensemble=default_ensemble(seed=42))
 
@@ -421,9 +423,8 @@ class TestEngine:
                 candles=candles, quotes=[make_quote()], account=account)
         result_on = run(True, "conn_on")
         result_off = run(False, "conn_off")
-        # The gate has no effect: identical candidate directions per symbol.
-        assert sorted((c.symbol, c.direction) for c in result_on) == \
-               sorted((c.symbol, c.direction) for c in result_off)
+        assert result_off == []
+        assert result_on  # Sanity check: the test exercised a live signal.
 
 def test_sqlite_sessions_stable_per_thread(tmp_path):
     """Interleaved engine+request threads must not leak pooled sessions."""

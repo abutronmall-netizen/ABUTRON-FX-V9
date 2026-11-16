@@ -62,8 +62,10 @@ class ApexRuntime:
         def _status(req):
             return {"status": "ok", "connection_id": req.connection_id}
         def _order(req):
-            return {"status": "ack", "ticket": 1000 + int(
-                req.raw.get("request_id", "0")[-4:] or "0")}
+            # No broker-native forwarding implementation is connected here.
+            # A placeholder must never manufacture a broker ACK or ticket.
+            return {"status": "unknown",
+                    "reason": "BROKER_NATIVE_ORDER_HANDLER_NOT_CONNECTED"}
         manager_socket.register("status", _status)
         manager_socket.register("order", _order)
         manager_socket.register("order_handoff", _order)
@@ -178,7 +180,7 @@ class ApexRuntime:
             t.start()
             threads.append(t)
 
-        app = create_app(self.log)
+        app = create_app(self.log, signal_authority=self.apex.authority)
         uvicorn.run(app, host=PORTAL_HOST, port=PORTAL_PORT,
                     log_level="info")
 

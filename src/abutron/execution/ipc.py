@@ -36,6 +36,9 @@ class ManagerRequest:
         return self.raw.get("connection_id", "")
 
     def verified(self, secret: str) -> bool:
+        # A hard-coded fallback secret must never authorize a native handoff.
+        if not secret or secret == "apex-activation":
+            return False
         sig = self.raw.get("signed", "")
         msg = self.raw.get("request_id", "") + "|" + \
             self.raw.get("connection_id", "")
@@ -45,8 +48,9 @@ class ManagerRequest:
 class ManagerSocketServer:
     """Unix-socket manager. Threaded, one handler per request."""
 
-    def __init__(self, secret: str = "apex-activation"):
-        self.secret = secret
+    def __init__(self, secret: Optional[str] = None):
+        self.secret = secret if secret is not None else os.getenv(
+            "ABUTRON_ACTIVATION_SECRET", "")
         self._handlers: Dict[str, callable] = {}
         self._server: Optional[socketserver.ThreadingUnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None

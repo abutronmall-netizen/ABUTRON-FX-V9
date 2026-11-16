@@ -48,9 +48,11 @@ class BaseBrokerFeed:
                               [], [], False, ["EXPORT_MISSING"], False)
 
         ident = raw["identity"]
+        # Validate the broker's claimed identity, never substitute our
+        # expected broker name for the native export's actual assertion.
         envelope_errors = validate_export_envelope(
-            {**raw, "broker": self.broker_name},
-            connection_id=connection_id, login=login, broker=self.broker_name)
+            ident, connection_id=connection_id, login=login,
+            broker=self.broker_name)
         candles = normalize_native_bars(raw["bars"], connection_id=connection_id,
                                         login=login, broker=self.broker_name)
 

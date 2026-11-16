@@ -86,7 +86,7 @@ class Mt5TerminalManager:
     # ------------------------------------------------------------------
     def launch(self, connection_id: str, broker: str, login: int,
                server: str, *, headless: bool = True) -> Terminal:
-        if connection_id in self._terminals and self._terminals[connection_id].is_running:
+        if connection_id in self._terminals and self._terminals[connection_id].is_running():
             raise Mt5Error("terminal already running")
         prefix = self.ensure_prefix(connection_id)
         export_dir = os.path.join(prefix, "drive_c", "Program Files",
@@ -158,7 +158,7 @@ class Mt5TerminalManager:
     def read_native_export(self, connection_id: str) -> Optional[Dict]:
         """Read the latest native export (bars + identity) from MQL5/Files."""
         term = self._terminals.get(connection_id)
-        if term is None or not term.is_running:
+        if term is None or not term.is_running():
             return None
         identity_file = os.path.join(term.export_dir,
                                      "ABUTRON_NATIVE_ACCOUNT_V2_*.txt")
@@ -186,7 +186,7 @@ class Mt5TerminalManager:
             return {"connection_id": connection_id, "status": "UNKNOWN"}
         return {
             "connection_id": connection_id,
-            "status": "CONNECTED" if term.is_running else "DISCONNECTED",
+            "status": "CONNECTED" if term.is_running() else "DISCONNECTED",
             "broker": term.broker,
             "login": term.login,
             "uptime_s": round(time.time() - term.started_at, 1),

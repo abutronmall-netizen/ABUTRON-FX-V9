@@ -169,9 +169,11 @@ class ApexEngine:
         balance = balance if balance is not None else float(
             account.get("balance", 0.0) or 0.0)
 
-        # Aggressive mode: NO effective-ON gate. Trading proceeds on every
-        # closed candle regardless of the CRM switch state. (Fail-closed
-        # EFFECTIVE_OFF gating has been removed per the new design directive.)
+        # The legacy/internal APEX engine is not the native-order authority,
+        # but must still honour account controls if called by a portal or
+        # research worker. Never reserve a candidate for an OFF account.
+        if not (account.get("desired_on") and account.get("effective_on")):
+            return []
 
         owner_book = self._owner_book(owner_id, connection_id)
 

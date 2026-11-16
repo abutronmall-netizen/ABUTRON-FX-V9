@@ -44,7 +44,7 @@ def main() -> None:
 
     try:
         while True:
-            if not term.is_running:
+            if not term.is_running():
                 term = terminal_manager.restart(cid)
                 log.append(__import__("abutron.events",
                                       fromlist=["make_event"]).make_event(

@@ -1,14 +1,15 @@
-"""Integration: real vendored APEX 1.1.0 as the decision engine.
+"""V9 NexusBrain signal authority with APEX 1.1 native candidate review.
 
 This wires the authoritative APEX source (vendored under
 `vendor/abutron-apex/apex11`) into the ABUTRON platform:
 
-  closed M5 candles (from my feed layer)
-    -> AbutronApex11SignalBridge.on_closed_candle   (regime + ensemble + paper risk)
+  closed M5 candles (authenticated MT5)
+    -> AbutronApex11SignalBridge.on_closed_candle   (validation + context only)
+    -> NexusSignalAuthority.decide                 (exclusive trade direction)
     -> candidate_contract.review_candidate           (fail-closed eligibility gate)
     -> reviewed order_candidate                       (single-writer ready)
 
-The bridge is signal-only: it computes a research proposal and never submits
+The brain is signal-only: it computes a proposal and never submits
 orders. The review contract produces an explicit, fail-closed *candidate*
 (no order). Only my single-writer dispatcher may turn a fully-approved
 candidate into a native MT5 order. Order flow + footprint remain overlay
@@ -19,6 +20,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,8 +29,7 @@ from .events import EventLog, make_event
 from .ops.portal_ops import portal_ops
 from .risk.riskguard import RiskGuard, PortfolioState, TradeProposal
 from .selflearn.engine import SelfLearningEngine
-from .brain import make_brain, default_ensemble
-from .config import (BRAIN_ENSEMBLE_SEED, BRAIN_MC_SAMPLES, BRAIN_SIZE_CAP)
+from .brain.apex_authority import NexusSignalAuthority
 from .selflearn.features import build_feature_vector
 
 # ---------------------------------------------------------------------------
@@ -66,7 +67,21 @@ class ApexVendorMissing(RuntimeError):
 # ---------------------------------------------------------------------------
 # Instrument manifest builder
 # ---------------------------------------------------------------------------
-DEFAULT_DERIV_SYMBOLS = ["Volatility 100 Index.0"]
+DEFAULT_DERIV_SYMBOLS = [
+    'Volatility 10 Index.0',
+    'Volatility 25 Index.0',
+    'Volatility 50 Index.0',
+    'Volatility 75 Index.0',
+    'Volatility 100 Index.0',
+    'Crash 150 Index.0',
+    'Crash 300 Index.0',
+    'Crash 600 Index.0',
+    'Crash 1000 Index.0',
+    'Boom 150 Index.0',
+    'Boom 300 Index.0',
+    'Boom 600 Index.0',
+    'Boom 1000 Index.0',
+]
 DEFAULT_FP_SYMBOLS = ["GBPUSD", "EURUSD", "XAUUSD"]
 
 # Approved asset classes + brokers (bridge enforces these too)
@@ -132,13 +147,10 @@ class ApexIntegration:
         self.selflearn.load()
         # Hardened pre-trade RiskGuard (opt-in, fail-closed).
         self.riskguard = RiskGuard()
-        # The NexusBrain — the AI calculation authority (lot sizing, entry
-        # bias). Owned here so settlement (reconciler) can feed trade
-        # outcomes back for self-learning.
-        self.brain = make_brain(
-            ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
-            size_cap=BRAIN_SIZE_CAP)
-        self.brain.ensemble.mc_samples = BRAIN_MC_SAMPLES
+        # V9 NexusBrain exclusively decides trade direction.
+        # An untrained/missing model cannot produce an executable candidate.
+        self.authority = NexusSignalAuthority()
+        self.brain = self.authority.brain
         # one-bar causal lag per symbol: (features, scores, regime, prev_close)
         self._pending: Dict[str, Dict[str, Any]] = {}
 
@@ -226,6 +238,25 @@ class ApexIntegration:
             return {"status": "REJECTED", "reason": str(e),
                     "decision": None, "candidate": None, "blockers": [str(e)]}
 
+        apex_decision = decision
+        brain_result = self.authority.decide(
+            connection_id=connection_id, candle=candle,
+            orderflow=orderflow_features, footprint=footprint_features)
+        # APEX remains the authenticated closed-bar and risk-review pipeline,
+        # NOT the BUY/SELL authority. Provenance is explicit in the envelope.
+        decision = dict(apex_decision)
+        decision["apex_context_status"] = apex_decision["status"]
+        decision["signal_authority"] = "V9_NEXUS_V1"
+        decision["status"] = brain_result["status"]
+        decision["reason"] = brain_result.get("reason", "")
+        decision["brain_proposal"] = brain_result.get("proposal")
+        decision["brain_model_sha256"] = brain_result.get("model_sha256", "")
+        if brain_result["status"] in ("BUY", "SELL"):
+            decision["decision_id"] = sha256((
+                "v9-nexus|"
+                + str(apex_decision["decision_id"])
+                + "|" + brain_result["model_sha256"]
+                + "|" + brain_result["status"]).encode()).hexdigest()
         status = decision["status"]
 
         # --- Self-learning AI: causal observe -> overlay loop -------------
@@ -243,15 +274,16 @@ class ApexIntegration:
                      orderflow=orderflow_features,
                      footprint=footprint_features)
 
-        if status != "BUY" and status != "SELL":
-            # HOLD / WARMUP — no candidate
+        if status not in ("BUY", "SELL"):
+            # Missing training evidence, incomplete features, or Brain HOLD
+            # never creates a candidate, regardless of the old APEX vote.
+            reason = decision.get("reason") or status
             self._trace_run(connection_id, account, candle, status=status,
                             decision=decision,
-                            gemma=decision.get("gemma"),
-                            blockers=["APEX_HOLD_OR_WARMUP"])
-            return {"status": status, "reason": "APEX_HOLD_OR_WARMUP",
+                            gemma=decision.get("gemma"), blockers=[reason])
+            return {"status": status, "reason": reason,
                     "decision": decision, "candidate": None,
-                    "blockers": ["APEX_HOLD_OR_WARMUP"]}
+                    "blockers": [reason]}
 
         # --- Fail-closed candidate review -------------------------------
         gate = self._build_gate(connection_id, account, equity,
@@ -307,6 +339,9 @@ class ApexIntegration:
                         riskguard="approved" if RISKGUARD_ENABLED else "")
         return {"status": "READY", "decision": decision,
                 "candidate": review["order_candidate"],
+                # Exact broker-verified price used for the reviewed stop risk.
+                # This is NOT a Sniper LIMIT trigger or a broker execution.
+                "native_entry_price": float(native.price),
                 "review": review, "blockers": []}
 
     # ------------------------------------------------------------------
@@ -463,9 +498,15 @@ class ApexIntegration:
         (at-most-once). Returns the stored row, or None if the replay key
         was already consumed (CANDLE_ALREADY_CONSUMED).
         """
-        from .. import db
-        from ..db import engine_db
+        from .db import engine_db
         cand = ready["candidate"]
+        # Never synthesize a price from the candle close or the sniper plan.
+        # A RESERVED candidate must carry the exact price previously reviewed
+        # against broker-native OrderCheck and profit calculations.
+        import math
+        reviewed_price = float(ready.get("native_entry_price", 0.0))
+        if not math.isfinite(reviewed_price) or reviewed_price <= 0:
+            return None
         signal_id = cand["signal_id"]
         side = cand["side"]
         row = {
@@ -489,6 +530,13 @@ class ApexIntegration:
             "volume": float(cand.get("volume_lots", 0.0)),
             "stop_loss": float(cand.get("stop_price", 0.0)),
             "take_profit": float(cand.get("take_price", 0.0)),
+            "price": reviewed_price,
+            "entry_type": "CONFIRM",
+            "trigger_price": reviewed_price,
+            "invalidation": float(cand.get("stop_price", 0.0)),
+            # Trailing is only configured after a real protected position is
+            # independently reconciled; pre-fill history is not 'since entry'.
+            "trail_k": 0.0, "trail_stop": 0.0,
             "execution_state": "RESERVED",
             "reason_code": "APEX11_CANDIDATE_READY",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
