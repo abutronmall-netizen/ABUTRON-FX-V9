@@ -424,3 +424,34 @@ class TestEngine:
         # The gate has no effect: identical candidate directions per symbol.
         assert sorted((c.symbol, c.direction) for c in result_on) == \
                sorted((c.symbol, c.direction) for c in result_off)
+
+def test_sqlite_sessions_stable_per_thread(tmp_path):
+    """Interleaved engine+request threads must not leak pooled sessions."""
+    import concurrent.futures
+    import threading
+    from abutron.db import EngineDB, PortalDB
+    for db_cls, name in ((EngineDB, "engine"), (PortalDB, "portal")):
+        db = db_cls(str(tmp_path / f"{name}-thread.db"))
+        left_ready = threading.Event()
+        right_ready = threading.Event()
+
+        def left():
+            first = db.session
+            left_ready.set()
+            assert right_ready.wait(5)
+            assert db.session is first
+            db._session_factory.remove()
+            return True
+
+        def right():
+            assert left_ready.wait(5)
+            other = db.session
+            right_ready.set()
+            db._session_factory.remove()
+            return other is not None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            a = pool.submit(left)
+            b = pool.submit(right)
+            assert a.result(timeout=8) and b.result(timeout=8)
+        db._engine.dispose()

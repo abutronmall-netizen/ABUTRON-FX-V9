@@ -170,10 +170,14 @@ def test_hold_produces_no_candidate(apex_int):
     assert holds > 0
 
 
-def test_service_starts_without_vendored_apex():
+def test_service_starts_without_vendored_apex(monkeypatch):
     """The platform must boot and serve on the NexusBrain even when the
     vendored APEX source is absent — no runtime crash at startup."""
     log = EventLog(os.path.join(DATA_ROOT, "t_apex_optional_events.jsonl"))
+    import abutron.apex_integration as integration
+    def missing_vendor():
+        raise ModuleNotFoundError('test: absent optional APEX vendor')
+    monkeypatch.setattr(integration, '_load_apex', missing_vendor)
     ai = ApexIntegration(log, warmup_bars=0)
     # Constructing must never raise regardless of vendor presence.
     assert ai.brain is not None
