@@ -103,10 +103,19 @@ class SingleWriterGateway:
                    request_timeout: float = 10.0) -> Dict[str, Any]:
         """Send a native order for one candidate, under the account lock.
 
+        The signed request is delivered to the manager socket, which
+        proxies it to the account terminal's native EA file handoff and
+        returns ONLY broker-written receipts. An 'ack' is accepted only
+        when it carries a broker ticket + deal bound to this exact
+        request_id + login; anything else degrades to UNKNOWN (never a
+        fabricated ACK). Native-evidence gating (broker session, EA
+        attestation, terminal liveness, positions, exposure join) is
+        enforced by the dispatcher + candidate review before this send.
+
         Aggressive mode: the arming / SHA256-pin gates are ADVISORY — a
         disarmed or mismatched writer is logged but does NOT block order
-        submission (fail-closed writer gating removed). The per-account lock
-        is retained for correctness (no duplicate sends in-process).
+        submission here. The per-account lock is retained for correctness
+        (no duplicate sends in-process).
 
         Returns a dict with outcome: 'ACK' | 'UNKNOWN' | 'REJECTED'.
         """
@@ -138,6 +147,7 @@ class SingleWriterGateway:
             state_machine.move(candidate["candidate_id"], "SEND", "DISPATCHED")
             nonce = make_nonce("ABUTRON_REQ")
             request = {
+                "kind": "order",
                 "request_id": nonce,
                 "candidate_id": candidate["candidate_id"],
                 "connection_id": connection_id,
@@ -160,7 +170,7 @@ class SingleWriterGateway:
                 "activation_revision": status.activation_revision,
                 "signed": hmac_sign(
                     os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation"),
-                    f"{nonce}|{candidate['candidate_id']}|{connection_id}"),
+                    f"{nonce}|{connection_id}"),
                 "created_at": utc_now(),
             }
             outcome, receipt_ref = self._deliver_to_ea(request, request_timeout)
@@ -169,14 +179,41 @@ class SingleWriterGateway:
         finally:
             lock.release()
 
+    @staticmethod
+    def _ack_verified(request: Dict[str, Any], resp: Dict[str, Any]) -> bool:
+        """An ACK is genuine only if broker-bound to this exact request.
+
+        Requires a positive broker ticket, a positive broker deal id, the
+        request's login, and an exact request_id echo. Anything weaker is
+        not an acknowledgement of this order.
+        """
+        try:
+            ticket_ok = int(resp.get("ticket", 0) or 0) > 0
+        except (TypeError, ValueError):
+            ticket_ok = False
+        try:
+            deal_ok = int(resp.get("deal", 0) or 0) > 0
+        except (TypeError, ValueError):
+            deal_ok = False
+        try:
+            login_ok = (int(resp.get("login", 0))
+                        == int(request.get("mt5_login", -1)))
+        except (TypeError, ValueError):
+            login_ok = False
+        echo_ok = (str(resp.get("request_id", ""))
+                   == str(request.get("request_id", "")) != "")
+        return ticket_ok and deal_ok and login_ok and echo_ok
+
     def _deliver_to_ea(self, request: Dict[str, Any],
                        timeout: float) -> tuple:
         """Deliver the signed request to the native EA via the manager socket.
 
         In this deployment the manager socket is a local Unix socket; the
-        manager proxies to the per-account terminal. If the socket is not
-        present (offline dev / test), the outcome is UNKNOWN — never a
-        fabricated ACK.
+        manager proxies to the per-account terminal's EA file handoff and
+        returns the genuine broker receipt. If the socket is not present
+        (offline dev / test), the outcome is UNKNOWN — never a fabricated
+        ACK. An 'ack' response with a missing/weak ticket, deal, login, or
+        request_id echo is likewise downgraded to UNKNOWN.
         """
         try:
             if not os.path.exists(MANAGER_SOCK):
@@ -185,11 +222,22 @@ class SingleWriterGateway:
             sock.settimeout(timeout)
             sock.connect(MANAGER_SOCK)
             sock.sendall((json.dumps(request) + "\n").encode())
-            data = sock.recv(4096).decode()
+            data = sock.recv(65536).decode()
             sock.close()
             resp = json.loads(data.strip().splitlines()[-1])
+            if not isinstance(resp, dict):
+                return "UNKNOWN", resp
             if resp.get("status") == "ack":
-                return "ACK", resp
+                if self._ack_verified(request, resp):
+                    return "ACK", resp
+                if self.log is not None:
+                    self.log.append(make_event(
+                        "writer.ack_unverified",
+                        connection_id=str(request.get("connection_id", "")),
+                        order_request_id=str(request.get("request_id", "")),
+                        execution_state="UNKNOWN",
+                        reason_code="ACK_UNVERIFIED"))
+                return "UNKNOWN", resp
             if resp.get("status") == "reject":
                 return "REJECTED", resp
             return "UNKNOWN", resp

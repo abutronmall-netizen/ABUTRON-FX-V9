@@ -19,6 +19,15 @@ FAULT_CODES: Dict[str, Dict[str, str]] = {
     "CRM_EFFECTIVE_ON_OWNER_AND_ACK_UNVERIFIED": {
         "domain": "owner-wide risk + activation revision/ACK",
         "check": "supervisor; CRM desired vs effective; owner evidence join"},
+    "BLOCKED_INCOMPLETE_EXPOSURE": {
+        "domain": "native-evidence gate: session/EA/terminal/positions/join",
+        "check": "evidence inventory per connection; fix missing categories"},
+    "EFFECTIVE_ON_NO_BROKER_CONFIRMED": {
+        "domain": "effective ON without a reconciled native receipt",
+        "check": "receipts; reconcile worker; native terminal history"},
+    "ACK_UNVERIFIED": {
+        "domain": "manager ack failed ticket/deal/login/request binding",
+        "check": "EA receipt files; terminal account binding; manager log"},
     "FP2582_NATIVE_ORDER_DISPATCHER_MISSING": {
         "domain": "missing account-specific native send path",
         "check": "dispatcher unit, EA handshake, allowed binary pin"},

@@ -89,6 +89,10 @@ WINE_PREFIX = os.getenv("ABUTRON_WINE_PREFIX", os.path.join(MT5_ROOT, "wineprefi
 MT5_EXE = os.getenv("ABUTRON_MT5_EXE", "Terminal64.exe")
 MT5_EXPORT_DIR = os.getenv("ABUTRON_MT5_EXPORT", os.path.join(MT5_ROOT, "MQL5/Files"))
 MANAGER_SOCK = os.getenv("ABUTRON_MANAGER_SOCK", os.path.join(DATA_ROOT, "manager.sock"))
+# Native EA file-handoff transport: how long the manager waits for the
+# broker-written receipt file per order, and how often it polls for it.
+NATIVE_HANDOFF_TIMEOUT_S = float(os.getenv("ABUTRON_NATIVE_HANDOFF_TIMEOUT", "10.0"))
+NATIVE_HANDOFF_POLL_S = float(os.getenv("ABUTRON_NATIVE_HANDOFF_POLL", "0.25"))
 
 # ---------------------------------------------------------------------------
 # Brokers
