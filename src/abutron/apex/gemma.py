@@ -9,6 +9,7 @@ and changes nothing about execution.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -146,4 +147,113 @@ class GemmaAdvisor:
                 "narrative": narrative}
 
 
+SCORE_SYSTEM_PROMPT = (
+    "You are Gemma, scoring four trading-agent feature channels for a "
+    "closed-candle FX/CFD model. You do not place orders. Use only the "
+    "provided candle summary and deterministic score magnitudes. Return one "
+    "JSON object and nothing else: "
+    '{"weights":{"trend":0.5-1.5,"meanrev":0.5-1.5,"breakout":0.5-1.5,'
+    '"carry":0.5-1.5},"scores":{"trend":-1..1,"meanrev":-1..1,'
+    '"breakout":-1..1,"carry":-1..1},"reason":"short"}. '
+    "Weights adjust trust in the deterministic channels; scores are bounded "
+    "market-direction biases. If evidence is weak, use weights near 1.0 and "
+    "scores near 0.0."
+)
+
+
+class GemmaScoreAdvisor:
+    """Optional Gemma link that produces agent-score trust weights offline.
+
+    The training pipeline calls this once per symbol window, not once per
+    bar: deterministic APEX-style agents produce the causal per-bar shape,
+    while Gemma supplies bounded per-channel trust/bias. If the gateway is
+    disabled or fails, the caller keeps deterministic scores and records
+    ``deterministic_apex`` provenance. Gemma is never on the order path.
+    """
+
+    def __init__(self, base_url: str = GEMMA_BASE_URL,
+                 model: str = GEMMA_MODEL, enabled: bool = GEMMA_ENABLED,
+                 timeout: float = GEMMA_TIMEOUT_S,
+                 max_retries: int = GEMMA_MAX_RETRIES):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.enabled = enabled
+        self.timeout = timeout
+        self.max_retries = max_retries
+
+    def is_configured(self) -> bool:
+        return self.enabled and bool(self.base_url)
+
+    def score_window(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        fallback = {
+            "source": "deterministic_apex", "model": self.model,
+            "reason": "GEMMA_DISABLED",
+            "weights": {k: 1.0 for k in
+                        ("trend", "meanrev", "breakout", "carry")},
+            "scores": {k: 0.0 for k in
+                       ("trend", "meanrev", "breakout", "carry")},
+        }
+        if not self.is_configured():
+            return fallback
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": SCORE_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(context, default=str)},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 240,
+        }
+        for attempt in range(self.max_retries + 1):
+            try:
+                r = requests.post(f"{self.base_url}/chat/completions",
+                                  json=payload, timeout=self.timeout,
+                                  headers={"Content-Type": "application/json"})
+                if r.status_code != 200:
+                    if attempt < self.max_retries:
+                        continue
+                    return {**fallback, "reason": f"GEMMA_HTTP_{r.status_code}"}
+                content = r.json()["choices"][0]["message"]["content"]
+                parsed = self._parse_scores(content)
+                return {"source": "gemma_gateway", "model": self.model,
+                        "reason": str(parsed.get("reason", "OK")),
+                        "weights": parsed["weights"],
+                        "scores": parsed["scores"]}
+            except (requests.RequestException, KeyError, ValueError,
+                    json.JSONDecodeError, TypeError) as exc:
+                if attempt < self.max_retries:
+                    continue
+                return {**fallback,
+                        "reason": f"GEMMA_ERROR:{type(exc).__name__}"}
+        return {**fallback, "reason": "GEMMA_RETRIES_EXHAUSTED"}
+
+    @staticmethod
+    def _bounded(value: Any, lo: float, hi: float, default: float) -> float:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            v = default
+        if not math.isfinite(v):
+            v = default
+        return float(max(lo, min(hi, v)))
+
+    @classmethod
+    def _parse_scores(cls, content: str) -> Dict[str, Any]:
+        start, end = content.find("{"), content.rfind("}")
+        if start < 0 or end < start:
+            raise ValueError("no JSON in Gemma score response")
+        obj = json.loads(content[start:end + 1])
+        raw_w = obj.get("weights", {}) or {}
+        raw_s = obj.get("scores", {}) or {}
+        keys = ("trend", "meanrev", "breakout", "carry")
+        return {
+            "weights": {k: cls._bounded(raw_w.get(k, 1.0), 0.5, 1.5, 1.0)
+                        for k in keys},
+            "scores": {k: cls._bounded(raw_s.get(k, 0.0), -1.0, 1.0, 0.0)
+                       for k in keys},
+            "reason": str(obj.get("reason", ""))[:160],
+        }
+
+
 gemma_advisor = GemmaAdvisor()
+gemma_score_advisor = GemmaScoreAdvisor()

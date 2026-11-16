@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ..config import RECEIPTS_ROOT, utc_now
+from ..config import BRAIN_MODEL_DIR, RECEIPTS_ROOT, utc_now
 from .. import db
 from ..events import EventLog, make_event
 from ..execution.receipts import ReceiptManager
@@ -138,21 +138,71 @@ class Reconciler:
             "observed_at": utc_now(), "source": "native",
         })
         # Self-learning: feed a settled (CLOSED) trade back to the brain so
-        # it learns from the losing trade and never enters too early.
+        # it learns from the losing trade and never enters too early. The
+        # entry feature vector is recovered from the candidate's brain
+        # proposal and passed to the explicit loss-pattern guard.
         if h.state == "CLOSED" and self.brain is not None:
             cand = db.engine_db.get_candidate(receipt["candidate_id"]) or {}
-            self.brain.learn_from_trade(
+            features = self._candidate_features(cand)
+            bias = self.brain.learn_from_trade(
                 symbol=receipt["symbol"],
                 regime=cand.get("regime", ""),
                 direction=receipt["direction"],
                 entry_type=cand.get("entry_type", "CONFIRM"),
-                entry_quality=float(cand.get("entry_quality", 0.0) or 0.0),
-                pnl=float(h.realized_pnl or 0.0))
+                entry_quality=float(cand.get("entry_quality", 0.5) or 0.5),
+                pnl=float(h.realized_pnl or 0.0),
+                features=features or None)
+            self._persist_brain(receipt["symbol"])
+            self.log.append(make_event(
+                "brain.trade_feedback", symbol=receipt["symbol"],
+                execution_state="SETTLED",
+                payload={"pnl": round(float(h.realized_pnl or 0.0), 4),
+                         "features": bool(features),
+                         "loss_guard_active": bias.get("loss_guard_active", 0),
+                         "loss_guard_blocked": bias.get("loss_guard_blocked", 0)}))
 
         report["matched"] += 1
         report["details"].append({
             "ticket": h.ticket, "symbol": h.symbol, "state": state,
             "sl_ok": sl_ok, "tp_ok": tp_ok, "stop_widened": stop_widened})
+
+    @staticmethod
+    def _candidate_features(cand: Dict[str, Any]) -> List[float]:
+        """Recover the exact brain feature vector captured at entry."""
+        votes = cand.get("agent_votes")
+        if isinstance(votes, str):
+            try:
+                votes = json.loads(votes)
+            except (ValueError, TypeError):
+                votes = {}
+        if not isinstance(votes, dict):
+            votes = {}
+        proposal = votes.get("nexus_brain", {})
+        if not isinstance(proposal, dict):
+            proposal = {}
+        feats = proposal.get("features") or cand.get("features") or []
+        out = []
+        for v in feats if isinstance(feats, (list, tuple)) else []:
+            try:
+                out.append(float(v))
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    def _persist_brain(self, symbol: str = "") -> None:
+        """Persist trade-memory + loss-guard state after a settled trade."""
+        try:
+            if hasattr(self.brain, "symbol_ids"):
+                from ..brain.unified import save_unified
+                save_unified(BRAIN_MODEL_DIR, self.brain)
+            elif getattr(self.brain, "ensemble", None) is not None:
+                from ..brain.trainer import save_brain
+                from ..apex.eligibility import brain_dir_for
+                save_brain(brain_dir_for(
+                    symbol, os.path.dirname(os.path.normpath(BRAIN_MODEL_DIR))
+                    or "."), self.brain.ensemble)
+        except Exception:
+            pass
 
     def _resolve_unknown(self, receipt: Dict,
                          native_history: List[NativeHistoryEntry],

@@ -20,7 +20,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..config import (DEFAULT_PER_TRADE_RISK_PCT, DEFAULT_TRAILING_ATR_MULT,
-                      ENGINE_VERSION, PRIMARY_TIMEFRAME, utc_now)
+                      DEPTH_SNAPSHOTS_PATH, ENGINE_VERSION, GEMMA_ENABLED,
+                      PRIMARY_TIMEFRAME, RUNTIME_RULES_PATH,
+                      TICK_TRADES_PATH, utc_now)
 from ..crypto import make_activation_revision
 from ..events import EventLog, make_event
 from ..feeds.feed_quality import Candle, Quote
@@ -47,6 +49,8 @@ from ..brain import NexusBrain, make_brain, default_ensemble
 from ..brain.risk import RiskPolicy
 from ..brain.unified import load_unified, save_unified, unified_brain_dir
 from ..brain.trainer import save_brain
+from ..brain.signals import (build_signal_bundle, load_depth_signals,
+                             load_tick_trades, online_learn_from_bundle)
 
 
 def _json_default(obj):
@@ -179,6 +183,12 @@ class ApexEngine:
         self.max_symbols_per_day = max_symbols_per_day
         # Throttle for persisting online-learned brain weights.
         self.online_save_interval = online_save_interval
+        # Optional true tick/depth evidence; otherwise causal OHLCV proxies.
+        self._signal_tick_trades = (load_tick_trades(TICK_TRADES_PATH)
+                                    if TICK_TRADES_PATH else {})
+        self._signal_depth = (load_depth_signals(DEPTH_SNAPSHOTS_PATH)
+                              if DEPTH_SNAPSHOTS_PATH else {})
+        self._runtime_rules_path = RUNTIME_RULES_PATH
         # High-water mark for the extreme-low-drawdown runtime risk taper.
         self._high_water: float = 0.0
         if brain is None:
@@ -303,9 +313,14 @@ class ApexEngine:
                          owner_book: Dict[str, Any],
                          orderflow_trades: Dict[str, list],
                          tick_size: float) -> Optional[Candidate]:
-        closes = [x.close for x in self._history(c)]
-        highs = [x.high for x in self._history(c)]
-        lows = [x.low for x in self._history(c)]
+        history = self._history(c)
+        closes = [x.close for x in history]
+        highs = [x.high for x in history]
+        lows = [x.low for x in history]
+        signal_bundle = build_signal_bundle(
+            history, symbol=c.symbol,
+            tick_trades=self._signal_tick_trades,
+            depth=self._signal_depth, use_gemma=GEMMA_ENABLED)
 
         # --- Continuous per-bar online neural learning (true self-learning)
         # Learn from the move that just completed: features as of the
@@ -316,9 +331,9 @@ class ApexEngine:
         if len(closes) >= 30:
             _prev_close = closes[-2]
             _brain = self._brain_for(c.symbol)
-            _brain.online_learn(
-                symbol=c.symbol, closes=closes[:-1],
-                highs=highs[:-1], lows=lows[:-1],
+            online_learn_from_bundle(
+                _brain, symbol=c.symbol, bundle=signal_bundle,
+                index=len(signal_bundle.closes) - 2,
                 realised_return=closes[-1] - _prev_close)
             # Persist online-learned weights every N updates so the
             # self-training survives restarts (throttled, not per-bar).
@@ -407,11 +422,36 @@ class ApexEngine:
         # --- The NexusBrain is the signal authority. The brain used is the
         # one trained + validated on THIS symbol (loaded from data/brains),
         # falling back to the default ensemble for untrained symbols. ---
-        proposal = self._brain_for(c.symbol).decide(
+        # Causal feature bundle fills all 23 market slots. Real order-flow /
+        # footprint snapshots and live agent votes override the proxies when
+        # supplied; absent evidence is explicitly labelled as a proxy.
+        sig = signal_bundle.at(-1)
+        of_features = (dict(of_snap.features) if of_snap else
+                       sig.get("orderflow", {}))
+        fp_features = (dict(fp.features) if fp else
+                       sig.get("footprint", {}))
+        fp_features.setdefault("poc_vol_pct",
+                               fp_features.get("poc_volume_pct", 0.0))
+        scores = dict(sig.get("agent_scores", {}))
+        scores.update({k: v for k, v in agent_scores.items() if v})
+        decision_brain = self._brain_for(c.symbol)
+        proposal = decision_brain.decide(
             symbol=c.symbol, closes=closes, highs=highs, lows=lows,
-            orderflow=of_snap.features if of_snap else {},
-            footprint=fp.features if fp else {},
-            agent_scores=agent_scores, regime=regime_op.regime)
+            orderflow=of_features, footprint=fp_features,
+            agent_scores=scores, regime=regime_op.regime)
+        # A persisted loss-pattern veto is a HOLD; do not size or open a trade.
+        if proposal.direction == "HOLD" and any(
+                "LOSS_PATTERN_REPEAT" in b for b in (proposal.blockers or [])):
+            self.journal.record(
+                connection_id=connection_id, broker=broker,
+                owner_id=owner_id, symbol=c.symbol,
+                timeframe=c.timeframe, bar_open=c.open_time,
+                regime=proposal.regime, opinions=[], decision="HOLD",
+                reason="LOSS_PATTERN_REPEAT",
+                detail={"blockers": proposal.blockers,
+                        "signal_sources": sig.get("sources", {})},
+                brain=proposal.to_dict())
+            return None
 
         # Multi-agent debate advisory (advisory only, never on the order path)
         advisory_ctx = {
@@ -441,7 +481,7 @@ class ApexEngine:
         # Per-symbol win-rate geometry (TP/SL ATR multiples + entry
         # filters) validated out-of-sample by the optimizer. The live
         # engine trades with the exact geometry the backtest measured.
-        geom = geometry_for(c.symbol)
+        geom = geometry_for(c.symbol, rules_path=self._runtime_rules_path)
 
         # High-precision entry filters (trade selection for win rate, NOT
         # a risk gate). A rejected setup is journaled and skipped; valid
@@ -469,7 +509,7 @@ class ApexEngine:
 
         # Brain's learned entry bias: after losses the brain prefers
         # CONFIRM entries (never enter too early) and floors entry quality.
-        bias = self.brain.get_entry_bias(c.symbol, proposal.regime)
+        bias = decision_brain.get_entry_bias(c.symbol, proposal.regime)
         # Per-symbol sniper engine carrying the validated TP/SL geometry.
         sniper_engine_sym = SniperEntryEngine(
             tp_atr_mult=geom.tp_atr_mult,
@@ -478,8 +518,7 @@ class ApexEngine:
         sniper = sniper_engine_sym.plan(
             symbol=c.symbol, direction=direction,
             closes=closes, highs=highs, lows=lows, atr_val=a,
-            of_features=of_snap.features if of_snap else {},
-            fp_features=fp.features if fp else {},
+            of_features=of_features, fp_features=fp_features,
             regime=proposal.regime, uncertainty=proposal.uncertainty,
             conviction=proposal.conviction,
             confirm_bias=bias.get("confirm_bias", 0.0),
@@ -495,7 +534,7 @@ class ApexEngine:
         # EA applies it and moves the broker stop in favour.
         trail = trailing_stop.plan(
             direction=direction, highs=highs, lows=lows, atr_val=a,
-            entry_price=price)
+            entry_price=price, symbol=c.symbol)
 
         risk_ctx = {
             "candidate": {"direction": direction, "volume": 0.0,
@@ -570,7 +609,8 @@ class ApexEngine:
             regime=proposal.regime,
             agent_votes={**{o.agent: o.to_dict() for o in
                             (trend_op, meanrev_op, breakout_op, portfolio_op)},
-                         "nexus_brain": proposal.to_dict()},
+                         "nexus_brain": proposal.to_dict(),
+                         "signal_sources": sig.get("sources", {})},
             risk_fraction=float(account.get("per_trade_risk_pct",
                                             DEFAULT_PER_TRADE_RISK_PCT)),
             stop_risk_usd=stop_risk_usd,
