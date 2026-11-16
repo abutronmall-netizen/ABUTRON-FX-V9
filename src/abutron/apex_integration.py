@@ -29,7 +29,8 @@ from .ops.portal_ops import portal_ops
 from .risk.riskguard import RiskGuard, PortfolioState, TradeProposal
 from .selflearn.engine import SelfLearningEngine
 from .brain import make_brain, default_ensemble
-from .config import (BRAIN_ENSEMBLE_SEED, BRAIN_MC_SAMPLES, BRAIN_SIZE_CAP)
+from .config import (BRAIN_ENSEMBLE_SEED, BRAIN_MC_SAMPLES, BRAIN_SIZE_CAP,
+                     DEFAULT_PER_TRADE_RISK_PCT, DEFAULT_PORTFOLIO_RISK_CAP_PCT)
 from .selflearn.features import build_feature_vector
 from .apex.eligibility import SymbolEligibility
 from .feeds.feed_quality import Candle
@@ -50,7 +51,7 @@ def _load_apex():
     from apex.core.models import Bar                    # noqa
     from abutron_replacement.bridge import (            # noqa
         AbutronApex11SignalBridge, CandleRejected, Instrument)
-    from abutron_replacement.candidate_contract import (  # noqa
+    from .apex.v9_candidate_contract import (  # noqa
         AccountGate, BrokerNativeRisk, review_candidate)
     return {
         "bridge": AbutronApex11SignalBridge,
@@ -72,11 +73,12 @@ class ApexVendorMissing(RuntimeError):
 # ---------------------------------------------------------------------------
 # Instrument manifest builder
 # ---------------------------------------------------------------------------
-DEFAULT_DERIV_SYMBOLS = ["Volatility 100 Index.0"]
+from .brain.unified import SYMBOL_UNIVERSE
+DEFAULT_DERIV_SYMBOLS = [s for s in SYMBOL_UNIVERSE if s.endswith(" Index.0")]
 DEFAULT_FP_SYMBOLS = ["GBPUSD", "EURUSD", "XAUUSD"]
 
 # Approved asset classes + brokers (bridge enforces these too)
-_ASSET_CLASS = {"deriv": "deriv_synthetic", "fpmarkets": "fp_index"}
+_ASSET_CLASS = {"deriv": "deriv_synthetic", "fpmarkets": "fx_index"}
 
 
 def build_instrument_manifest(accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -273,16 +275,40 @@ class ApexIntegration:
             return {"status": "REJECTED", "reason": str(e),
                     "decision": None, "candidate": None, "blockers": [str(e)]}
 
-        status = decision["status"]
-
         # --- Self-learning AI: causal observe -> overlay loop -------------
         # 1) Settle the previous bar's outcome and update the learner.
         # 2) Produce a bounded overlay from current features and adjust the
         #    research target weight (advisory; never touches the order).
         # Runs on every closed bar so the model keeps learning.
         symbol = candle["symbol"]
-        self._run_selflearn(symbol, candle, decision, orderflow_features,
-                            footprint_features)
+        signal_features = self._run_selflearn(
+            symbol, candle, decision, orderflow_features, footprint_features)
+        hist = self._signal_hist.get(symbol, [])
+        if self.brain.trained and len(hist) >= 32:
+            # The released NexusBrain, not the legacy paper ensemble,
+            # decides BUY/SELL/HOLD. Its loss-pattern HOLD is authoritative.
+            proposal = self.brain.decide(
+                symbol=symbol,
+                closes=[b.close for b in hist],
+                highs=[b.high for b in hist],
+                lows=[b.low for b in hist],
+                orderflow=signal_features.get("orderflow", {}),
+                footprint=signal_features.get("footprint", {}),
+                agent_scores=signal_features.get("agent_scores", {}),
+                regime=signal_features.get("regime", ""))
+            status = proposal.direction
+            decision["status"] = status
+            decision["reason"] = "TRAINED_UNIFIED_NEXUS_SIGNAL_AUTHORITY"
+            decision["brain_authority"] = {
+                "version": proposal.brain_version, "trained": proposal.trained,
+                "confidence": proposal.confidence,
+                "conviction": proposal.conviction,
+                "blockers": list(getattr(proposal, "blockers", []) or []),
+            }
+        else:
+            status = "HOLD"
+            decision["status"] = status
+            decision["reason"] = "TRAINED_BRAIN_OR_CAUSAL_HISTORY_UNAVAILABLE"
 
         self._record(connection_id, account, candle, status,
                      reason=decision.get("reason", ""),
@@ -304,9 +330,17 @@ class ApexIntegration:
         gate = self._build_gate(connection_id, account, equity,
                                 gate_overrides or {})
         native = self._build_native(native_geometry or {}, status, candle)
+        # CRM risk settings are percentage units (e.g. 0.5 = 0.5%).
+        per_trade = account.get("per_trade_risk_pct")
+        portfolio = account.get("portfolio_cap_pct")
+        per_trade = (DEFAULT_PER_TRADE_RISK_PCT if per_trade is None
+                     else float(per_trade))
+        portfolio = (DEFAULT_PORTFOLIO_RISK_CAP_PCT if portfolio is None
+                     else float(portfolio))
         review = self._apex["review_candidate"](
             signal=decision, gate=gate, native=native, now=int(time.time()),
-            per_trade_risk_pct=0.001, portfolio_ceiling_pct=0.20)
+            per_trade_risk_pct=per_trade / 100.0,
+            portfolio_ceiling_pct=portfolio / 100.0)
 
         if not review["engineering_gates_passed"]:
             self._record(connection_id, account, candle, "BLOCKED",
@@ -469,6 +503,7 @@ class ApexIntegration:
             "market_features": sig.get("market_features", []),
             "signal_sources": sig.get("sources", {}),
         }
+        return sig
 
     # ------------------------------------------------------------------
     def _build_gate(self, connection_id: str, account: Dict[str, Any],
@@ -576,7 +611,7 @@ class ApexIntegration:
             "regime": (ready.get("decision", {}).get("regime", {}) or {}).get(
                 "regime", ""),
             "agent_votes": str(ready.get("decision", {})),
-            "risk_fraction": 0.001,
+            "risk_fraction": float(ready.get("review", {}).get("risk_fraction", 0.0)),
             "stop_risk_usd": float(ready.get("review", {}).get(
                 "nominal_stop_risk_usd", 0.0)),
             "volume": float(cand.get("volume_lots", 0.0)),
