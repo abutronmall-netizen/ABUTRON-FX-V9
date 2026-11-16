@@ -83,3 +83,5 @@ The script wrote its own broker-terminal-native output file \`MQL5/Files/ABUTRON
 - The FP DEMO worker heartbeat remained fresh. No LIVE configuration, order authority or broker orders were changed by the test.
 
 **Conclusion:** The actual native SHA-256 HMAC helper matches Python for all three coverage cases, including multi-block input and UTF-8. The previous isolated-terminal startup failure is superseded for this HMAC check. This result **does not** prove the complete JSON request parser, activation revision and secret provisioning, broker fill retcode, SL/TP, owner-risk or LIVE readiness. Those remain separate engineering checks.
+
+**Post-test cleanup:** The unique one-shot `ABUTRON_PR18_HMAC_0512_SAFE.ex5` was removed from the active FP DEMO terminal after its byte-identical compiled binary and result were archived. The native result file remains available in the test terminal's `MQL5/Files`, and the root-only evidence copy is preserved. The MT5 worker remained connected. This removes an unnecessary test executable from the active trading environment without changing an existing EA or any order settings.
