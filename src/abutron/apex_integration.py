@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import (BRAIN_MODEL_DIR, DATA_ROOT, DEPTH_SNAPSHOTS_PATH,
-                      GEMMA_ENABLED, RISKGUARD_ENABLED, TICK_TRADES_PATH)
+                      GEMMA_ENABLED, RISKGUARD_ENABLED, TICK_TRADES_PATH,
+                      DEFAULT_PER_TRADE_RISK_PCT, DEFAULT_PORTFOLIO_RISK_CAP_PCT)
 from .events import EventLog, make_event
 from .ops.portal_ops import portal_ops
 from .risk.riskguard import RiskGuard, PortfolioState, TradeProposal
@@ -306,7 +307,8 @@ class ApexIntegration:
         native = self._build_native(native_geometry or {}, status, candle)
         review = self._apex["review_candidate"](
             signal=decision, gate=gate, native=native, now=int(time.time()),
-            per_trade_risk_pct=0.001, portfolio_ceiling_pct=0.20)
+            per_trade_risk_pct=DEFAULT_PER_TRADE_RISK_PCT,
+            portfolio_ceiling_pct=DEFAULT_PORTFOLIO_RISK_CAP_PCT)
 
         if not review["engineering_gates_passed"]:
             self._record(connection_id, account, candle, "BLOCKED",
@@ -576,7 +578,7 @@ class ApexIntegration:
             "regime": (ready.get("decision", {}).get("regime", {}) or {}).get(
                 "regime", ""),
             "agent_votes": str(ready.get("decision", {})),
-            "risk_fraction": 0.001,
+            "risk_fraction": DEFAULT_PER_TRADE_RISK_PCT,
             "stop_risk_usd": float(ready.get("review", {}).get(
                 "nominal_stop_risk_usd", 0.0)),
             "volume": float(cand.get("volume_lots", 0.0)),

@@ -45,8 +45,8 @@ for _d in (DATA_ROOT, NATIVE_ROOT, DECISIONS_ROOT, RECEIPTS_ROOT,
 # ---------------------------------------------------------------------------
 # Trading policy (blueprint-defined defaults; per-account overrides in CRM)
 # ---------------------------------------------------------------------------
-DEFAULT_PORTFOLIO_RISK_CAP_PCT = float(os.getenv("ABUTRON_RISK_CAP_PCT", "1.00"))
-DEFAULT_PER_TRADE_RISK_PCT = float(os.getenv("ABUTRON_PER_TRADE_PCT", "0.50"))
+DEFAULT_PORTFOLIO_RISK_CAP_PCT = float(os.getenv("ABUTRON_RISK_CAP_PCT", "0.20"))
+DEFAULT_PER_TRADE_RISK_PCT = float(os.getenv("ABUTRON_PER_TRADE_PCT", "0.0015"))
 DEFAULT_TRAILING_ATR_MULT = float(os.getenv("ABUTRON_TRAIL_ATR_MULT", "2.0"))
 DEFAULT_MIN_BROKER_RISK_BUFFER_USD = float(os.getenv("ABUTRON_MIN_RISK_BUFFER", "0.0"))
 
