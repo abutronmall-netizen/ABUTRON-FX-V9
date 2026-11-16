@@ -11,6 +11,7 @@ active" alone.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -356,11 +357,22 @@ def create_app(event_log: EventLog) -> FastAPI:
         if not acct:
             raise HTTPException(404, "account not found")
         gw: SingleWriterGateway = app.state.services["writer_gateway"]
+        # Derive terminal path from the authenticated account connection id,
+        # never from a request-supplied filesystem path.
+        mql5_files_dir = ""
+        if re.fullmatch(r"[0-9a-f]{32}", connection_id):
+            worker_root = Path(os.getenv("ABUTRON_MT5_WORKER_STATE_ROOT",
+                                         "/var/lib/private"))
+            candidate_dir = (worker_root / ("abutron-client-mt5-" + connection_id)
+                             / "terminal" / "MQL5" / "Files")
+            if candidate_dir.is_dir() and not candidate_dir.is_symlink():
+                mql5_files_dir = str(candidate_dir)
         return gw.arm(connection_id=connection_id,
                       ea_path=body.get("ea_path", ""),
                       expected_sha256=body.get("expected_sha256", ""),
                       activation_revision=body.get("activation_revision", ""),
-                      broker=acct["broker"]).to_dict()
+                      broker=acct["broker"],
+                      mql5_files_dir=mql5_files_dir).to_dict()
 
     @app.post("/api/admin/licenses")
     async def admin_grant_license(request: Request, body: Dict[str, Any]):
