@@ -24,23 +24,21 @@
 //+------------------------------------------------------------------+
 #property copyright "ABUTRON FX V9"
 #property version   "1.1.0"
-#property strict_testing
 
 input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
-input long    InpActivationSeed = 0;            // activation seed (per arm)
+input string  InpActivationRevision = "";    // CRM revision (or file-provisioned)
 input string  InpActivationSecret = "";         // HMAC key (or file-provisioned)
 input int     InpManagedCharts  = 0;            // 0 = all charts with EA
 input double  InpRiskFraction   = 0.15;         // per-trade risk fraction (display)
 input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
-input int     InpExportPeriod   = PERIOD_M5;    // export timeframe
+input ENUM_TIMEFRAMES InpExportPeriod = PERIOD_M5; // export timeframe
 
 string g_activation_secret = "";                // resolved at OnInit
 
 int OnInit()
 {
-   SetTradeAllowed(true);
-   SetTradeExecution(ORDER_TYPE_MARKET, 0, 0, 0); // allow market orders
+   // MT5 terminal controls Algo Trading permissions; no local override.
    g_activation_secret = LoadActivationSecret();
    EventSetTimer(5);                                  // export + handoff loop
    return(INIT_SUCCEEDED);
@@ -62,7 +60,7 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void ExportNativeData()
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen is already sandboxed inside MQL5/Files
 
    // --- Account identity -------------------------------------------
    string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + Nonce() + ".txt";
@@ -73,9 +71,9 @@ void ExportNativeData()
    WriteTextFile(identity, idJson);
 
    // --- Closed M5 bars (last 120) -----------------------------------
-   ulong from = TimeCurrent() - 120 * PeriodSeconds();
+   datetime from = TimeCurrent() - 120 * PeriodSeconds(InpExportPeriod);
    MqlRates rates[];
-   int count = CopyRates(_Symbol, InpExportPeriod, from, 0, rates);
+   int count = CopyRates(_Symbol, InpExportPeriod, from, TimeCurrent(), rates);
    if(count > 0) ArrayResize(rates, count);
 
    string barsJson = "{\"bars\":[";
@@ -88,11 +86,15 @@ void ExportNativeData()
          TimeToString(r.time, TIME_DATE|TIME_SECONDS),
          TimeToString(r.time + PeriodSeconds(InpExportPeriod), TIME_DATE|TIME_SECONDS),
          r.open, r.high, r.low, r.close, r.tick_volume,
-         Bid, Ask, (int)(Ask - Bid), _Point, _Point);
+         SymbolInfoDouble(_Symbol, SYMBOL_BID),
+         SymbolInfoDouble(_Symbol, SYMBOL_ASK),
+         (int)(SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
+               SymbolInfoDouble(_Symbol, SYMBOL_BID)),
+         _Point, _Point);
    }
    // Remove trailing comma manually (StringTrimRight only trims whitespace)
-   int lastComma = StringFindLast(barsJson, ",");
-   if(lastComma >= 0)
+   int lastComma = StringLen(barsJson) - 1;
+   if(lastComma >= 0 && StringSubstr(barsJson, lastComma, 1) == ",")
       barsJson = StringSubstr(barsJson, 0, lastComma);
    barsJson += "]}";
    string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + Nonce() + ".txt";
@@ -103,7 +105,7 @@ void ExportNativeData()
    string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";
    if(FileIsExist(lastFile))
    {
-      int h = FileOpen(lastFile, FILE_READ | FILE_TXT);
+      int h = FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
       if(h > 0)
       {
          string s = FileReadString(h);
@@ -120,8 +122,8 @@ void ExportNativeData()
          (r.close >= r.open) ? "buy" : "sell",
          TimeToString(r.time, TIME_DATE|TIME_SECONDS));
    }
-   int ofComma = StringFindLast(ofJson, ",");
-   if(ofComma >= 0)
+   int ofComma = StringLen(ofJson) - 1;
+   if(ofComma >= 0 && StringSubstr(ofJson, ofComma, 1) == ",")
       ofJson = StringSubstr(ofJson, 0, ofComma);
    ofJson += "]}";
    string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + Nonce() + ".txt";
@@ -134,13 +136,13 @@ void ExportNativeData()
 //+------------------------------------------------------------------+
 void ProcessOrderRequests()
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen is already sandboxed inside MQL5/Files
    string pending = dir + "ABUTRON_REQ_PENDING.json";
    if(!FileIsExist(pending)) return;
 
    // Open and read the pending request
-   int h = FileOpen(pending, FILE_READ | FILE_TXT);
-   if(h <= 0) { FileDelete(pending); return; }
+   int h = FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+   if(h == INVALID_HANDLE) { FileDelete(pending); return; }
    string body = FileReadString(h);
    FileClose(h);
 
@@ -181,6 +183,7 @@ void ProcessOrderRequests()
                       "|" + entryTy + "|" + StringFormat("%.6f", trigger) +
                       "|" + StringFormat("%.6f", trailK) +
                       "|" + StringFormat("%.6f", trailSt);
+   if(InpActivationSecret == "") g_activation_secret = LoadActivationSecret();
    if(!VerifySignature(sig, canonical))
    {
       WriteReceipt(reqId, 0, "REJECTED", "FP_SIGNATURE_INVALID",
@@ -189,9 +192,42 @@ void ProcessOrderRequests()
       return;
    }
 
-   double price = 0.0;
-   if(dirn == "BUY")  price = Ask;
-   else               price = Bid;
+   if(dirn != "BUY" && dirn != "SELL")
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "INVALID_DIRECTION",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
+   if(entryTy != "CONFIRM")
+   {
+      // LIMIT order semantics require a separately tested pending-order path.
+      // Never silently convert a signed LIMIT intent into a market order.
+      WriteReceipt(reqId, 0, "REJECTED", "NATIVE_LIMIT_NOT_IMPLEMENTED",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
+   MqlTick currentTick;
+   if(!SymbolInfoTick(symbol, currentTick) ||
+      currentTick.time < TimeCurrent() - 180 ||
+      currentTick.time > TimeCurrent() + 5)
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "NATIVE_TICK_UNAVAILABLE",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
+   double price = (dirn == "BUY") ? currentTick.ask : currentTick.bid;
+   if(price <= 0.0 || sl <= 0.0 || tp <= 0.0 ||
+      (dirn == "BUY" && (sl >= price || tp <= price)) ||
+      (dirn == "SELL" && (sl <= price || tp >= price)))
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "INVALID_PROTECTIVE_GEOMETRY",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
 
    // Floor volume to broker lot step — never round up.
    // If the floored lot is below the minimum, REJECT (not increase).
@@ -207,7 +243,7 @@ void ProcessOrderRequests()
 
    MqlTradeRequest req;
    MqlTradeResult  res;
-   Zero(req); Zero(res);
+   ZeroMemory(req); ZeroMemory(res);
    req.action    = TRADE_ACTION_DEAL;
    req.symbol    = symbol;
    req.volume    = normVol;
@@ -224,7 +260,7 @@ void ProcessOrderRequests()
       {
          // Real broker ACK — write native receipt with ticket/deal
          WriteReceipt(reqId, res.order, "ACK", "NATIVE_ACK",
-                      res.price, res.volume, sl, tp, LongToString(res.deal));
+                      res.price, res.volume, sl, tp, IntegerToString((long)res.deal));
       }
       else
       {
@@ -251,12 +287,12 @@ void ProcessOrderRequests()
 double NormalizeLots(double v, string symbol)
 {
    double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
-   if(step <= 0.0)  step = 0.01;
-   double lots = MathFloor(v / step) * step;
-   int decimals = (int)MathRound(-MathLog10(step));
-   if(decimals < 0)   decimals = 0;
-   if(decimals > 8)   decimals = 8;
-   return(NormalizeDouble(lots, decimals));
+   if(step <= 0.0 || v <= 0.0) return(0.0);
+   double lots = MathFloor(v / step + 1e-10) * step;
+   // Always preserve 0.25/0.05 steps: -log10(step) is not a decimal count.
+   // Never round a floored 1.25-lot volume up to 1.30.
+   double normalized = NormalizeDouble(lots, 8);
+   return(normalized > v + 1e-9 ? 0.0 : normalized);
 }
 
 //+------------------------------------------------------------------+
@@ -264,10 +300,10 @@ double NormalizeLots(double v, string symbol)
 //+------------------------------------------------------------------+
 void WriteTextFile(string filename, string content)
 {
-   int h = FileOpen(filename, FILE_WRITE | FILE_TXT);
+   int h = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
    if(h > 0)
    {
-      FileWrite(h, content);
+      FileWriteString(h, content);
       FileClose(h);
    }
 }
@@ -279,7 +315,7 @@ void WriteReceipt(string reqId, long ticket, string state, string reason,
                   double price, double volume, double sl, double tp,
                   string deal)
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen is already sandboxed inside MQL5/Files
    string file = dir + "ABUTRON_NATIVE_RECEIPTS_V2_" + Nonce() + ".txt";
    string json = StringFormat(
       "{\"request_id\":\"%s\",\"ticket\":%d,\"state\":\"%s\",\"reason\":\"%s\",\"login\":%d,\"price\":%.5f,\"volume\":%.2f,\"sl\":%.5f,\"tp\":%.5f,\"deal\":\"%s\",\"ts\":\"%s\"}",
@@ -298,14 +334,16 @@ string Nonce()
 
 string Challenge()
 {
-   return(StringFormat("%d", AccountInfoInteger(ACCOUNT_LOGIN) +
-                       (long)ServerTime()));
+   return(IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN) +
+                          (long)TimeTradeServer()));
 }
 
 string ActivationRevision()
 {
-   return(CryptHash(StringFormat("%s|%d", InpConnectionId,
-                                 InpActivationSeed)));
+   if(InpActivationRevision != "")
+      return(InpActivationRevision);
+   string value = ReadTextFile("ABUTRON_ACTIVATION_REVISION.txt");
+   return(value);
 }
 
 //+------------------------------------------------------------------+
@@ -316,23 +354,22 @@ string ActivationRevision()
 //| reads it on startup if InpActivationSecret is not set explicitly. |
 //| If no secret is available, the EA rejects all signed orders.      |
 //+------------------------------------------------------------------+
+string ReadTextFile(string file)
+{
+   if(!FileIsExist(file)) return("");
+   int h = FileOpen(file, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+   if(h == INVALID_HANDLE) return("");
+   string value = FileReadString(h);
+   FileClose(h);
+   StringTrimLeft(value);
+   StringTrimRight(value);
+   return(value);
+}
+
 string LoadActivationSecret()
 {
-   if(InpActivationSecret != "")
-      return(InpActivationSecret);
-   string file = "MQL5\\Files\\ABUTRON_ACTIVATION_SECRET.txt";
-   if(FileIsExist(file))
-   {
-      int h = FileOpen(file, FILE_READ | FILE_TXT);
-      if(h > 0)
-      {
-         string s = FileReadString(h);
-         FileClose(h);
-         if(StringLen(s) > 0)
-            return(StringTrim(s));
-      }
-   }
-   return("");
+   if(InpActivationSecret != "") return(InpActivationSecret);
+   return(ReadTextFile("ABUTRON_ACTIVATION_SECRET.txt"));
 }
 
 //+------------------------------------------------------------------+
@@ -356,10 +393,13 @@ string HmacSha256Hex(string key, string message)
 {
    // Convert key to byte array
    ushort keyBytes[];
-   int keyLen = StringLen(key);
+   uchar keyUtf8[];
+   int keyCount = StringToCharArray(key, keyUtf8, 0, WHOLE_ARRAY, CP_UTF8);
+   if(keyCount <= 0) return("");
+   int keyLen = keyCount - 1; // exclude trailing NUL
    ArrayResize(keyBytes, keyLen);
    for(int i = 0; i < keyLen; i++)
-      keyBytes[i] = StringGetCharacter(key, i);
+      keyBytes[i] = (ushort)keyUtf8[i];
 
    // If key > 64 bytes, hash it first
    if(keyLen > 64)
@@ -390,10 +430,13 @@ string HmacSha256Hex(string key, string message)
 
    // Convert message to byte array
    ushort msgBytes[];
-   int msgLen = StringLen(message);
+   uchar messageUtf8[];
+   int msgCount = StringToCharArray(message, messageUtf8, 0, WHOLE_ARRAY, CP_UTF8);
+   if(msgCount <= 0) return("");
+   int msgLen = msgCount - 1; // exclude trailing NUL
    ArrayResize(msgBytes, msgLen);
    for(int i = 0; i < msgLen; i++)
-      msgBytes[i] = StringGetCharacter(message, i);
+      msgBytes[i] = (ushort)messageUtf8[i];
 
    // Inner hash: H(ipad || message)
    ushort innerInput[];
@@ -423,82 +466,16 @@ string HmacSha256Hex(string key, string message)
 //+------------------------------------------------------------------+
 string Sha256Hex(ushort input[], int inputLen)
 {
-   uint H[8];
-   H[0]=0x6a09e667; H[1]=0xbb67ae85; H[2]=0x3c6ef372; H[3]=0xa54ff53a;
-   H[4]=0x510e527f; H[5]=0x9b05688c; H[6]=0x1f83d9ab; H[7]=0x5be0cd19;
-
-   uint K[64];
-   K[0]=0x428a2f98;K[1]=0x71374491;K[2]=0xb5c0fbcf;K[3]=0xe9b5dba5;K[4]=0x3956c25b;K[5]=0x59f111f1;K[6]=0x923f82a4;K[7]=0xab1c5ed5;
-   K[8]=0xd807aa98;K[9]=0x12835b01;K[10]=0x243185be;K[11]=0x550c7dc3;K[12]=0x72be5d74;K[13]=0x80deb1fe;K[14]=0x9bdc06a7;K[15]=0xc19bf174;
-   K[16]=0xe49b69c1;K[17]=0xefbe4786;K[18]=0x0fc19dc6;K[19]=0x240ca1cc;K[20]=0x2de92c6f;K[21]=0x4a7484aa;K[22]=0x5cb0a9dc;K[23]=0x76f988da;
-   K[24]=0x983e5152;K[25]=0xa831c66d;K[26]=0xb00327c8;K[27]=0xbf597fc7;K[28]=0xc6e00bf3;K[29]=0xd5a79147;K[30]=0x06ca6351;K[31]=0x14292967;
-   K[32]=0x27b70a85;K[33]=0x2e1b2138;K[34]=0x4d2c6dfc;K[35]=0x53380d13;K[36]=0x650a7354;K[37]=0x766a0abb;K[38]=0x81c2c92e;K[39]=0x92722c85;
-   K[40]=0xa2bfe8a1;K[41]=0xa81a664b;K[42]=0xc24b8b70;K[43]=0xc76c51a3;K[44]=0xd192e819;K[45]=0xd6990624;K[46]=0xf40e3585;K[47]=0x106aa070;
-   K[48]=0x19a4c116;K[49]=0x1e376c08;K[50]=0x2748774c;K[51]=0x34b0bcb5;K[52]=0x391c0cb3;K[53]=0x4ed8aa4a;K[54]=0x5b9cca4f;K[55]=0x682e6ff3;
-   K[56]=0x748f82ee;K[57]=0x78a5636f;K[58]=0x84c87814;K[59]=0x8cc70208;K[60]=0x90befffa;K[61]=0xa4506ceb;K[62]=0xbef9a3f7;K[63]=0xc67178f2;
-
-   // Copy input and pad: 0x80, zeros, 64-bit length
-   ushort bytes[];
-   ArrayResize(bytes, inputLen + 72);
+   if(inputLen < 0 || inputLen > ArraySize(input)) return("");
+   uchar data[], emptyKey[], digest[];
+   ArrayResize(data, inputLen);
    for(int i = 0; i < inputLen; i++)
-      bytes[i] = input[i];
-   bytes[inputLen] = 0x80;
-
-   ulong bitLen = (ulong)inputLen * 8;
-   int padLen = 64 - ((inputLen + 9) % 64);
-   if(padLen == 64) padLen = 0;
-   int totalLen = inputLen + 1 + padLen + 8;
-   ArrayResize(bytes, totalLen);
-
-   // Length bytes MUST be masked to 8 bits each
-   bytes[totalLen - 8] = (ushort)((bitLen >> 56) & 0xFF);
-   bytes[totalLen - 7] = (ushort)((bitLen >> 48) & 0xFF);
-   bytes[totalLen - 6] = (ushort)((bitLen >> 40) & 0xFF);
-   bytes[totalLen - 5] = (ushort)((bitLen >> 32) & 0xFF);
-   bytes[totalLen - 4] = (ushort)((bitLen >> 24) & 0xFF);
-   bytes[totalLen - 3] = (ushort)((bitLen >> 16) & 0xFF);
-   bytes[totalLen - 2] = (ushort)((bitLen >> 8)  & 0xFF);
-   bytes[totalLen - 1] = (ushort)(bitLen         & 0xFF);
-
-   // Process each 512-bit block
-   uint w[64];
-   for(int block = 0; block < totalLen; block += 64)
-   {
-      for(int i = 0; i < 16; i++)
-      {
-         int j = block + i * 4;
-         w[i] = ((uint)bytes[j] << 24) | ((uint)bytes[j+1] << 16) |
-                ((uint)bytes[j+2] << 8) | (uint)bytes[j+3];
-      }
-      for(int i = 16; i < 64; i++)
-      {
-         uint s0 = ((w[i-15] >> 7) | (w[i-15] << 25)) ^ ((w[i-15] >> 18) | (w[i-15] << 14)) ^ (w[i-15] >> 3);
-         uint s1 = ((w[i-2] >> 17) | (w[i-2] << 15)) ^ ((w[i-2] >> 19) | (w[i-2] << 13)) ^ (w[i-2] >> 10);
-         w[i] = w[i-16] + s0 + w[i-7] + s1;
-      }
-      uint a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
-      for(int i = 0; i < 64; i++)
-      {
-         uint S1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7));
-         uint ch = (e & f) ^ (~e & g);
-         uint t1 = h + S1 + ch + K[i] + w[i];
-         uint S0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10));
-         uint maj = (a & b) ^ (a & c) ^ (b & c);
-         uint t2 = S0 + maj;
-         h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
-      }
-      H[0]+=a; H[1]+=b; H[2]+=c; H[3]+=d;
-      H[4]+=e; H[5]+=f; H[6]+=g; H[7]+=h;
-   }
-
+      data[i] = (uchar)(input[i] & 0xFF);
+   int n = CryptEncode(CRYPT_HASH_SHA256, data, emptyKey, digest);
+   if(n != 32) return("");
    string hex = "";
-   for(int i = 0; i < 8; i++)
-   {
-      hex += StringFormat("%02x", (ushort)(H[i] >> 24));
-      hex += StringFormat("%02x", (ushort)(H[i] >> 16));
-      hex += StringFormat("%02x", (ushort)(H[i] >> 8));
-      hex += StringFormat("%02x", (ushort)(H[i]));
-   }
+   for(int j = 0; j < 32; j++)
+      hex += StringFormat("%02x", (uint)digest[j]);
    return(hex);
 }
 
@@ -530,12 +507,27 @@ int HexVal(ushort c)
 //+------------------------------------------------------------------+
 //| Minimal JSON helpers (no external libs)                          |
 //+------------------------------------------------------------------+
+int JsonValueStart(string json, string key)
+{
+   string marker = "\"" + key + "\"";
+   int p = StringFind(json, marker);
+   if(p < 0) return(-1);
+   p += StringLen(marker);
+   int n = StringLen(json);
+   while(p < n && (StringSubstr(json, p, 1) == " " ||
+                    StringSubstr(json, p, 1) == "\t")) p++;
+   if(p >= n || StringSubstr(json, p, 1) != ":") return(-1);
+   p++;
+   while(p < n && (StringSubstr(json, p, 1) == " " ||
+                    StringSubstr(json, p, 1) == "\t")) p++;
+   return(p);
+}
+
 string JsonStr(string json, string key)
 {
-   string pat = "\"" + key + "\":\"";
-   int pos = StringFind(json, pat);
-   if(pos < 0) return("");
-   pos += StringLen(pat);
+   int pos = JsonValueStart(json, key);
+   if(pos < 0 || StringSubstr(json, pos, 1) != "\"") return("");
+   pos++;
    int end = StringFind(json, "\"", pos);
    if(end < 0) return("");
    return(StringSubstr(json, pos, end - pos));
@@ -543,18 +535,19 @@ string JsonStr(string json, string key)
 
 double JsonNum(string json, string key)
 {
-   string pat = "\"" + key + "\":";
-   int pos = StringFind(json, pat);
+   int pos = JsonValueStart(json, key);
    if(pos < 0) return(0.0);
-   pos += StringLen(pat);
    string num = "";
    while(pos < StringLen(json))
    {
-      char c = StringGetCharacter(json, pos);
-      if((c >= '0' && c <= '9') || c == '.' || c == '-')
-         num += c, pos++;
+      ushort c = StringGetCharacter(json, pos);
+      if((c >= '0' && c <= '9') || c == '.' || c == '-' ||
+         c == 'e' || c == 'E' || c == '+')
+      {
+         num += StringSubstr(json, pos, 1);
+         pos++;
+      }
       else break;
    }
    return(StringToDouble(num));
 }
-//+------------------------------------------------------------------+
