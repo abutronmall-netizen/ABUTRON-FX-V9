@@ -58,7 +58,9 @@ src/abutron/
 ├── workers/             mt5_worker, dispatcher_worker, reconcile_worker
 └── portal/              FastAPI app + client/admin/command templates
 mql5/ApexNativeWriter.mq5   native single-writer EA
-vendor/abutron-apex/     VENDORED authoritative APEX 1.1.0 source
+vendor/abutron-apex/     OPTIONAL vendored APEX 1.1.0 source
+                         (clone via scripts/link_all.sh --vendor; the
+                         platform runs without it on NexusBrain + apex/)
   apex11/apex/           regime/trend/meanreversion/breakout/portfolio/risk
                          agents, engine, covariance, memory, llm advisor
   apex11/abutron_replacement/  signal-only bridge + candidate_contract +
@@ -67,11 +69,14 @@ vendor/abutron-apex/     VENDORED authoritative APEX 1.1.0 source
 deploy/                   systemd units + install script
 ```
 
-## 2a. Decision engine — the authoritative vendored APEX
+## 2a. Decision engine — APEX bridge (optional vendor) + NexusBrain
 
-The decision engine is **not** a reconstruction: the real APEX 1.1.0 source
-is vendored under `vendor/abutron-apex/` and driven through
-`abutron/apex_integration.py`. The flow per closed M5 candle:
+The decision engine is **not** a reconstruction: when the real APEX 1.1.0
+source is vendored under `vendor/abutron-apex/` (clone via
+`scripts/link_all.sh --vendor`), it is driven through
+`abutron/apex_integration.py`. The vendor is **optional** — without it the
+platform runs on the NexusBrain + `abutron/apex/engine.py`, and
+`ApexIntegration` degrades gracefully. The flow per closed M5 candle:
 
 1. **Feed** — native MT5 exports are validated by the feed-quality contract
    (closed candle, provenance nonce, geometry).

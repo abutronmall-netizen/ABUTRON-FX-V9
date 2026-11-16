@@ -2,10 +2,11 @@
 
 A fully automated, AI/ML-driven trading platform for **FP Markets** and
 **Deriv**, running **MetaTrader 5 on Ubuntu via Wine**. It integrates the
-authoritative **ABUTRON / APEX 1.1.0** decision engine (vendored from
-`abutronmall-netizen/abutron-apex`) with native broker single-writer
-execution, broker-native reconciliation, and three operator surfaces
-(client, admin, command center).
+authoritative **ABUTRON / APEX 1.1.0** decision engine (optionally vendored
+from `abutronmall-netizen/abutron-apex` via `scripts/link_all.sh --vendor`;
+the platform runs without it on the NexusBrain + `apex/engine.py`) with
+native broker single-writer execution, broker-native reconciliation, and
+three operator surfaces (client, admin, command center).
 
 > **Evidence discipline** — a green portal, an active timer, a published
 > BUY/SELL, or a requested ON flag is **not** an accepted trade. The only
@@ -14,8 +15,11 @@ execution, broker-native reconciliation, and three operator surfaces
 
 ## What's included
 
-- **Real APEX 1.1.0 decision engine** — vendored from the authoritative
-  `abutron-apex` repository (`vendor/abutron-apex/`). A portfolio-weight
+- **Real APEX 1.1.0 decision engine** — optionally vendored from the
+  authoritative `abutron-apex` repository (`vendor/abutron-apex/`, cloned
+  by `scripts/link_all.sh --vendor`; absent by default — the platform
+  runs on the NexusBrain + `apex/engine.py` and `ApexIntegration`
+  degrades gracefully). A portfolio-weight
   risk governor: RegimeAgent, Trend/MeanReversion/Breakout/Carry signal
   agents, PortfolioAgent (regime-conditional trust + online reputation),
   RiskAgent (per-instrument cap, asset-class cap, correlation clusters,
@@ -187,14 +191,17 @@ cp .env.example .env
 .venv/bin/python -m pytest tests/ -v
 ```
 
-145 tests covering feed quality, the **NexusBrain** decision brain
+210+ tests covering feed quality, the **NexusBrain** decision brain
 (neural backprop, ensemble uncertainty, conviction-based sizing,
 walk-forward training, engine integration), decision logic, account auth,
 risk sizing/caps, single-writer execution, client OFF, order flow +
 footprint, reconciliation, the **real APEX integration** (signal bridge
-→ advisory review → READY candidate), and the **backtest / forward-test /
-training** pipeline. The vendored APEX source also ships its own **210-test**
-suite (run from `vendor/abutron-apex/apex11`).
+→ advisory review → READY candidate), the **backtest / forward-test /
+training** pipeline, the enriched causal signal bundle (all nine feature
+slots live), the persistent loss-pattern guard, market-data `.part-*`
+assembly, runtime rules, and result replay. When the optional vendored
+APEX source is linked (`scripts/link_all.sh --vendor`), it ships its own
+test suite under `vendor/abutron-apex/apex11`.
 
 ## Deploying to Ubuntu
 
@@ -206,6 +213,14 @@ sudo systemctl start abutron-mt5-worker@<connection_id>
 
 The installer sets up Wine, the Python environment, data directories, and
 all systemd units. Native evidence (receipts, history) is root-owned.
+After install, link the training datasets on the host:
+
+```bash
+bash scripts/link_all.sh   # market-data + trade-history -> data/links/
+```
+
+See [`docs/INSTALL_AND_LINK.md`](docs/INSTALL_AND_LINK.md) for the full
+install/link/train/optimize workflow.
 
 ## Backtest & forward test
 
@@ -298,7 +313,36 @@ skipped — trade selection for win rate, not a risk gate.
 
 ## Training the brain
 
-Train the NexusBrain on historical candles and save the model:
+Link the datasets first (`bash scripts/link_all.sh`), then train the
+**unified master brain** (all 26 symbols, one 49-dim model) in four
+stages — offline pooled training, causal per-bar online training, real
+trade-history learning, and paper-result replay:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m scripts.train_unified \
+    --data data/links/market-data --timeframe M5 \
+    --epochs 12 --out data/brains/unified_m5
+PYTHONPATH=src .venv/bin/python -m scripts.train_online \
+    --data data/links/market-data --timeframe M5 \
+    --in data/brains/unified_m5 --out data/brains/unified_m5
+PYTHONPATH=src .venv/bin/python -m scripts.train_from_trades \
+    --trades data/links/trade-history --data data/links/market-data \
+    --mode online --in data/brains/unified_m5 --out data/brains/unified_m5
+PYTHONPATH=src .venv/bin/python -m scripts.replay_results \
+    --results data/results/paper_trades.json \
+    --in data/brains/unified_m5 --out data/brains/unified_m5
+```
+
+Every stage uses the same causal signal bundle the live engine sees
+(`brain.signals`): order-flow, footprint, regime, and agent/Gemma scores
+are all populated (true tick/depth when linked via `ABUTRON_TICK_TRADES`
+/ `ABUTRON_DEPTH_SNAPSHOTS`, otherwise explicitly-labelled OHLCV
+proxies). Losses update the persistent `LossPatternGuard`, which vetoes
+repeated losing setups. Optimized sniper/trailing execution rules are
+kept separate from neural weights and loaded from
+`ABUTRON_RUNTIME_RULES` (see `docs/INSTALL_AND_LINK.md` §5).
+
+For a single-symbol walk-forward model, the legacy trainer still works:
 
 ```bash
 # single walk-forward split

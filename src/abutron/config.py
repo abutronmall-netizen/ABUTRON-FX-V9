@@ -28,6 +28,16 @@ STATE_ROOT = os.path.join(DATA_ROOT, "state")              # reservations / lock
 PORTAL_DB = os.path.join(DATA_ROOT, "portal.db")
 ENGINE_DB = os.path.join(DATA_ROOT, "engine.db")
 
+# External, non-secret datasets linked by scripts/link_all.sh. They are never
+# committed to this repository; only the trained brain artifact is versioned.
+MARKET_DATA_DIR = os.getenv(
+    "ABUTRON_MARKET_DATA_DIR", os.path.join(DATA_ROOT, "links", "market-data"))
+TRADE_HISTORY_DIR = os.getenv(
+    "ABUTRON_TRADE_HISTORY_DIR", os.path.join(DATA_ROOT, "links", "trade-history"))
+TICK_TRADES_PATH = os.getenv("ABUTRON_TICK_TRADES", "")
+DEPTH_SNAPSHOTS_PATH = os.getenv("ABUTRON_DEPTH_SNAPSHOTS", "")
+RUNTIME_RULES_PATH = os.getenv("ABUTRON_RUNTIME_RULES", "")
+
 for _d in (DATA_ROOT, NATIVE_ROOT, DECISIONS_ROOT, RECEIPTS_ROOT,
            LEDGER_ROOT, STATE_ROOT):
     os.makedirs(_d, exist_ok=True)
@@ -52,12 +62,15 @@ BRAIN_MAX_CONVICTION = float(os.getenv("ABUTRON_BRAIN_MAX_CONVICTION", "1.0"))
 BRAIN_SIZE_CAP = float(os.getenv("ABUTRON_BRAIN_SIZE_CAP", "1.0"))
 BRAIN_MC_SAMPLES = int(os.getenv("ABUTRON_BRAIN_MC_SAMPLES", "16"))
 BRAIN_ENSEMBLE_SEED = int(os.getenv("ABUTRON_BRAIN_SEED", "0"))
+# The checked-in trained unified master brain is the default attachment.
+# Override with ABUTRON_BRAIN_DIR for a separately mounted checkpoint.
 BRAIN_MODEL_DIR = os.getenv("ABUTRON_BRAIN_DIR",
-                            os.path.join(DATA_ROOT, "brain"))
+                            os.path.join(DATA_ROOT, "brains", "unified_m5"))
 
-# LIVE trading is ENABLED. This platform is built for aggressive DEMO + LIVE
-# trading on both brokers (Deriv + FP Markets). Fail-closed LIVE gating has
-# been removed per the new design directive.
+# LIVE trading is ENABLED by default (aggressive-mode design directive:
+# DEMO and LIVE both trade once a broker session is CONNECTED). Set
+# ABUTRON_LIVE_TRADING_ENABLED=false to gate LIVE connects behind
+# LIVE_NOT_APPROVED. This matches README.md and tests/test_client_connect.py.
 LIVE_TRADING_ENABLED = os.getenv("ABUTRON_LIVE_TRADING_ENABLED", "true").lower() in (
     "1", "true", "yes")
 

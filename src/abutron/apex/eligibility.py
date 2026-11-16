@@ -450,18 +450,32 @@ def load_symbol_brain(
     """
     from ..brain import NexusBrain
     from ..brain.trainer import load_brain
+    from ..brain.unified import (SYMBOL_UNIVERSE, load_unified,
+                                 unified_brain_dir)
 
     brain_root = brain_root or os.path.join(DATA_ROOT, "brains")
     brain_dir = brain_dir_for(symbol, brain_root)
-    if not os.path.isdir(brain_dir):
+    if os.path.isdir(brain_dir):
+        try:
+            ensemble = load_brain(brain_dir, mc_samples=mc_samples)
+            brain = NexusBrain(ensemble=ensemble, **(brain_kwargs or {}))
+            brain.ensemble.mc_samples = mc_samples
+            return brain
+        except Exception:
+            pass
+    # "All brains work as one brain": the trained unified checkpoint is the
+    # fallback for known symbols when no legacy per-symbol checkpoint exists.
+    if symbol not in SYMBOL_UNIVERSE:
         return None
     try:
-        ensemble = load_brain(brain_dir, mc_samples=mc_samples)
-        brain = NexusBrain(ensemble=ensemble, **(brain_kwargs or {}))
-        brain.ensemble.mc_samples = mc_samples
-        return brain
+        brain = load_unified(unified_brain_dir(brain_root),
+                             mc_samples=mc_samples)
+        if brain is not None:
+            brain.ensemble.mc_samples = mc_samples
+            return brain
     except Exception:
-        return None
+        pass
+    return None
 
 
 def default_brain_root() -> str:

@@ -5,19 +5,121 @@
   "timeframe": "M5",
   "members": 3,
   "symbols": 26,
-  "online_updates": 163585,
+  "symbol_universe": ["AUDUSD.r", "EURUSD.r", "GBPUSD.r", "NZDUSD.r", "USDCHF.r", "USDJPY.r", "XAUUSD.r", "BTCUSD", "XTIUSD", "US30", "US500", "US100", "GER40", "Boom 1000 Index.0", "Boom 600 Index.0", "Boom 300 Index.0", "Boom 150 Index.0", "Crash 1000 Index.0", "Crash 600 Index.0", "Crash 300 Index.0", "Crash 150 Index.0", "Volatility 10 Index.0", "Volatility 25 Index.0", "Volatility 50 Index.0", "Volatility 75 Index.0", "Volatility 100 Index.0"],
+  "feature_vector": "49-dim (23 market features + 26 symbol one-hot)",
+  "feature_version": "nexus_v1",
+  "signal_data_version": "signals_v2_causal_proxy_v1",
+  "online_updates": 163912,
   "online_enabled": true,
-  "nn_online_lr": 0.001,
+  "nn_online_lr_final": 0.0005,
   "training_stages": [
-    "offline_base: train_unified.py --epochs 80 (162589 samples, Deriv+FP market data)",
-    "online_bar_training: train_online.py (161835 causal per-bar updates)",
-    "trade_history_online: train_from_trades.py --mode online (875 trades, 0 skipped)",
-    "trade_history_offline: train_from_trades.py --mode offline --epochs 20 (875 trades, 0 skipped, final_loss=0.6815)"
+    {
+      "stage": "offline_base",
+      "command": "scripts.train_unified --data data/links/market-data --timeframe M5 --epochs 12 --fresh --out data/brains/unified_m5",
+      "candles_pooled": 162615,
+      "samples": 162589,
+      "n_train": 130088,
+      "n_val": 32501,
+      "val_accuracy": 0.5803,
+      "final_loss": 0.6478,
+      "calibrated": true,
+      "all_signal_slots_live": true,
+      "report": "report.json + feature_audit.json + signal_sources.json"
+    },
+    {
+      "stage": "online_bar_training",
+      "command": "scripts.train_online --data data/links/market-data --timeframe M5 --in data/brains/unified_m5 --out data/brains/unified_m5",
+      "updates": 161835,
+      "lr": 0.001,
+      "stride": 1,
+      "elapsed_s": 291.7,
+      "report": "online_report.json"
+    },
+    {
+      "stage": "trade_history_online",
+      "command": "scripts.train_from_trades --trades data/links/trade-history --data data/links/market-data --mode online --in data/brains/unified_m5 --out data/brains/unified_m5",
+      "trades_loaded": 875,
+      "trained": 875,
+      "skipped": 0,
+      "lr": 0.001,
+      "elapsed_s": 27.5,
+      "report": "trade_report_online.json"
+    },
+    {
+      "stage": "trade_history_offline",
+      "command": "scripts.train_from_trades --trades data/links/trade-history --data data/links/market-data --mode offline --epochs 20 --in data/brains/unified_m5 --out data/brains/unified_m5",
+      "trades_loaded": 875,
+      "weighted_samples": 1381,
+      "skipped": 0,
+      "lr": 0.001,
+      "epochs": 20,
+      "final_loss": 0.7135,
+      "elapsed_s": 29.2,
+      "report": "trade_report_offline.json"
+    },
+    {
+      "stage": "paper_result_replay_online",
+      "command": "scripts.replay_results --results <backtest AUDUSD.r export, 327 rows> --in data/brains/unified_m5 --out data/brains/unified_m5 --mode online",
+      "rows_loaded": 327,
+      "rows_trained": 327,
+      "rows_skipped": {"no_features": 0, "unknown_symbol": 0, "bad_vector": 0},
+      "lr": 0.0005,
+      "final_loss": 0.4227,
+      "elapsed_s": 0.47,
+      "report": "result_replay_report.json",
+      "note": "Export came from backtest.run --broker fpmarkets --symbol AUDUSD.r --export-trades BEFORE the replay, so the replayed rows were unseen by the brain at export time."
+    }
   ],
+  "loss_guard_final": {"version": "loss_guard_v1", "active_loss_patterns": 548, "total_patterns": 582, "total_losses": 1178, "total_wins": 899, "blocked_during_training": 0},
   "data_sources": {
-    "market_data": "abutronmall-netizen/market-data @ 8a08ecf (Deriv 2026-10-22..11-15, FP-Markets 2026-10-28..11-13)",
-    "trade_history": "abutronmall-netizen/abutron-pay @ trade-history-2026-11-15 (9 broker/account MT5 deal logs, 875 closed trades)"
+    "market_data": "abutronmall-netizen/market-data @ 8a08ecf5bee5f2e28c42063bc643bb902631fe8b (Deriv M5 121160 candles 2026-10-22..11-15, FP-Markets M5 41455 candles 2026-10-28..11-13; .part-* chunks assembled by backtest/loader.py)",
+    "trade_history": "abutronmall-netizen/abutron-pay @ trade-history-2026-11-15 cafed3e83f773f5391dff17e6617439f98d0f644 (9 broker/account MT5 deal logs, 875 closed universe-symbol trades)"
   },
-  "paper_trade_aggregate": "7797 trades across 26 symbols, total PnL +9892.71 on $1000/symbol, positive expectancy (pf>2) on all FX symbols",
-  "feature_vector": "49-dim (23 market features + 26 symbol one-hot)"
+  "signal_provenance": {
+    "orderflow_footprint": "OHLCV proxies (close-location volume, wick absorption, volume-at-price histogram) — NO true tick/depth evidence was linked for this training run; proxies are explicitly labelled in signal_sources.json",
+    "agent_scores": "deterministic APEX-style scores — the optional Gemma gateway was NOT used for this training run",
+    "regime": "causal per-bar regime detector (no lookahead)"
+  },
+  "paper_eval_aggregate": {
+    "evaluated_at": "2026-11-16",
+    "command": "abutron.backtest.run --data data/links/market-data --broker {fpmarkets|deriv} --symbol <each of 26> --timeframe M5 --equity 10000 --risk-pct 0.05 --brain data/brains/unified_m5",
+    "note": "Post-training paper evaluation with the FINAL brain (after all 5 stages). All symbols are in-sample w.r.t. stages 1-3 (same candles/trades); AUDUSD.r is additionally in-sample w.r.t. stage 4 (327 replayed rows). The honest out-of-sample measure remains the stage-1 held-out val_accuracy=0.580. Backtest learning was isolated (deep copy) — evaluation did not modify the checkpoint. Inference uses MC-dropout (16 samples), so paper-trade counts/PnL vary slightly run to run; figures below are from a single pinned evaluation run.",
+
+    "symbols": 26,
+    "symbols_positive": 26,
+    "trades": 9267,
+    "wins": 4448,
+    "win_rate": 0.48,
+    "total_pnl": 231517.83,
+    "equity_per_symbol": 10000.0,
+    "loss_guard_setups_vetoed": 71000,
+    "per_symbol": [
+      {"symbol": "AUDUSD.r", "trades": 133, "win_rate": 85.7, "profit_factor": 25.43, "pnl": 7696.66, "max_dd_pct": 0.27},
+      {"symbol": "EURUSD.r", "trades": 349, "win_rate": 45.3, "profit_factor": 3.76, "pnl": 7969.24, "max_dd_pct": 1.07},
+      {"symbol": "GBPUSD.r", "trades": 358, "win_rate": 46.4, "profit_factor": 3.83, "pnl": 8517.62, "max_dd_pct": 1.01},
+      {"symbol": "NZDUSD.r", "trades": 319, "win_rate": 45.1, "profit_factor": 4.09, "pnl": 8151.36, "max_dd_pct": 1.06},
+      {"symbol": "USDCHF.r", "trades": 386, "win_rate": 49.0, "profit_factor": 4.36, "pnl": 10282.6, "max_dd_pct": 1.4},
+      {"symbol": "USDJPY.r", "trades": 337, "win_rate": 43.0, "profit_factor": 3.43, "pnl": 7129.54, "max_dd_pct": 1.22},
+      {"symbol": "XAUUSD.r", "trades": 319, "win_rate": 49.8, "profit_factor": 4.53, "pnl": 8851.38, "max_dd_pct": 0.66},
+      {"symbol": "BTCUSD", "trades": 344, "win_rate": 50.3, "profit_factor": 4.36, "pnl": 9345.13, "max_dd_pct": 0.79},
+      {"symbol": "XTIUSD", "trades": 426, "win_rate": 48.8, "profit_factor": 4.58, "pnl": 11791.86, "max_dd_pct": 0.92},
+      {"symbol": "US30", "trades": 279, "win_rate": 45.5, "profit_factor": 3.47, "pnl": 6379.73, "max_dd_pct": 1.39},
+      {"symbol": "US500", "trades": 342, "win_rate": 48.0, "profit_factor": 3.91, "pnl": 8599.31, "max_dd_pct": 1.34},
+      {"symbol": "US100", "trades": 251, "win_rate": 51.0, "profit_factor": 4.54, "pnl": 7002.94, "max_dd_pct": 0.88},
+      {"symbol": "GER40", "trades": 296, "win_rate": 42.6, "profit_factor": 3.14, "pnl": 5876.3, "max_dd_pct": 1.06},
+      {"symbol": "Boom 1000 Index.0", "trades": 48, "win_rate": 68.8, "profit_factor": 10.15, "pnl": 2318.36, "max_dd_pct": 0.36},
+      {"symbol": "Boom 600 Index.0", "trades": 230, "win_rate": 56.1, "profit_factor": 5.13, "pnl": 6611.56, "max_dd_pct": 0.79},
+      {"symbol": "Boom 300 Index.0", "trades": 899, "win_rate": 50.3, "profit_factor": 4.08, "pnl": 21753.23, "max_dd_pct": 1.22},
+      {"symbol": "Boom 150 Index.0", "trades": 2, "win_rate": 100.0, "profit_factor": null, "pnl": 453.72, "max_dd_pct": 0.0, "note": "profit factor n/a (2 trades, all wins)"},
+      {"symbol": "Crash 1000 Index.0", "trades": 321, "win_rate": 69.8, "profit_factor": 8.99, "pnl": 11895.77, "max_dd_pct": 0.7},
+      {"symbol": "Crash 600 Index.0", "trades": 2, "win_rate": 100.0, "profit_factor": null, "pnl": 435.84, "max_dd_pct": 0.0, "note": "profit factor n/a (2 trades, all wins)"},
+      {"symbol": "Crash 300 Index.0", "trades": 79, "win_rate": 50.6, "profit_factor": 3.5, "pnl": 2585.23, "max_dd_pct": 3.05},
+      {"symbol": "Crash 150 Index.0", "trades": 1, "win_rate": 100.0, "profit_factor": null, "pnl": 520.08, "max_dd_pct": 0.0, "note": "profit factor n/a (1 trade)"},
+      {"symbol": "Volatility 10 Index.0", "trades": 590, "win_rate": 41.4, "profit_factor": 3.1, "pnl": 11796.02, "max_dd_pct": 1.3},
+      {"symbol": "Volatility 25 Index.0", "trades": 822, "win_rate": 42.8, "profit_factor": 3.55, "pnl": 17235.06, "max_dd_pct": 1.28},
+      {"symbol": "Volatility 50 Index.0", "trades": 945, "win_rate": 47.0, "profit_factor": 3.92, "pnl": 22791.95, "max_dd_pct": 1.4},
+      {"symbol": "Volatility 75 Index.0", "trades": 3, "win_rate": 66.7, "profit_factor": 5.9, "pnl": 398.62, "max_dd_pct": 0.81},
+      {"symbol": "Volatility 100 Index.0", "trades": 1186, "win_rate": 44.0, "profit_factor": 3.42, "pnl": 25128.72, "max_dd_pct": 0.72}
+    ]
+  }
 }

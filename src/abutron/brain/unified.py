@@ -7,7 +7,7 @@ symbol through one model.
 
 **How it works.** The per-symbol brains are equity- and symbol-agnostic
 on the *input* side: ``build_feature_vector`` consumes only normalised
-price / order-flow / footprint / regime features, so the same 22-dim
+price / order-flow / footprint / regime features, so the same 23-dim
 feature layout describes every instrument. The only thing missing for a
 single cross-symbol model is *which* symbol the features belong to. We
 add a **symbol one-hot** to the feature vector, so one pooled ensemble
@@ -42,6 +42,7 @@ from .neural import MLP, RNG
 from .ensemble import BrainEnsemble, EnsembleMember, build_ensemble
 from .features import N_FEATURES, FEATURE_VERSION, build_feature_vector, \
     returns_from_closes
+from .signals import SIGNAL_DATA_VERSION
 from .brain import NexusBrain
 from .trainer import TrainingSample, TrainReport, _make_labels
 
@@ -143,8 +144,13 @@ class UnifiedBrain(NexusBrain):
     VERSION = "unified_v1"
 
     def __init__(self, *, ensemble: Optional[BrainEnsemble] = None,
-                 symbol_ids: Sequence[str] = SYMBOL_UNIVERSE, **kwargs):
+                 symbol_ids: Sequence[str] = SYMBOL_UNIVERSE,
+                 signal_sources: Optional[Dict[str, Any]] = None,
+                 feature_audit: Optional[Dict[str, Any]] = None,
+                 **kwargs):
         self.symbol_ids = list(symbol_ids)
+        self.signal_sources = dict(signal_sources or {})
+        self.feature_audit = dict(feature_audit or {})
         super().__init__(ensemble=ensemble, **kwargs)
         if self.ensemble is None or not self.ensemble.members:
             self.ensemble = build_unified_ensemble(self.symbol_ids)
@@ -173,8 +179,20 @@ class UnifiedBrain(NexusBrain):
             agent_scores=agent_scores, universe=self.symbol_ids)
         x = np.asarray([feats], dtype=float)
         pred = self.ensemble.predict(x)
-        # Aggressive mode: commit to a direction on any edge (no abstention).
+        # Aggressive mode: commit to a direction on any edge (no abstention),
+        # except for an explicitly recorded, still-losing feature pattern.
         direction = pred.direction
+        blocked, guard_reason = self.loss_guard.should_block(
+            symbol=symbol, direction=direction, regime=regime, features=feats)
+        if blocked:
+            from .brain import BrainProposal
+            return BrainProposal(
+                symbol=symbol, direction="HOLD", conviction=0.0,
+                confidence=0.0, uncertainty=1.0, regime=regime,
+                model_agreement=dict(pred.votes), position_size=0.0,
+                blockers=[guard_reason],
+                rationale="LOSS_PATTERN_REPEAT: unified brain vetoed a repeat loss setup",
+                brain_version=self.VERSION, trained=True, features=list(feats))
         conviction = min(pred.conviction, self.max_conviction)
         position_size = float(min(self.size_cap, 0.25 + 0.75 * conviction))
         rationale = (f"unified ensemble={pred.members} dir={direction} "
@@ -224,6 +242,21 @@ class UnifiedBrain(NexusBrain):
         return self.online_learn_features(feats, realised_return,
                                           symbol=symbol)
 
+    def unified_features_from_market(self, market_features: Sequence[float],
+                                     symbol: str) -> List[float]:
+        """Append this brain's symbol one-hot to a 23-dim market vector."""
+        market = [float(v) for v in list(market_features)[:N_FEATURES]]
+        if len(market) < N_FEATURES:
+            market += [0.0] * (N_FEATURES - len(market))
+        return market + _one_hot(symbol, self.symbol_ids)
+
+    def online_learn_market_features(self, market_features: Sequence[float],
+                                     realised_return: float, *, symbol: str = ""
+                                     ) -> Dict[str, Any]:
+        """Online gradient step from a precomputed causal market vector."""
+        feats = self.unified_features_from_market(market_features, symbol)
+        return self.online_learn_features(feats, realised_return, symbol=symbol)
+
     def _fallback_unified(self, symbol: str, regime: str):
         # Deterministic rule edge (same as NexusBrain._fallback) but routed
         # through the unified feature builder so behaviour is consistent.
@@ -236,7 +269,18 @@ class UnifiedBrain(NexusBrain):
             edge = float(max(-1.0, min(1.0, edge)))
             conviction = min(1.0, abs(edge))
             direction = "BUY" if edge >= 0 else "SELL"
+            blocked, guard_reason = self.loss_guard.should_block(
+                symbol=symbol, direction=direction, regime=regime,
+                features=feats)
             from .brain import BrainProposal
+            if blocked:
+                return BrainProposal(
+                    symbol=symbol, direction="HOLD", conviction=0.0,
+                    confidence=0.0, uncertainty=1.0, regime=regime,
+                    position_size=0.0, blockers=[guard_reason],
+                    rationale="LOSS_PATTERN_REPEAT: fallback vetoed a repeat loss setup",
+                    brain_version=self.VERSION, trained=False,
+                    features=list(feats))
             return BrainProposal(
                 symbol=symbol, direction=direction, conviction=conviction,
                 confidence=0.5 + 0.4 * conviction,
@@ -304,12 +348,22 @@ def prepare_unified_samples(
     """
     samples: List[TrainingSample] = []
     for sym, d in symbol_data.items():
-        samples.extend(_symbol_samples(
-            d["closes"], d.get("highs", d["closes"]),
-            d.get("lows", d["closes"]),
-            orderflow=d.get("orderflow"), footprint=d.get("footprint"),
-            regimes=d.get("regimes"), agent_scores=d.get("agent_scores"),
-            horizon=horizon, symbol=sym, universe=universe))
+        market_features = d.get("market_features")
+        if market_features:
+            # Generated by brain.signals.build_signal_bundle: causal, complete
+            # signal slots, and O(n) instead of rebuilding a full window per bar.
+            onehot = _one_hot(sym, universe)
+            labels = _make_labels(d["closes"], horizon)
+            for feats, label in zip(market_features, labels):
+                samples.append(TrainingSample(
+                    features=list(feats)[:N_FEATURES] + onehot, label=label))
+        else:
+            samples.extend(_symbol_samples(
+                d["closes"], d.get("highs", d["closes"]),
+                d.get("lows", d["closes"]),
+                orderflow=d.get("orderflow"), footprint=d.get("footprint"),
+                regimes=d.get("regimes"), agent_scores=d.get("agent_scores"),
+                horizon=horizon, symbol=sym, universe=universe))
     return samples
 
 
@@ -392,24 +446,36 @@ def save_unified(brain_dir: str, brain: UnifiedBrain,
                  report: Optional[TrainReport] = None) -> str:
     """Persist the unified brain (ensemble + symbol universe + report)."""
     os.makedirs(brain_dir, exist_ok=True)
+    path = os.path.join(brain_dir, "nexus_brain.json")
+    previous: Dict[str, Any] = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                previous = json.load(fh)
+        except (OSError, ValueError):
+            previous = {}
     payload = {
         "unified": True,
         "feature_version": FEATURE_VERSION,
+        "signal_data_version": SIGNAL_DATA_VERSION,
         "n_features": n_unified_features(brain.symbol_ids),
         "market_features": N_FEATURES,
         "symbol_ids": list(brain.symbol_ids),
+        "signal_sources": brain.signal_sources or previous.get("signal_sources", {}),
+        "feature_audit": brain.feature_audit or previous.get("feature_audit", {}),
         "members": [{"name": m.name, "kind": m.kind, "weight": m.weight,
                      "state": m.model.state_dict()}
                     for m in brain.ensemble.members],
         "calibration": {"a": brain.ensemble._cal_a,
                         "b": brain.ensemble._cal_b,
                         "fitted": brain.ensemble._fitted},
-        "report": report.to_dict() if report else None,
+        "report": report.to_dict() if report else previous.get("report"),
         "online": {"updates": brain.online_updates,
                    "enabled": brain.online_enabled,
                    "nn_lr": brain.nn_online_lr},
+        "trade_memory": brain.trade_memory.state_dict(),
+        "loss_guard": brain.loss_guard.state_dict(),
     }
-    path = os.path.join(brain_dir, "nexus_brain.json")
     with open(path, "w") as fh:
         json.dump(payload, fh)
     return path
@@ -444,8 +510,14 @@ def load_unified(brain_dir: str, *, mc_samples: int = 16
         brain = UnifiedBrain(
             ensemble=ens, symbol_ids=symbol_ids,
             online_enabled=_online.get("enabled", True),
-            nn_online_lr=_online.get("nn_lr", 1e-3))
+            nn_online_lr=_online.get("nn_lr", 1e-3),
+            signal_sources=payload.get("signal_sources") or {},
+            feature_audit=payload.get("feature_audit") or {})
         brain.online_updates = int(_online.get("updates", 0))
+        brain.load_memory_state({
+            "trade_memory": payload.get("trade_memory") or {},
+            "loss_guard": payload.get("loss_guard") or {},
+        })
         return brain
     except Exception:
         return None

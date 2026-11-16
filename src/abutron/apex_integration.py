@@ -22,7 +22,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import DATA_ROOT, RISKGUARD_ENABLED
+from .config import (BRAIN_MODEL_DIR, DATA_ROOT, DEPTH_SNAPSHOTS_PATH,
+                      GEMMA_ENABLED, RISKGUARD_ENABLED, TICK_TRADES_PATH)
 from .events import EventLog, make_event
 from .ops.portal_ops import portal_ops
 from .risk.riskguard import RiskGuard, PortfolioState, TradeProposal
@@ -31,6 +32,10 @@ from .brain import make_brain, default_ensemble
 from .config import (BRAIN_ENSEMBLE_SEED, BRAIN_MC_SAMPLES, BRAIN_SIZE_CAP)
 from .selflearn.features import build_feature_vector
 from .apex.eligibility import SymbolEligibility
+from .feeds.feed_quality import Candle
+from .brain.signals import (load_depth_signals, load_tick_trades,
+                            latest_signal_features, features_for_brain)
+from .brain.unified import load_unified, save_unified
 
 # ---------------------------------------------------------------------------
 # Locate + import the vendored APEX package.
@@ -136,15 +141,30 @@ class ApexIntegration:
         # The NexusBrain — the AI calculation authority (lot sizing, entry
         # bias). Owned here so settlement (reconciler) can feed trade
         # outcomes back for self-learning.
-        self.brain = make_brain(
-            ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
-            size_cap=BRAIN_SIZE_CAP)
+        # Attach the trained unified master brain when available. This is the
+        # same checkpoint used by ApexEngine and the backtest; otherwise fall
+        # back to an untrained deterministic ensemble.
+        self.brain = load_unified(BRAIN_MODEL_DIR)
+        if self.brain is None:
+            self.brain = make_brain(
+                ensemble=default_ensemble(seed=BRAIN_ENSEMBLE_SEED),
+                size_cap=BRAIN_SIZE_CAP)
         self.brain.ensemble.mc_samples = BRAIN_MC_SAMPLES
+        self.brain.online_enabled = True
+        self._brain_save_interval = 50
+        self._brain_updates = 0
         # Equity-aware symbol eligibility: trade only the symbols the
         # client equity can carry (min-lot risk <= per-trade risk budget).
         self.eligibility = SymbolEligibility()
         # one-bar causal lag per symbol: (features, scores, regime, prev_close)
         self._pending: Dict[str, Dict[str, Any]] = {}
+        # Bounded candle history for causal OHLCV signal proxies. Tick/depth
+        # evidence, when linked, overrides the proxies in build_signal_bundle.
+        self._signal_hist: Dict[str, List[Candle]] = {}
+        self._signal_tick_trades = (load_tick_trades(TICK_TRADES_PATH)
+                                    if TICK_TRADES_PATH else {})
+        self._signal_depth = (load_depth_signals(DEPTH_SNAPSHOTS_PATH)
+                              if DEPTH_SNAPSHOTS_PATH else {})
 
     # ------------------------------------------------------------------
     # Optional vendored-APEX access
@@ -351,10 +371,38 @@ class ApexIntegration:
         close = float(candle["close"])
         regime = (decision.get("regime", {}) or {}).get("regime", "")
 
-        # agent scores from the decision signals
-        agent_scores: Dict[str, float] = {}
+        # Build a bounded causal history and fill the signal slots that the
+        # vendored bridge did not supply. These are explicitly-labelled OHLCV
+        # proxies unless ABUTRON_TICK_TRADES / ABUTRON_DEPTH_SNAPSHOTS is set.
+        hist = self._signal_hist.setdefault(symbol, [])
+        hist.append(Candle(
+            symbol=symbol, timeframe=str(candle.get("timeframe", "M5")),
+            open_time=str(candle.get("open_time", "")),
+            close_time=str(candle.get("close_time", "")),
+            open=float(candle["open"]), high=float(candle["high"]),
+            low=float(candle["low"]), close=close,
+            volume=float(candle.get("volume", 0.0) or 0.0)))
+        if len(hist) > 160:
+            del hist[:-160]
+        sig = latest_signal_features(
+            hist, symbol=symbol, tick_trades=self._signal_tick_trades,
+            depth=self._signal_depth, use_gemma=GEMMA_ENABLED)
+        orderflow_features = dict(orderflow_features or
+                                  sig.get("orderflow", {}))
+        footprint_features = dict(footprint_features or
+                                  sig.get("footprint", {}))
+        footprint_features.setdefault(
+            "poc_volume_pct",
+            footprint_features.get("poc_vol_pct", 0.0))
+        footprint_features.setdefault(
+            "poc_vol_pct",
+            footprint_features.get("poc_volume_pct", 0.0))
+        # agent scores from the decision signals, completed by deterministic
+        # APEX-style / optional Gemma scores for all four brain slots.
+        agent_scores: Dict[str, float] = dict(sig.get("agent_scores", {}))
         for s in decision.get("signals", []):
             agent_scores[s.get("agent", "?")] = float(s.get("score", 0.0))
+        regime = regime or str(sig.get("regime", "") or "")
 
         # 1) settle prior bar's outcome if we have a pending observation
         pend = self._pending.pop(symbol, None)
@@ -366,6 +414,22 @@ class ApexIntegration:
                     symbol=symbol, features=pend["features"],
                     realised_ret=realised_ret, regime=pend["regime"],
                     agent_scores=pend["agent_scores"])
+                # The neural brain also takes one causal per-bar step. This
+                # path is independent of the advisory research overlay above.
+                market_features = pend.get("market_features") or []
+                if market_features and self.brain.trained:
+                    full = features_for_brain(
+                        self.brain, market_features, symbol=symbol)
+                    self.brain.online_learn_features(
+                        full, realised_ret, symbol=symbol)
+                    self._brain_updates += 1
+                    if (self._brain_updates %
+                            self._brain_save_interval == 0 and
+                            hasattr(self.brain, "symbol_ids")):
+                        try:
+                            save_unified(BRAIN_MODEL_DIR, self.brain)
+                        except Exception:
+                            pass
                 self.log.append(make_event(
                     "selflearn.observe", symbol=symbol,
                     execution_state="UPDATED",
@@ -402,6 +466,8 @@ class ApexIntegration:
         self._pending[symbol] = {
             "features": feats, "agent_scores": agent_scores,
             "regime": regime, "prev_close": close,
+            "market_features": sig.get("market_features", []),
+            "signal_sources": sig.get("sources", {}),
         }
 
     # ------------------------------------------------------------------

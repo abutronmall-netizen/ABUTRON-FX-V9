@@ -5,8 +5,24 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# Runtime data (native evidence, ledger, decision journals)
-data/
+# Runtime data (native evidence, ledger, decision journals, test debris, links).
+# NOTE: "data/*" (not "data/") so the checked-in brain artifacts below can be
+# re-included — git cannot re-include files under an excluded directory.
+data/*
+!data/brains/
+data/brains/*
+!data/brains/unified_m5/
+data/brains/unified_m5/*
+# ...except the checked-in trained unified master brain + provenance + reports
+!data/brains/unified_m5/nexus_brain.json
+!data/brains/unified_m5/brain_provenance.json
+!data/brains/unified_m5/feature_audit.json
+!data/brains/unified_m5/signal_sources.json
+!data/brains/unified_m5/report.json
+!data/brains/unified_m5/online_report.json
+!data/brains/unified_m5/trade_report_online.json
+!data/brains/unified_m5/trade_report_offline.json
+!data/brains/unified_m5/result_replay_report.json
 *.db
 *.db-journal
 

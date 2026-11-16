@@ -22,8 +22,10 @@ they never block a valid setup the optimizer approved.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Tuple
+from dataclasses import dataclass, fields, replace
+from typing import Dict, Optional, Tuple
+
+from .runtime_rules import runtime_rule_for
 
 
 @dataclass(frozen=True)
@@ -85,9 +87,28 @@ GEOMETRY_BY_SYMBOL: Dict[str, SymbolGeometry] = {
 _FILTER_WINDOW = 50
 
 
-def geometry_for(symbol: str) -> SymbolGeometry:
-    """Resolve the geometry for a symbol (refined config or default)."""
-    return GEOMETRY_BY_SYMBOL.get(symbol, DEFAULT_GEOMETRY)
+def geometry_for(symbol: str, *, rules_path: Optional[str] = None
+                 ) -> SymbolGeometry:
+    """Resolve geometry, applying held-out optimized runtime rules if set.
+
+    The checked-in geometry is the safe default. ``ABUTRON_RUNTIME_RULES``
+    points to a JSON file produced by the optimizer/feedback stage; only
+    known ``SymbolGeometry`` fields are applied. Neural weights never encode
+    these broker/execution parameters.
+    """
+    base = GEOMETRY_BY_SYMBOL.get(symbol, DEFAULT_GEOMETRY)
+    rule = runtime_rule_for(symbol, rules_path)
+    if not rule:
+        return base
+    allowed = {f.name for f in fields(SymbolGeometry)}
+    updates = {}
+    for key in allowed:
+        if key not in rule:
+            continue
+        value = rule[key]
+        updates[key] = bool(value) if isinstance(base.__dict__.get(key), bool) \
+            else float(value)
+    return replace(base, **updates) if updates else base
 
 
 def apply_entry_filters(prop, closes, highs, lows, a, geom: SymbolGeometry,

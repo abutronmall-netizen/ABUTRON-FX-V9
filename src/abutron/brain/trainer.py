@@ -63,6 +63,7 @@ def prepare_samples(
     regimes: Optional[Sequence[str]] = None,
     agent_scores: Optional[Sequence[Dict[str, float]]] = None,
     horizon: int = 1,
+    market_features: Optional[Sequence[Sequence[float]]] = None,
 ) -> List[TrainingSample]:
     """Build labelled training samples from a price series.
 
@@ -79,6 +80,14 @@ def prepare_samples(
 
     labels = _make_labels(closes, horizon)
     samples: List[TrainingSample] = []
+    if market_features:
+        # Precomputed causal vectors from brain.signals.build_signal_bundle.
+        # Avoids O(n^2) indicator recomputation on large market-data sets.
+        for feats, y in zip(market_features, labels):
+            samples.append(TrainingSample(
+                features=[float(v) for v in list(feats)[:N_FEATURES]],
+                label=y))
+        return samples
     # window of per-bar feature vectors, built incrementally
     window_feats: List[List[float]] = []
     for i in range(len(closes)):

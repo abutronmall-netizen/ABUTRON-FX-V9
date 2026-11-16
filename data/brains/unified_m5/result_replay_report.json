@@ -1,0 +1,29 @@
+{
+  "version": "signals_v2_causal_proxy_v1",
+  "stage": "paper_forward_result_replay_online",
+  "inputs": [
+    "../../../tmp/paper_new.json"
+  ],
+  "rows_loaded": 327,
+  "rows_trained": 327,
+  "rows_skipped": {
+    "no_features": 0,
+    "unknown_symbol": 0,
+    "bad_vector": 0
+  },
+  "loss_rows": 162,
+  "loss_rows_oversampled": true,
+  "mode": "online",
+  "epochs": 1,
+  "final_loss": 0.422657,
+  "lr": 0.0005,
+  "elapsed_s": 0.468,
+  "loss_guard": {
+    "active_loss_patterns": 548,
+    "total_patterns": 582,
+    "total_losses": 1178,
+    "total_wins": 899,
+    "blocked": 0
+  },
+  "online_updates_total": 163912
+}

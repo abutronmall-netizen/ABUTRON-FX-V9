@@ -43,14 +43,21 @@ class TrailingStop:
 
     def plan(self, *, direction: str, highs: List[float], lows: List[float],
              atr_val: float, entry_price: float,
-             trail_k: Optional[float] = None) -> TrailPlan:
+             trail_k: Optional[float] = None,
+             symbol: str = "") -> TrailPlan:
         """Return the trailing-stop plan for an open trade.
 
         Long:  trail_stop = highest_high_since_entry - k*ATR
         Short: trail_stop = lowest_low_since_entry  + k*ATR
         The trail only tightens (never widens) relative to the invalidation.
         """
-        k = float(trail_k if trail_k is not None else self.DEFAULT_K)
+        if trail_k is not None:
+            k = float(trail_k)
+        elif symbol:
+            from .runtime_rules import trail_k_for
+            k = float(trail_k_for(symbol, default=self.DEFAULT_K))
+        else:
+            k = float(self.DEFAULT_K)
         a = float(atr_val or 0.0)
         is_long = direction == "BUY"
 

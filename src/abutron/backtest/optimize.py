@@ -23,7 +23,9 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from ..brain import make_brain, default_ensemble
+from ..brain.unified import SYMBOL_UNIVERSE
 from ..apex.sniper import SniperEntryEngine
+from ..apex.runtime_rules import DEFAULT_TRAIL_K, write_runtime_rules
 from .loader import MarketDataLoader
 from .engine import BacktestEngine
 
@@ -82,6 +84,10 @@ def main(argv=None) -> int:
     ap.add_argument("--sweep-bars", type=int, default=1600,
                     help="max bars used for the grid sweep (speed)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--runtime-rules-out", default=None,
+                    help="write the held-out validated non-neural rule JSON")
+    ap.add_argument("--export-trades", default=None,
+                    help="export held-out paper trades with entry features")
     args = ap.parse_args(argv)
 
     loader = MarketDataLoader(args.data)
@@ -198,6 +204,46 @@ def main(argv=None) -> int:
           f"expectancy=${_expectancy(r_test):+.2f}  "
           f"maxDD={r_test.max_drawdown:.2f}%")
 
+    if args.runtime_rules_out and r_test.trades >= args.min_trades and \
+            _expectancy(r_test) > 0 and r_test.profit_factor > 1.0:
+        rule = {
+            "tp_atr_mult": float(best.tp_mult),
+            "invalidation_atr_frac": float(best.sl_frac),
+            "min_conviction": float(best.min_conv),
+            "require_trend": bool(best.require_trend),
+            "require_momentum": bool(best.require_mom),
+            "trail_k": DEFAULT_TRAIL_K,
+            "validation": {
+                "held_out_trades": int(r_test.trades),
+                "held_out_win_rate": float(r_test.win_rate),
+                "held_out_profit_factor": float(r_test.profit_factor),
+                "held_out_expectancy_usd": float(_expectancy(r_test)),
+                "held_out_max_dd_pct": float(r_test.max_drawdown),
+            },
+        }
+        symbols = {args.symbol: rule}
+        for sym in SYMBOL_UNIVERSE:
+            if sym.lower() == args.symbol.lower() and sym != args.symbol:
+                symbols.setdefault(sym, rule)
+                break
+        path = write_runtime_rules(
+            args.runtime_rules_out, symbols,
+            metadata={"source": "abutron.backtest.optimize",
+                      "timeframe": args.timeframe, "htf": args.htf,
+                      "note": "Execution rules only; never neural weights"})
+        print(f"Validated runtime rules -> {path}")
+    if args.export_trades:
+        import os
+        out = os.path.abspath(args.export_trades)
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump({
+                "source": "abutron.backtest.optimize",
+                "mode": "held_out_paper",
+                "signal_sources": r_test.signal_sources,
+                "trades": r_test.details,
+            }, fh, indent=2, default=str)
+        print(f"Exported {len(r_test.details)} held-out trades -> {out}")
     if args.json:
         print(json.dumps({
             "best": {k: getattr(best, k) for k in
