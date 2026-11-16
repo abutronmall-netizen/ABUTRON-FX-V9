@@ -18,6 +18,8 @@ from .. import db
 from ..events import EventLog, make_event
 from .receipts import ReceiptManager
 from .writer_gateway import SingleWriterGateway
+from .native_evidence import (assess_native_evidence,
+                              REASON_BLOCKED_INCOMPLETE_EXPOSURE)
 
 
 class NativeDispatcher:
@@ -29,18 +31,56 @@ class NativeDispatcher:
         self.receipts = receipt_mgr
 
     def dispatch_account(self, connection_id: str) -> Dict[str, Any]:
-        """Dispatch all RESERVED candidates for one account."""
+        """Dispatch all RESERVED candidates for one account.
+
+        Native-evidence gate: when any of the five evidence categories
+        (broker session, EA attestation, terminal liveness, positions
+        inventory, owner exposure join) is missing, nothing is sent —
+        candidates stay RESERVED for a later tick and each is reported
+        BLOCKED with reason BLOCKED_INCOMPLETE_EXPOSURE.
+        """
         account = db.engine_db.get_account(connection_id)
         if account is None:
             return {"connection_id": connection_id, "sent": 0,
                     "error": "ACCOUNT_NOT_FOUND"}
 
+        try:
+            evidence = assess_native_evidence(
+                connection_id, gateway=self.gateway, event_log=self.log)
+        except Exception:
+            evidence = None
+
         # Collect reserved (RESERVED state) candidates
         candidates = [self._load_candidate(cid)
                       for cid in self._reserved_candidate_ids(connection_id)]
         results = {"connection_id": connection_id, "sent": 0,
-                   "ack": 0, "unknown": 0, "rejected": 0,
+                   "ack": 0, "unknown": 0, "rejected": 0, "blocked": 0,
+                   "evidence": (evidence.to_dict() if evidence is not None
+                                else {"complete": False,
+                                      "reason": "EVIDENCE_ASSESSMENT_FAILED"}),
                    "details": []}
+
+        if evidence is None or not evidence.complete:
+            missing = (evidence.missing if evidence is not None
+                       else ["assessment_failed"])
+            for cand in candidates:
+                if cand is None:
+                    continue
+                if cand.get("execution_state") not in ("RESERVED", "SEND"):
+                    continue
+                results["blocked"] += 1
+                results["details"].append({
+                    "candidate_id": cand["candidate_id"],
+                    "outcome": "BLOCKED",
+                    "reason": REASON_BLOCKED_INCOMPLETE_EXPOSURE,
+                    "missing": missing})
+            self.log.append(make_event(
+                "dispatch.blocked", connection_id=connection_id,
+                broker=account["broker"], execution_state="BLOCKED",
+                reason_code=REASON_BLOCKED_INCOMPLETE_EXPOSURE,
+                payload={"missing": missing,
+                         "blocked": results["blocked"]}))
+            return results
 
         for cand in candidates:
             if cand is None:

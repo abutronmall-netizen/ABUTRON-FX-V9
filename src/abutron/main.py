@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import uvicorn
 
 from .config import (DATA_ROOT, ENGINE_TICK_SECONDS, PORTAL_HOST, PORTAL_PORT,
+                     NATIVE_HANDOFF_POLL_S, NATIVE_HANDOFF_TIMEOUT_S,
                      utc_now)
 from .events import EventLog
 from .db import engine_db
@@ -24,6 +25,9 @@ from .crm.controls import crm
 from .execution.dispatcher import NativeDispatcher
 from .execution.receipts import ReceiptManager
 from .execution.writer_gateway import SingleWriterGateway
+from .execution.terminal_handoff import TerminalOrderProxy
+from .execution.native_evidence import (assess_native_evidence,
+                                        gate_flags_from_evidence)
 from .execution.ipc import manager_socket
 from .reconciliation.reconciler import Reconciler
 from .ops.health import HealthMonitor
@@ -59,11 +63,23 @@ class ApexRuntime:
         self._manifest_cache: Optional[List[Dict[str, Any]]] = None
 
     def register_manager_handlers(self) -> None:
+        # The manager socket speaks the same activation secret as the
+        # single-writer gateway; order kinds are HMAC-verified in ipc.py.
+        manager_socket.secret = os.getenv("ABUTRON_ACTIVATION_SECRET",
+                                          "apex-activation")
+        proxy = TerminalOrderProxy(self.log,
+                                   poll_interval=NATIVE_HANDOFF_POLL_S)
+
         def _status(req):
             return {"status": "ok", "connection_id": req.connection_id}
+
         def _order(req):
-            return {"status": "ack", "ticket": 1000 + int(
-                req.raw.get("request_id", "0")[-4:] or "0")}
+            # Genuine transport: proxy to the account terminal's native EA
+            # file handoff and return ONLY the broker-written receipt. No
+            # terminal / no receipt / unverifiable receipt yields unknown
+            # or reject — this handler NEVER fabricates an ACK or ticket.
+            return proxy.submit(req.raw, NATIVE_HANDOFF_TIMEOUT_S)
+
         manager_socket.register("status", _status)
         manager_socket.register("order", _order)
         manager_socket.register("order_handoff", _order)
@@ -142,8 +158,10 @@ class ApexRuntime:
                 candle=candle, manifest=manifest,
                 orderflow_features=of_features,
                 footprint_features=fp_features, equity=equity,
-                native_geometry=_native_geometry_for(acct, c),
-                gate_overrides=_gate_overrides_for(acct, self.writer_gateway))
+                native_geometry=_native_geometry_for(
+                    acct, c, feed_accepted=result.accepted),
+                gate_overrides=_gate_overrides_for(
+                    acct, self.writer_gateway, event_log=self.log))
 
             if ready["status"] == "READY" and ready["candidate"]:
                 stored = self.apex.store_ready_candidate(
@@ -206,24 +224,30 @@ def _to_epoch(iso_ts: str) -> float:
     return time.mktime(time.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ"))
 
 
-def _native_geometry_for(acct: Dict[str, Any], candle) -> Dict[str, Any]:
+def _native_geometry_for(acct: Dict[str, Any], candle,
+                         feed_accepted: bool = False) -> Dict[str, Any]:
     """Broker-native geometry for a symbol.
 
-    In production these values come from the account's MT5 terminal
-    (MarketInfo: tick size, min/max lot, point value). Defaults are the
-    fail-closed safe values; the candidate review requires broker_verified
-    and the calc-profit/check flags to be True, which the production
-    supervisor sets from real native evidence.
+    Tick size / point come from the authenticated native bar itself when
+    the feed envelope + clock verified (feed_accepted); otherwise broker
+    family defaults are used and broker_verified stays False. The review
+    still requires broker_verified and the calc-profit/check flags; the
+    calc-profit / order-check attestations require terminal-side
+    OrderCalcProfit/OrderCheck evidence (a follow-up EA export) and stay
+    fail-closed False until that evidence exists — they are never faked.
     """
     is_deriv = acct.get("broker") == "deriv"
+    tick_size = float(getattr(candle, "tick_size", 0.0) or 0.0)
+    if tick_size <= 0:
+        tick_size = 0.01 if is_deriv else 0.0001
     return {
-        "tick_size": 0.01 if is_deriv else 0.0001,
+        "tick_size": tick_size,
         "tick_value_per_lot_usd": 1.0 if is_deriv else 10.0,
         "min_lot": 1.0 if is_deriv else 0.01,
         "max_lot": 500.0,
         "lot_step": 1.0 if is_deriv else 0.01,
         "min_stop_ticks": 1,
-        "broker_verified": False,
+        "broker_verified": bool(feed_accepted),
         "price": candle.close,
         "stop_price": 0.0,
         "take_price": 0.0,
@@ -234,31 +258,48 @@ def _native_geometry_for(acct: Dict[str, Any], candle) -> Dict[str, Any]:
 
 
 def _gate_overrides_for(acct: Dict[str, Any],
-                        writer_gateway) -> Dict[str, Any]:
-    """Build the candidate-review gate from live CRM + writer state.
+                        writer_gateway,
+                        event_log=None) -> Dict[str, Any]:
+    """Build the candidate-review gate from live native evidence.
 
-    Booleans default to fail-closed (False). The production supervisor
-    fills the native-attestation flags from real broker evidence; until
-    then a candidate is correctly blocked.
+    Every attestation flag is filled from the assessed broker-native
+    evidence inventory (session, EA attestation, terminal liveness,
+    positions, owner exposure join) plus the CRM entitlement. Missing
+    evidence yields False (fail-closed) with an explicit reason; a
+    candidate is READY only when the evidence is genuinely complete.
     """
     conn = acct["connection_id"]
-    status = writer_gateway.status(conn)
-    return {
-        "account_bound": True,
-        "worker_nonce_bound": False,
-        "fresh_broker_session": False,
-        "native_ea_account_match": bool(status.armed and status.revision_ok),
-        "broker_trade_allowed": bool(acct.get("effective_on")),
-        "terminal_trade_allowed": bool(status.armed),
-        "crm_entitlement_approved": False,
-        "single_writer_exclusive": bool(status.armed),
-        "broker_positions_protected": False,
-        "broker_exposure_reconciled": False,
-        "account_equity_usd": float(acct.get("equity", 0.0) or 0.0),
-        "current_verified_stop_risk_usd": 0.0,
-        "order_history_uncertain": False,
-        "kill_switch_halted": False,
-    }
+    equity = float(acct.get("equity", acct.get("balance", 0.0)) or 0.0)
+    try:
+        entitled = crm.check_entitlement(acct.get("owner_id", ""), conn)
+    except Exception:
+        entitled = False
+    try:
+        evidence = assess_native_evidence(conn, gateway=writer_gateway,
+                                          event_log=event_log)
+    except Exception:
+        evidence = None
+    if evidence is None:
+        status = writer_gateway.status(conn)
+        return {
+            "account_bound": True,
+            "worker_nonce_bound": False,
+            "fresh_broker_session": False,
+            "native_ea_account_match": bool(status.armed
+                                            and status.revision_ok),
+            "broker_trade_allowed": bool(acct.get("effective_on")),
+            "terminal_trade_allowed": bool(status.armed),
+            "crm_entitlement_approved": bool(entitled),
+            "single_writer_exclusive": bool(status.armed),
+            "broker_positions_protected": False,
+            "broker_exposure_reconciled": False,
+            "account_equity_usd": equity,
+            "current_verified_stop_risk_usd": 0.0,
+            "order_history_uncertain": True,
+            "kill_switch_halted": False,
+        }
+    return gate_flags_from_evidence(evidence, account=acct, equity=equity,
+                                    entitlement_approved=entitled)
 
 
 def _safe_event(event_type: str, **kw):

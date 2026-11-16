@@ -5,7 +5,9 @@ entry (trigger-based fill + tight invalidation), not a naive market fill.
 """
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
 import time
 
@@ -251,7 +253,11 @@ class TestSniperExecutionPath:
 
         def _fake_deliver(request, timeout):
             captured.update(request)
-            return "ACK", {"status": "ack", "ticket": 4242}
+            # a genuine native ACK is bound: request echo + ticket + deal
+            # + login; anything weaker is downgraded to UNKNOWN
+            return "ACK", {"status": "ack", "ticket": 4242, "deal": "9001",
+                           "login": 6207,
+                           "request_id": request.get("request_id")}
 
         gw._deliver_to_ea = _fake_deliver
         cand = {
@@ -271,10 +277,13 @@ class TestSniperExecutionPath:
         assert captured["take_profit"] == 1.2560
 
     def test_dispatcher_receipt_uses_trigger_price(self):
+        from abutron.config import MT5_ROOT
+        from abutron.crypto import pin_binary
         from abutron.events import EventLog
         from abutron.execution.dispatcher import NativeDispatcher
         from abutron.execution.writer_gateway import SingleWriterGateway
         from abutron.execution.receipts import ReceiptManager
+        from abutron.feeds.mt5_terminal import terminal_export_dir
         from abutron import db as dbmod
 
         _clear_candidates()
@@ -282,36 +291,60 @@ class TestSniperExecutionPath:
         gw = SingleWriterGateway(log)
 
         def _fake_deliver(request, timeout):
-            return "ACK", {"status": "ack", "ticket": 7007}
+            return "ACK", {"status": "ack", "ticket": 7007, "deal": "8008",
+                           "login": 6207,
+                           "request_id": request.get("request_id")}
 
         gw._deliver_to_ea = _fake_deliver
         rm = ReceiptManager(log)
         disp = NativeDispatcher(log, gw, rm)
 
-        # seed an account + a reserved candidate with sniper geometry
+        # seed a CONNECTED, attested account + terminal drop identity so the
+        # evidence gate passes; a unique owner isolates the exposure join
         dbmod.engine_db.upsert_account({
             "connection_id": "snip_disp", "broker": "fpmarkets",
-            "mt5_login": 6207, "owner_id": "owner1",
+            "mt5_login": 6207, "owner_id": "snip_disp_owner",
             "environment": "demo", "desired_on": 1, "effective_on": 1,
             "per_trade_risk_pct": 0.5, "portfolio_cap_pct": 1.0,
-            "ea_sha256": "", "activation_revision": "", "symbols": "GBPUSD.r"})
-        dbmod.engine_db.add_candidate({
-            "candidate_id": "cand_disp1", "connection_id": "snip_disp",
-            "owner_id": "owner1", "broker": "fpmarkets",
-            "symbol": "GBPUSD.r", "timeframe": "M5",
-            "bar_open": "2026-11-13T08:00:00Z", "replay_key":
-            "snip_disp|GBPUSD.r|M5|2026-11-13T08:00:00Z|BUY",
-            "direction": "BUY", "conviction": 0.7, "regime": "trend_up",
-            "agent_votes": "{}", "risk_fraction": 0.5,
-            "stop_risk_usd": 0.0, "volume": 0.5,
-            "stop_loss": 1.2532, "take_profit": 1.2560, "price": 1.2550,
-            "entry_type": "LIMIT", "trigger_price": 1.2540,
-            "invalidation": 1.2532, "entry_quality": 0.8,
-            "sniper_plan": "{}", "execution_state": "RESERVED",
-            "reason_code": "", "created_at": "", "updated_at": ""})
-        res = disp.dispatch_account("snip_disp")
-        assert res["ack"] == 1
-        receipts = dbmod.engine_db.list_receipts("snip_disp")
-        receipt = next(r for r in receipts if r.get("candidate_id") == "cand_disp1")
-        # the recorded fill price is the sniper trigger, not the close
-        assert receipt["fill_price"] == 1.2540
+            "ea_sha256": "", "activation_revision": "rev-snip",
+            "symbols": "GBPUSD.r", "conn_status": "CONNECTED",
+            "conn_updated_at": "t", "conn_error": "", "worker_binding": "wb",
+            "broker_verified_at": "t"})
+        ea = os.path.normpath(os.path.join(
+            os.path.dirname(__file__), "..", "mql5", "ApexNativeWriter.mq5"))
+        st = gw.arm(connection_id="snip_disp", ea_path=ea,
+                    expected_sha256=pin_binary(ea),
+                    activation_revision="rev-snip", broker="fpmarkets")
+        assert st.armed and st.revision_ok
+        drop = terminal_export_dir("snip_disp", root=MT5_ROOT)
+        os.makedirs(drop, exist_ok=True)
+        ident = os.path.join(drop, "ABUTRON_NATIVE_ACCOUNT_V2_test.txt")
+        with open(ident, "w") as fh:
+            json.dump({"connection_id": "snip_disp", "login": 6207,
+                       "nonce": "n"}, fh)
+        try:
+            dbmod.engine_db.add_candidate({
+                "candidate_id": "cand_disp1", "connection_id": "snip_disp",
+                "owner_id": "snip_disp_owner", "broker": "fpmarkets",
+                "symbol": "GBPUSD.r", "timeframe": "M5",
+                "bar_open": "2026-11-13T08:00:00Z", "replay_key":
+                "snip_disp|GBPUSD.r|M5|2026-11-13T08:00:00Z|BUY",
+                "direction": "BUY", "conviction": 0.7, "regime": "trend_up",
+                "agent_votes": "{}", "risk_fraction": 0.5,
+                "stop_risk_usd": 0.0, "volume": 0.5,
+                "stop_loss": 1.2532, "take_profit": 1.2560,
+                "price": 1.2550,
+                "entry_type": "LIMIT", "trigger_price": 1.2540,
+                "invalidation": 1.2532, "entry_quality": 0.8,
+                "sniper_plan": "{}", "execution_state": "RESERVED",
+                "reason_code": "", "created_at": "", "updated_at": ""})
+            res = disp.dispatch_account("snip_disp")
+            assert res["ack"] == 1
+            receipts = dbmod.engine_db.list_receipts("snip_disp")
+            receipt = next(r for r in receipts
+                           if r.get("candidate_id") == "cand_disp1")
+            # the recorded fill price is the sniper trigger, not the close
+            assert receipt["fill_price"] == 1.2540
+        finally:
+            shutil.rmtree(os.path.join(MT5_ROOT, "prefix-snip_disp"),
+                          ignore_errors=True)

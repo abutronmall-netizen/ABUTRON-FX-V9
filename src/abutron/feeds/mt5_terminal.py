@@ -203,5 +203,18 @@ def _latest_match(pattern: str) -> Optional[str]:
     return matches[-1] if matches else None
 
 
+def terminal_export_dir(connection_id: str, root: str = MT5_ROOT) -> str:
+    """Deterministic MQL5/Files drop-zone path for one account.
+
+    The per-account worker launches the terminal, but the manager socket
+    (which may run in a different process) reaches the same terminal
+    through this filesystem path — never through the in-memory
+    ``_terminals`` dict, which is process-local.
+    """
+    prefix = os.path.join(root, 'prefix-' + str(connection_id))
+    return os.path.join(prefix, 'drive_c', 'Program Files',
+                        'MetaTrader 5', 'MQL5', 'Files')
+
+
 # Singleton
 terminal_manager = Mt5TerminalManager()

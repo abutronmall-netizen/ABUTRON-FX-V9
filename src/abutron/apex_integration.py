@@ -16,6 +16,7 @@ context fed into the decision journal.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -23,7 +24,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import (BRAIN_MODEL_DIR, DATA_ROOT, DEPTH_SNAPSHOTS_PATH,
-                      GEMMA_ENABLED, RISKGUARD_ENABLED, TICK_TRADES_PATH)
+                      DEFAULT_PER_TRADE_RISK_PCT,
+                      DEFAULT_PORTFOLIO_RISK_CAP_PCT, GEMMA_ENABLED,
+                      RISKGUARD_ENABLED, TICK_TRADES_PATH)
 from .events import EventLog, make_event
 from .ops.portal_ops import portal_ops
 from .risk.riskguard import RiskGuard, PortfolioState, TradeProposal
@@ -35,7 +38,7 @@ from .apex.eligibility import SymbolEligibility
 from .feeds.feed_quality import Candle
 from .brain.signals import (load_depth_signals, load_tick_trades,
                             latest_signal_features, features_for_brain)
-from .brain.unified import load_unified, save_unified
+from .brain.unified import load_unified, save_unified, SYMBOL_UNIVERSE
 
 # ---------------------------------------------------------------------------
 # Locate + import the vendored APEX package.
@@ -72,11 +75,33 @@ class ApexVendorMissing(RuntimeError):
 # ---------------------------------------------------------------------------
 # Instrument manifest builder
 # ---------------------------------------------------------------------------
-DEFAULT_DERIV_SYMBOLS = ["Volatility 100 Index.0"]
+# Restored 13-symbol Deriv universe: the Boom/Crash/Volatility members of the
+# trained UnifiedBrain universe. Used when an account carries no explicit
+# symbol list, so no instrument is silently left untraded.
+DERIV_UNIVERSE = tuple(s for s in SYMBOL_UNIVERSE if s.endswith("Index.0"))
+DEFAULT_DERIV_SYMBOLS = list(DERIV_UNIVERSE)
 DEFAULT_FP_SYMBOLS = ["GBPUSD", "EURUSD", "XAUUSD"]
 
-# Approved asset classes + brokers (bridge enforces these too)
+# Approved asset classes + brokers (bridge enforces these too — an unknown
+# class fails closed at bridge construction, never silently).
 _ASSET_CLASS = {"deriv": "deriv_synthetic", "fpmarkets": "fp_index"}
+# True FX pair bases (suffix-agnostic); everything else FP keeps fp_index.
+_FP_FX_BASES = frozenset(["AUDUSD", "EURUSD", "GBPUSD", "NZDUSD", "USDCHF",
+                          "USDJPY"])
+
+
+def _asset_class_for(broker: str, symbol: str) -> str:
+    """Per-symbol asset class: Deriv synthetics, FP FX pairs, else FP index.
+
+    True FX pairs (with or without the .r suffix) are fp_fx; metals and
+    cash indices keep the established fp_index class.
+    """
+    if broker == "deriv":
+        return "deriv_synthetic"
+    base = symbol[:-2] if symbol.endswith(".r") else symbol
+    if base in _FP_FX_BASES:
+        return "fp_fx"
+    return "fp_index"
 
 
 def build_instrument_manifest(accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -96,7 +121,6 @@ def build_instrument_manifest(accounts: List[Dict[str, Any]]) -> List[Dict[str, 
         if not symbols:
             symbols = DEFAULT_DERIV_SYMBOLS if broker == "deriv" \
                 else DEFAULT_FP_SYMBOLS
-        asset_class = _ASSET_CLASS.get(broker, "fx_index")
         for sym in symbols:
             key = (broker, sym)
             if key in seen:
@@ -105,7 +129,7 @@ def build_instrument_manifest(accounts: List[Dict[str, Any]]) -> List[Dict[str, 
             manifest.append({
                 "symbol": sym,
                 "broker": "deriv" if broker == "deriv" else "fp_markets",
-                "asset_class": asset_class,
+                "asset_class": _asset_class_for(broker, sym),
                 "tick_size": 0.01 if broker == "deriv" else 0.0001,
                 "spread_bps": 20.0 if broker == "deriv" else 0.8,
                 "commission_bps": 7.0,
@@ -273,16 +297,42 @@ class ApexIntegration:
             return {"status": "REJECTED", "reason": str(e),
                     "decision": None, "candidate": None, "blockers": [str(e)]}
 
-        status = decision["status"]
+        symbol = candle["symbol"]
+
+        # Causal signal context FIRST (bounded history + full feature
+        # slots): both the advisory self-learning overlay and the
+        # authoritative brain decision below consume this same context.
+        sig = self._signal_context(symbol, candle, orderflow_features,
+                                   footprint_features, decision=decision)
 
         # --- Self-learning AI: causal observe -> overlay loop -------------
         # 1) Settle the previous bar's outcome and update the learner.
         # 2) Produce a bounded overlay from current features and adjust the
         #    research target weight (advisory; never touches the order).
         # Runs on every closed bar so the model keeps learning.
-        symbol = candle["symbol"]
         self._run_selflearn(symbol, candle, decision, orderflow_features,
-                            footprint_features)
+                            footprint_features, prebuilt_sig=sig)
+
+        # --- Trained UnifiedBrain: the directional authority --------------
+        # The brain owns BUY/SELL/HOLD (including the loss-pattern HOLD
+        # veto). A brain HOLD stops the pipeline here, journaled with its
+        # reason; a brain direction overrides the bridge status before
+        # review, with any divergence recorded on the decision.
+        brain_out = self._brain_direction(symbol, candle, decision, sig)
+        if not brain_out["proceed"]:
+            self._record(connection_id, account, candle, brain_out["status"],
+                         reason=brain_out["reason"], decision=decision,
+                         orderflow=orderflow_features,
+                         footprint=footprint_features)
+            self._trace_run(connection_id, account, candle,
+                            status=brain_out["status"], decision=decision,
+                            gemma=decision.get("gemma"),
+                            blockers=brain_out["blockers"])
+            return {"status": brain_out["status"],
+                    "reason": brain_out["reason"], "decision": decision,
+                    "candidate": None, "blockers": brain_out["blockers"],
+                    "review": None}
+        status = decision["status"]
 
         self._record(connection_id, account, candle, status,
                      reason=decision.get("reason", ""),
@@ -304,9 +354,10 @@ class ApexIntegration:
         gate = self._build_gate(connection_id, account, equity,
                                 gate_overrides or {})
         native = self._build_native(native_geometry or {}, status, candle)
+        _risk_pct, _cap_pct = self._resolve_account_risk(account)
         review = self._apex["review_candidate"](
             signal=decision, gate=gate, native=native, now=int(time.time()),
-            per_trade_risk_pct=0.001, portfolio_ceiling_pct=0.20)
+            per_trade_risk_pct=_risk_pct, portfolio_ceiling_pct=_cap_pct)
 
         if not review["engineering_gates_passed"]:
             self._record(connection_id, account, candle, "BLOCKED",
@@ -357,52 +408,199 @@ class ApexIntegration:
                 "review": review, "blockers": []}
 
     # ------------------------------------------------------------------
-    def _run_selflearn(self, symbol: str, candle: Dict[str, Any],
-                       decision: Dict[str, Any],
-                       orderflow_features: Optional[Dict[str, float]],
-                       footprint_features: Optional[Dict[str, float]]) -> None:
-        """Causal self-learning step for one symbol's closed candle.
+    @staticmethod
+    def _resolve_account_risk(account: Dict[str, Any]) -> tuple:
+        """Account-defined risk fractions (fraction units: 0.15 = 15%).
 
-        Observes the prior bar's outcome (updating the online model and
-        skill learner), then produces a bounded overlay and adjusts the
-        decision's research target weight. Advisory only.
+        Falls back to the deployment defaults only when the account row
+        carries no explicit value. Never a hardcoded 0.001.
         """
-        sl = self.selflearn
-        close = float(candle["close"])
-        regime = (decision.get("regime", {}) or {}).get("regime", "")
+        try:
+            risk_pct = float(account.get("per_trade_risk_pct")
+                             or DEFAULT_PER_TRADE_RISK_PCT)
+        except (TypeError, ValueError):
+            risk_pct = DEFAULT_PER_TRADE_RISK_PCT
+        try:
+            cap_pct = float(account.get("portfolio_cap_pct")
+                            or DEFAULT_PORTFOLIO_RISK_CAP_PCT)
+        except (TypeError, ValueError):
+            cap_pct = DEFAULT_PORTFOLIO_RISK_CAP_PCT
+        return risk_pct, cap_pct
 
-        # Build a bounded causal history and fill the signal slots that the
-        # vendored bridge did not supply. These are explicitly-labelled OHLCV
-        # proxies unless ABUTRON_TICK_TRADES / ABUTRON_DEPTH_SNAPSHOTS is set.
+    def _signal_context(self, symbol: str, candle: Dict[str, Any],
+                        orderflow_features: Optional[Dict[str, float]],
+                        footprint_features: Optional[Dict[str, float]],
+                        decision: Optional[Dict[str, Any]] = None
+                        ) -> Dict[str, Any]:
+        """Append one bar to the bounded causal history and compute the full
+        feature context for it: orderflow, footprint (both POC spellings),
+        agent scores completed from the bridge decision signals, regime,
+        market features and sources. Proxies are explicitly labelled
+        unless tick/depth evidence is linked.
+        """
         hist = self._signal_hist.setdefault(symbol, [])
         hist.append(Candle(
             symbol=symbol, timeframe=str(candle.get("timeframe", "M5")),
             open_time=str(candle.get("open_time", "")),
             close_time=str(candle.get("close_time", "")),
             open=float(candle["open"]), high=float(candle["high"]),
-            low=float(candle["low"]), close=close,
+            low=float(candle["low"]), close=float(candle["close"]),
             volume=float(candle.get("volume", 0.0) or 0.0)))
         if len(hist) > 160:
             del hist[:-160]
-        sig = latest_signal_features(
+        sig = dict(latest_signal_features(
             hist, symbol=symbol, tick_trades=self._signal_tick_trades,
-            depth=self._signal_depth, use_gemma=GEMMA_ENABLED)
-        orderflow_features = dict(orderflow_features or
-                                  sig.get("orderflow", {}))
-        footprint_features = dict(footprint_features or
-                                  sig.get("footprint", {}))
-        footprint_features.setdefault(
-            "poc_volume_pct",
-            footprint_features.get("poc_vol_pct", 0.0))
-        footprint_features.setdefault(
-            "poc_vol_pct",
-            footprint_features.get("poc_volume_pct", 0.0))
-        # agent scores from the decision signals, completed by deterministic
-        # APEX-style / optional Gemma scores for all four brain slots.
+            depth=self._signal_depth, use_gemma=GEMMA_ENABLED))
+        sig["orderflow"] = dict(orderflow_features or
+                                sig.get("orderflow", {}))
+        footprint = dict(footprint_features or sig.get("footprint", {}))
+        footprint.setdefault("poc_volume_pct",
+                             footprint.get("poc_vol_pct", 0.0))
+        footprint.setdefault("poc_vol_pct",
+                             footprint.get("poc_volume_pct", 0.0))
+        sig["footprint"] = footprint
         agent_scores: Dict[str, float] = dict(sig.get("agent_scores", {}))
-        for s in decision.get("signals", []):
-            agent_scores[s.get("agent", "?")] = float(s.get("score", 0.0))
-        regime = regime or str(sig.get("regime", "") or "")
+        raw_regime: Any = ""
+        if decision is not None:
+            for s in decision.get("signals", []):
+                try:
+                    agent_scores[s.get("agent", "?")] = float(
+                        s.get("score", 0.0))
+                except (TypeError, ValueError):
+                    continue
+            raw_regime = decision.get("regime", "")
+            if isinstance(raw_regime, dict):
+                raw_regime = raw_regime.get("regime", "")
+        sig["agent_scores"] = agent_scores
+        sig["regime"] = (str(raw_regime or "")
+                         or str(sig.get("regime", "") or ""))
+        return sig
+
+    def _brain_direction(self, symbol: str, candle: Dict[str, Any],
+                         decision: Dict[str, Any],
+                         sig: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply the trained UnifiedBrain as the directional authority.
+
+        Mutates ``decision`` in place: records the bridge status, the brain
+        direction / confidence / blockers and the full nexus_brain proposal
+        (entry features included, for reconciler feedback). When the brain
+        commits to BUY/SELL, decision["status"] is overridden with the
+        brain direction and any bridge divergence is recorded.
+
+        Returns {"proceed": True} to continue to review, or
+        {"proceed": False, "status", "reason", "blockers"} for a journaled
+        no-candidate outcome (brain HOLD, including the loss-pattern veto).
+        """
+        bridge_status = str(decision.get("status", ""))
+        hist = self._signal_hist.get(symbol, [])
+        closes = [float(c.close) for c in hist]
+        highs = [float(c.high) for c in hist]
+        lows = [float(c.low) for c in hist]
+        decision["bridge_status"] = bridge_status
+        if len(closes) < 10:
+            decision["brain_direction"] = "HOLD"
+            return {"proceed": False, "status": "BRAIN_WARMUP",
+                    "reason": ("BRAIN_WARMUP: need 10 staged bars, have %d"
+                               % len(closes)),
+                    "blockers": ["BRAIN_WARMUP"]}
+        if not getattr(self.brain, "trained", False):
+            decision["brain_direction"] = "HOLD"
+            return {"proceed": False, "status": "BRAIN_UNTRAINED",
+                    "reason": "BRAIN_UNTRAINED: no trained brain attached",
+                    "blockers": ["BRAIN_UNTRAINED"]}
+        try:
+            proposal = self.brain.decide(
+                symbol=symbol, closes=closes, highs=highs, lows=lows,
+                orderflow=dict(sig.get("orderflow", {})),
+                footprint=dict(sig.get("footprint", {})),
+                agent_scores=dict(sig.get("agent_scores", {})),
+                regime=str(sig.get("regime", "") or ""))
+        except Exception as exc:
+            decision["brain_direction"] = "HOLD"
+            code = "BRAIN_ERROR:" + type(exc).__name__
+            return {"proceed": False, "status": "BRAIN_ERROR",
+                    "reason": code, "blockers": [code]}
+        direction = str(proposal.direction)
+        try:
+            decision["nexus_brain"] = proposal.to_dict()
+        except Exception:
+            decision["nexus_brain"] = {"direction": direction}
+        decision["brain_direction"] = direction
+        try:
+            decision["brain_confidence"] = float(proposal.confidence or 0.0)
+            decision["brain_conviction"] = float(proposal.conviction or 0.0)
+        except (TypeError, ValueError):
+            decision["brain_confidence"] = 0.0
+            decision["brain_conviction"] = 0.0
+        decision["brain_blockers"] = list(proposal.blockers or [])
+        if direction != "BUY" and direction != "SELL":
+            bits = [str(b) for b in (proposal.blockers or [])]
+            if proposal.rationale:
+                bits.insert(0, str(proposal.rationale))
+            reason = ";".join(bits) or "BRAIN_HOLD"
+            decision["status"] = "HOLD"
+            return {"proceed": False, "status": "BRAIN_HOLD",
+                    "reason": "BRAIN_HOLD:" + reason,
+                    "blockers": ["BRAIN_HOLD:" + reason]}
+        decision["status"] = direction
+        if direction != bridge_status:
+            decision["direction_divergence"] = (
+                "bridge=%s brain=%s brain_wins" % (bridge_status, direction))
+        return {"proceed": True}
+
+    def _trail_for(self, symbol: str, direction: str,
+                   entry_price: float) -> tuple:
+        """Chandelier trailing plan from the bounded causal history.
+
+        Returns (trail_k, trail_stop, trail_plan_json). Zeros when fewer
+        than 15 bars are staged — the trail is computed, never guessed.
+        """
+        hist = self._signal_hist.get(symbol, [])
+        if len(hist) < 15 or not entry_price:
+            return 0.0, 0.0, "{}"
+        try:
+            from .apex.indicators import atr as _atr
+            from .apex.trailing import TrailingStop
+            highs = [float(c.high) for c in hist]
+            lows = [float(c.low) for c in hist]
+            closes = [float(c.close) for c in hist]
+            aval = _atr(highs, lows, closes, 14) or 0.0
+            if aval <= 0:
+                return 0.0, 0.0, "{}"
+            plan = TrailingStop().plan(
+                direction=direction, highs=highs, lows=lows, atr_val=aval,
+                entry_price=float(entry_price), symbol=symbol)
+            return (float(plan.trail_k), float(plan.trail_stop),
+                    json.dumps(plan.to_dict(), default=str))
+        except Exception:
+            return 0.0, 0.0, "{}"
+
+    # ------------------------------------------------------------------
+    def _run_selflearn(self, symbol: str, candle: Dict[str, Any],
+                       decision: Dict[str, Any],
+                       orderflow_features: Optional[Dict[str, float]],
+                       footprint_features: Optional[Dict[str, float]],
+                       prebuilt_sig: Optional[Dict[str, Any]] = None) -> None:
+        """Causal self-learning step for one symbol's closed candle.
+
+        Observes the prior bar's outcome (updating the online model and
+        skill learner), then produces a bounded overlay and adjusts the
+        decision's research target weight. Advisory only.
+
+        ``prebuilt_sig`` reuses the signal context already built for the
+        authoritative brain decision so history is appended exactly once
+        per bar; when None the context is built here (same result).
+        """
+        sl = self.selflearn
+        close = float(candle["close"])
+        sig = (prebuilt_sig if prebuilt_sig is not None
+               else self._signal_context(symbol, candle, orderflow_features,
+                                         footprint_features,
+                                         decision=decision))
+        orderflow_features = dict(sig.get("orderflow", {}))
+        footprint_features = dict(sig.get("footprint", {}))
+        agent_scores: Dict[str, float] = dict(sig.get("agent_scores", {}))
+        regime = str(sig.get("regime", "") or "")
 
         # 1) settle prior bar's outcome if we have a pending observation
         pend = self._pending.pop(symbol, None)
@@ -556,11 +754,29 @@ class ApexIntegration:
         (at-most-once). Returns the stored row, or None if the replay key
         was already consumed (CANDLE_ALREADY_CONSUMED).
         """
-        from .. import db
-        from ..db import engine_db
+        from . import db
+        from .db import engine_db
         cand = ready["candidate"]
         signal_id = cand["signal_id"]
         side = cand["side"]
+        risk_pct, _cap_pct = self._resolve_account_risk(account)
+        entry_type = str(cand.get("entry_type", "CONFIRM") or "CONFIRM")
+        try:
+            trigger_price = float(cand.get("trigger_price")
+                                  or candle.get("close", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            trigger_price = 0.0
+        try:
+            invalidation = float(cand.get("invalidation",
+                                          cand.get("stop_price", 0.0)) or 0.0)
+        except (TypeError, ValueError):
+            invalidation = 0.0
+        try:
+            entry_quality = float(cand.get("entry_quality", 0.5) or 0.0)
+        except (TypeError, ValueError):
+            entry_quality = 0.5
+        trail_k, trail_stop, trail_plan = self._trail_for(
+            cand["symbol"], side, trigger_price)
         row = {
             "candidate_id": f"cand_{signal_id[:12]}",
             "connection_id": connection_id,
@@ -575,13 +791,27 @@ class ApexIntegration:
                                / max(1.0, account.get("equity", 1.0))),
             "regime": (ready.get("decision", {}).get("regime", {}) or {}).get(
                 "regime", ""),
-            "agent_votes": str(ready.get("decision", {})),
-            "risk_fraction": 0.001,
+            "agent_votes": json.dumps(ready.get("decision", {}),
+                                        default=str),
+            "risk_fraction": risk_pct,
             "stop_risk_usd": float(ready.get("review", {}).get(
                 "nominal_stop_risk_usd", 0.0)),
             "volume": float(cand.get("volume_lots", 0.0)),
             "stop_loss": float(cand.get("stop_price", 0.0)),
             "take_profit": float(cand.get("take_price", 0.0)),
+            "price": float(candle.get("close", 0.0) or 0.0),
+            "entry_type": entry_type,
+            "trigger_price": trigger_price,
+            "invalidation": invalidation,
+            "entry_quality": entry_quality,
+            "sniper_plan": json.dumps(
+                {"source": "apex11_candidate_contract",
+                 "signal_id": signal_id, "entry_type": entry_type,
+                 "trigger_price": trigger_price,
+                 "invalidation": invalidation}, default=str),
+            "trail_k": trail_k,
+            "trail_stop": trail_stop,
+            "trail_plan": trail_plan,
             "execution_state": "RESERVED",
             "reason_code": "APEX11_CANDIDATE_READY",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
