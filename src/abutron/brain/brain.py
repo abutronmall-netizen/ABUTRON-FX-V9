@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
 from .ensemble import BrainEnsemble, EnsemblePrediction, build_ensemble
 from .features import N_FEATURES, build_feature_vector, returns_from_closes
 from .neural import RNG
+from .loss_guard import LossPatternGuard
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,7 @@ class BrainProposal:
             "position_size": round(self.position_size, 4),
             "blockers": self.blockers, "rationale": self.rationale,
             "brain_version": self.brain_version, "trained": self.trained,
+            "features": [round(float(v), 6) for v in self.features],
         }
 
 
@@ -244,6 +246,8 @@ class NexusBrain:
         # Self-learning trade memory: learns from losses so the brain never
         # enters too early (prefers confirmation + cleaner setups after losses).
         self.trade_memory = TradeMemory()
+        # Explicit per-trade "never repeat" veto, persisted with the brain.
+        self.loss_guard = LossPatternGuard()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -294,6 +298,17 @@ class NexusBrain:
 
         pred = self.ensemble.predict(x)
 
+        # Explicit, deterministic loss-pattern veto. This is a hard guard
+        # independent of learned weights and scalar entry biases.
+        direction = pred.direction
+        blocked, guard_reason = self.loss_guard.should_block(
+            symbol=symbol, direction=direction, regime=regime, features=feats)
+        if blocked:
+            blockers.append(guard_reason)
+            return self._guard_hold(symbol=symbol, direction=direction,
+                                    regime=regime, feats=feats,
+                                    blockers=blockers, votes=pred.votes)
+
         # Aggressive mode: NO abstention. The brain commits to a direction
         # on any edge. Uncertainty/confidence are reported, never gates.
         # Conviction drives adaptive position sizing.
@@ -320,6 +335,22 @@ class NexusBrain:
             features=list(feats))
 
     # ------------------------------------------------------------------
+    # Deterministic loss-pattern veto
+    # ------------------------------------------------------------------
+    def _guard_hold(self, *, symbol: str, direction: str, regime: str,
+                    feats: Sequence[float], blockers: List[str],
+                    votes: Optional[Dict[str, float]] = None) -> BrainProposal:
+        """Return a no-order proposal for a previously losing feature pattern."""
+        return BrainProposal(
+            symbol=symbol, direction="HOLD", conviction=0.0,
+            confidence=0.0, uncertainty=1.0, regime=regime,
+            model_agreement=dict(votes or {}), position_size=0.0,
+            blockers=list(blockers),
+            rationale="LOSS_PATTERN_REPEAT: exact loss-associated setup vetoed",
+            brain_version=self.VERSION, trained=self.trained,
+            features=list(feats))
+
+    # ------------------------------------------------------------------
     # Deterministic fallback (untrained brain still trades — no gates)
     # ------------------------------------------------------------------
     def _fallback(self, symbol: str, feats: List[float], regime: str,
@@ -340,6 +371,14 @@ class NexusBrain:
             uncertainty = 1.0 - conviction
             # commit to a direction on any non-zero edge
             direction = "BUY" if edge >= 0 else "SELL"
+            blocked, guard_reason = self.loss_guard.should_block(
+                symbol=symbol, direction=direction, regime=regime,
+                features=feats)
+            if blocked:
+                blockers.append(guard_reason)
+                return self._guard_hold(symbol=symbol, direction=direction,
+                                        regime=regime, feats=feats,
+                                        blockers=blockers)
             position_size = float(min(self.size_cap, 0.25 + 0.75 * conviction))
             return BrainProposal(
                 symbol=symbol, direction=direction,
@@ -530,16 +569,26 @@ class NexusBrain:
     # ------------------------------------------------------------------
     def learn_from_trade(self, *, symbol: str, regime: str,
                          direction: str, entry_type: str,
-                         entry_quality: float, pnl: float) -> Dict[str, float]:
-        """Feed a settled trade outcome back into the loss-learner.
+                         entry_quality: float, pnl: float,
+                         features: Optional[Sequence[float]] = None
+                         ) -> Dict[str, float]:
+        """Feed a settled trade's label, features and PnL back into the brain.
 
-        Losses raise the confirm_bias / quality_floor so the sniper entry
-        engine waits for confirmation and a cleaner setup next time — the
-        brain learns to never enter too early.
+        Losses raise confirm_bias / quality_floor and record an explicit
+        quantized feature signature that ``decide`` will veto if it repeats.
+        Wins clear that signature. Neural weights are updated separately by
+        ``online_learn_features`` at each training call site.
         """
-        return self.trade_memory.learn_from_trade(
+        bias = self.trade_memory.learn_from_trade(
             symbol=symbol, regime=regime, direction=direction,
             entry_type=entry_type, entry_quality=entry_quality, pnl=pnl)
+        if features is not None and len(features):
+            stats = self.loss_guard.learn(
+                symbol=symbol, direction=direction, regime=regime,
+                features=list(features), pnl=pnl)
+            bias["loss_guard_active"] = stats["active_loss_patterns"]
+            bias["loss_guard_blocked"] = stats["blocked"]
+        return bias
 
     def get_entry_bias(self, symbol: str, regime: str) -> Dict[str, float]:
         """Learned entry-timing biases for a symbol/regime."""
@@ -561,7 +610,14 @@ class NexusBrain:
             "thresholds": {"min_confidence": self.min_confidence,
                            "max_uncertainty": self.max_uncertainty},
             "trade_memory": self.trade_memory.state_dict(),
+            "loss_guard": self.loss_guard.state_dict(),
         }
+
+    def load_memory_state(self, data: Optional[Dict[str, Any]]) -> None:
+        """Restore TradeMemory + explicit loss-pattern guard from a payload."""
+        data = data or {}
+        self.trade_memory.load_state(data.get("trade_memory") or {})
+        self.loss_guard.load_state(data.get("loss_guard") or {})
 
 
 # ---------------------------------------------------------------------------

@@ -44,17 +44,20 @@ def build_feature_vector(*,
     fp = footprint or {}
     scores = agent_scores or {}
 
-    # regime one-hot
+    # regime one-hot (unknown/empty regimes leave all four slots at 0.0
+    # instead of raising KeyError — the brain emits e.g. "trend_up",
+    # "high_vol", "range", "trend_down" and "" for warmup bars).
     regime_feats = {
         "trend_up": 0.0, "trend_down": 0.0, "high_vol": 0.0, "range": 0.0}
-    regime_feats[regime] = 1.0
+    if regime in regime_feats:
+        regime_feats[regime] = 1.0
 
     return [
         of.get("imbalance", 0.0),
         of.get("delta_pct", 0.0),
         of.get("absorption_bias", 0.0),
         fp.get("va_imbalance", 0.0),
-        fp.get("poc_volume_pct", 0.0),
+        fp.get("poc_vol_pct", fp.get("poc_volume_pct", 0.0)),
         regime_feats["trend_up"],
         regime_feats["trend_down"],
         regime_feats["high_vol"],
