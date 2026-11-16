@@ -141,3 +141,4 @@ int HexVal(ushort c)
    if(c >= 'A' && c <= 'F') return((int)c - 65 + 10);
    return(0);
 }
+
