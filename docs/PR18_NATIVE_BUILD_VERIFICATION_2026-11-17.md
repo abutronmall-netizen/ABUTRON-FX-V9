@@ -85,3 +85,33 @@ The script wrote its own broker-terminal-native output file \`MQL5/Files/ABUTRON
 **Conclusion:** The actual native SHA-256 HMAC helper matches Python for all three coverage cases, including multi-block input and UTF-8. The previous isolated-terminal startup failure is superseded for this HMAC check. This result **does not** prove the complete JSON request parser, activation revision and secret provisioning, broker fill retcode, SL/TP, owner-risk or LIVE readiness. Those remain separate engineering checks.
 
 **Post-test cleanup:** The unique one-shot `ABUTRON_PR18_HMAC_0512_SAFE.ex5` was removed from the active FP DEMO terminal after its byte-identical compiled binary and result were archived. The native result file remains available in the test terminal's `MQL5/Files`, and the root-only evidence copy is preserved. The MT5 worker remained connected. This removes an unnecessary test executable from the active trading environment without changing an existing EA or any order settings.
+
+## 2026-11-17 00:12 UTC — true FP DEMO 0512 13-field JSON handoff test
+
+**VERIFIED: both native file-handoff cases passed inside FP Markets DEMO 7410512**. A test-only MQL5 script with no \`OrderSend\`, no \`WebRequest\`, no \`TerminalClose\` and an exact DEMO-account guard read the following *actual terminal sandbox* files:
+
+- \`ABUTRON_PR18_HANDOFF_GOOD.json\`: 13-field canonical signed request with signed expiry, actual account binding, and all symbol/volume/SL/TP/trailing fields → **GOOD|PASS**.
+- \`ABUTRON_PR18_HANDOFF_TAMPER.json\`: same signature and order intent but altered symbol (\`EURUSD.r\` → \`GBPUSD.r\`) → **TAMPER|PASS**, meaning tampering was rejected.
+
+The native test harness compiled via MetaEditor64 with **0 errors / 0 warnings** and produced \`ABUTRON_PR18_HANDOFF_KAT_RESULT.txt\` from the genuine connected DEMO terminal. Both result rows were independently checked against the input JSON and expected signature behavior.
+
+Root-only immutable evidence directory:
+\`/var/backups/abutron-pr18-native-handoff-fp0512-20261117T001201Z/\` (native result, both JSON inputs, exact test source/EX5, build log, SHA-256s and \`VERIFIED_CHECKPOINT.json\`).
+
+The test executable and both input files were removed from the active MT5 terminal after copying and verifying the evidence. Existing account EA and portfolio risk settings were not modified.
+
+## 2026-11-17 — PR18 signed-file delivery and expiry repair
+
+- \`src/abutron/execution/writer_gateway.py\` now writes an account-bound pending JSON directly to \`MQL5/Files/ABUTRON_REQ_PENDING.json\`, which the native writer actually consumes; it no longer sends order payloads into the incompatible \`MANAGER_SOCK\` protocol.
+- 13-field Python/MQL5 canonical HMAC now includes signed \`expires_at\` (30 seconds by default), with native time-based expiry rejection. This is **in addition to** already-verified HMAC known-answer vectors.
+- Account-bound \`mt5_login\` is checked against the real MT5 login; \`InpBrokerServer\` and connection id are enforced in native initialization.
+- Per-request immutable \`ABUTRON_NATIVE_RECEIPT_<request_id>.json\` receipts and replay checks replace time-varying receipt filenames; the Python gateway will not infer an ACK from an absent or mismatched receipt.
+- Account-wide file handoff uses a cross-process lock, atomic no-clobber pending creation, 0600 files and the actual MT5 worker UID/GID. If the caller cannot provision the private worker directory, arming fails; the 0700 terminal permissions are **not weakened**.
+- \`tests/test_pr18_account_handoff.py\` exercises simulated native ACKs, account mismatch, missing receipts, pending collision and expiry-HMAC binding. Existing sniper tests were corrected to reject an unarmed fake ACK, rather than asserting that a disarmed writer can trade.
+- **70/70 focused Python tests passed**.
+- Exact updated EA source Git blob \`044f0c5ae1cd34320d3e04213ae8ca8fb3a9fc9d\` compiled with **0 errors / 0 warnings** under MetaEditor64, producing 42,530 bytes, EX5 SHA-256 \`f967a48a951ee9bea63d22ea1889e40ce2a49d8ac11250c5244a530197b3c067\`.
+- Root-only **staged, not attached** deployment with manifest and source pins: \`/var/lib/abutron-v9-pr18-staging/20261117-native-handoff-044f0c5a/\`.
+
+**Production integrity status:** The operating FP Markets DEMO V101 order bridges were **not replaced**, PR18 is **not attached to a trading chart**, and there was **no PR18 broker order**. FP native V9 inference subsequently reached **13/13 current symbols on both 0512 and 1636**, including GER40 recovery from genuine new broker ticks/M5 bars. The separate broker-native reconciliation can temporarily report \`FP_BRIDGE_BROKER_EXPOSURE_MISMATCH\` while positions are changing; it later returned \`RECONCILED_READONLY\` for both accounts. The strict owner-wide exposure gate and broker SL/TP proof must be rechecked at the moment of any writer switchover.
+
+**Not certified:** privileged root-to-MT5 worker handoff in the actual admin process, unique writer/chart attachment vs V101, LIVE readiness, signed request to *new* PR18 broker-acknowledged fill, SL/TP + trailing confirmation, native LIMIT support, and end-to-end owner-risk controls. This PR must remain **draft** until those are established.
