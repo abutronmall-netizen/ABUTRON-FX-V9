@@ -153,6 +153,10 @@ class SingleWriterGateway:
                 fd, tmp = tempfile.mkstemp(prefix=".abutron-", dir=mql5_files_dir)
                 try:
                     os.fchmod(fd, 0o600)
+                    # Preserve the private terminal directory and place the
+                    # secret under the broker worker UID, not the portal UID.
+                    owner = os.stat(mql5_files_dir, follow_symlinks=False)
+                    os.fchown(fd, owner.st_uid, owner.st_gid)
                     with os.fdopen(fd, "w", encoding="utf-8") as handle:
                         handle.write(value + "\n")
                         handle.flush()
@@ -305,6 +309,8 @@ class SingleWriterGateway:
                     prefix=".abutron-pending-", dir=root)
                 try:
                     os.fchmod(fd, 0o600)
+                    owner = os.stat(root, follow_symlinks=False)
+                    os.fchown(fd, owner.st_uid, owner.st_gid)
                     with os.fdopen(fd, "w", encoding="utf-8") as handle:
                         handle.write(data)
                         handle.flush()
