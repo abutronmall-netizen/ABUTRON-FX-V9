@@ -387,79 +387,50 @@ class ReconcilerMissingEvidenceTest(unittest.TestCase):
 
 
 class OptionCCapabilityFormatTest(unittest.TestCase):
-    """Verify the 9-line ABUTRON_OPTIONC_FP_CAPABILITY_V2 marker format."""
+    """Real 9-line native contract accepted by FP0512's MT5 reconciler."""
+    @staticmethod
+    def sample(nonce="abc123def456abc123def456abc123de", stamp="1731800000"):
+        return ["APEX_OPTIONC_ADAPTIVE_CAPABILITY_V2",nonce,"7410512",
+                "FPMarketsSC-Demo","FP",stamp,"1","0.10","20"]
 
-    def test_capability_marker_has_9_lines(self):
-        """Capability marker must be exactly 9 positional lines."""
-        cap_lines = [
-            "ABUTRON_OPTIONC_FP_CAPABILITY_V2",
-            "abc123def456abc123def456abc123de",  # nonce (32 chars)
-            "7410512",                          # login
-            "FPMarketsSC-Demo",                 # server
-            "FP_DEMO",                          # mode
-            "0.001",                            # max budget pct (0.10%)
-            "13",                               # max positions
-            "1",                                # EnableAdaptiveEquityV2 = true
-            "1731800000",                       # timestamp
-        ]
-        self.assertEqual(len(cap_lines), 9)
+    def test_capability_marker_has_exactly_9_positional_lines(self):
+        lines=self.sample()
+        self.assertEqual(len(lines),9)
+        self.assertFalse(any("=" in line for line in lines))
 
-    def test_capability_marker_header_is_correct(self):
-        """Capability marker must start with ABUTRON_OPTIONC_FP_CAPABILITY_V2."""
-        cap_lines = [
-            "ABUTRON_OPTIONC_FP_CAPABILITY_V2",
-            "abc123def456abc123def456abc123de",
-            "7410512",
-            "FPMarketsSC-Demo",
-            "FP_DEMO",
-            "0.001",
-            "13",
-            "1",
-            "1731800000",
-        ]
-        self.assertEqual(cap_lines[0], "ABUTRON_OPTIONC_FP_CAPABILITY_V2")
+    def test_capability_header_matches_actual_consumer(self):
+        self.assertEqual(self.sample()[0],"APEX_OPTIONC_ADAPTIVE_CAPABILITY_V2")
 
-    def test_capability_marker_budget_is_0_10_percent(self):
-        """Max budget pct must be 0.001 (equity * 0.001 = 0.10%)."""
-        cap_lines = [
-            "ABUTRON_OPTIONC_FP_CAPABILITY_V2",
-            "abc123def456abc123def456abc123de",
-            "7410512",
-            "FPMarketsSC-Demo",
-            "FP_DEMO",
-            "0.001",
-            "13",
-            "1",
-            "1731800000",
-        ]
-        self.assertEqual(float(cap_lines[5]), 0.001)
+    def test_capability_risk_and_timestamp_positions(self):
+        lines=self.sample()
+        self.assertEqual(lines[4],"FP")
+        self.assertGreater(int(lines[5]),0)
+        self.assertEqual(lines[6:],["1","0.10","20"])
 
-    def test_capability_marker_file_name_pattern(self):
-        """File name must be ABUTRON_OPTIONC_FP_CAPABILITY_V2_<nonce>.txt."""
-        nonce = "abc123def456abc123def456abc123de"
-        filename = f"ABUTRON_OPTIONC_FP_CAPABILITY_V2_{nonce}.txt"
-        self.assertIn("ABUTRON_OPTIONC_FP_CAPABILITY_V2", filename)
-        self.assertTrue(filename.endswith(".txt"))
-        self.assertIn(nonce, filename)
+    def test_capability_filename_remains_nonce_bound(self):
+        nonce=self.sample()[1]
+        self.assertEqual(len(nonce),32)
+        self.assertEqual(f"ABUTRON_OPTIONC_FP_CAPABILITY_V2_{nonce}.txt",
+                         "ABUTRON_OPTIONC_FP_CAPABILITY_V2_"+nonce+".txt")
 
-    def test_capability_marker_positional_not_keyvalue(self):
-        """Capability marker is positional (like receipts/evidence), NOT key=value."""
-        cap_lines = [
-            "ABUTRON_OPTIONC_FP_CAPABILITY_V2",
-            "abc123def456abc123def456abc123de",
-            "7410512",
-            "FPMarketsSC-Demo",
-            "FP_DEMO",
-            "0.001",
-            "13",
-            "1",
-            "1731800000",
-        ]
-        for line in cap_lines:
-            # No line should contain "=" — positional format
-            self.assertNotIn("=", line,
-                            f"Positional format violation: '{line}' contains '='")
+    def test_mql5_source_matches_production_contract(self):
+        from pathlib import Path
+        source=(Path(__file__).resolve().parents[1]/
+                "mql5/AbutronFPNativeOrderBridgeV101.mq5").read_text()
+        self.assertIn("APEX_OPTIONC_ADAPTIVE_CAPABILITY_V2",source)
+        self.assertIn(r'"FP\r\n"',source)
+        self.assertIn(r'"0.10\r\n"',source)
+        self.assertIn(r'"20\r\n"',source)
+        self.assertNotIn(r'"ABUTRON_OPTIONC_FP_CAPABILITY_V2\r\n"',source)
+        self.assertEqual(source.count("OrderSend("),1)
 
+    def test_cold_start_creates_cursor_after_binding(self):
+        from pathlib import Path
+        source=(Path(__file__).resolve().parents[1]/
+                "mql5/AbutronFPNativeOrderBridgeV101.mq5").read_text()
+        self.assertGreaterEqual(source.count("SaveEvidenceScanOffset();"),3)
+        self.assertIn("EventSetTimer(2);",source)
+        self.assertIn('if(gNonce=="")',source)
 
 class V117ColdStartTest(unittest.TestCase):
     """Verify V117 cold-start fix: OnInit must not fail when heartbeat absent."""

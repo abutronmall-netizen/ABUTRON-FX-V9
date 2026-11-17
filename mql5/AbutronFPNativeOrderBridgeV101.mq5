@@ -134,13 +134,13 @@ void WriteReadiness()
   int ch=FileOpen(capFile,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
   if(ch!=INVALID_HANDLE)
   {
-   string capBody="ABUTRON_OPTIONC_FP_CAPABILITY_V2\r\n"+
+   string capBody="APEX_OPTIONC_ADAPTIVE_CAPABILITY_V2\r\n"+
      gNonce+"\r\n"+gLogin+"\r\n"+gServer+"\r\n"+
-     "FP_DEMO\r\n"+
-     "0.001\r\n"+           // max budget: equity * 0.001 (0.10%)
-     "13\r\n"+             // max positions in multi-symbol DEMO portfolio
-     "1\r\n"+              // EnableAdaptiveEquityV2 = true
-     IntegerToString((long)TimeGMT())+"\r\n";
+     "FP\r\n"+
+     IntegerToString((long)TimeGMT())+"\r\n"+
+     "1\r\n"+
+     "0.10\r\n"+
+     "20\r\n";
    FileWriteString(ch,capBody);
    FileFlush(ch);FileClose(ch);
   }
@@ -559,6 +559,7 @@ int OnInit()
  if(VerifiedNativeFeed(true))
  {
   gReady="ABUTRON_FP_BRIDGE_READY_V2_"+gNonce+".txt";
+  SaveEvidenceScanOffset();
   WriteReadiness();
   Print("APEX_V2_BRIDGE_READY; automatic order submission input is ",EnableNativeDemoOrders);
  }
@@ -580,6 +581,7 @@ void OnTimer()
   if(feedOk)
   {
    gReady="ABUTRON_FP_BRIDGE_READY_V2_"+gNonce+".txt";
+   SaveEvidenceScanOffset();
    Print("APEX_V2_BRIDGE_IDENTITY_BOUND");
   }
  }
