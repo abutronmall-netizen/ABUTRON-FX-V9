@@ -20,15 +20,22 @@ the audit event envelope and fault-code registry.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from ..config import (DEFAULT_PER_TRADE_RISK_PCT,
+                      DEFAULT_PORTFOLIO_RISK_CAP_PCT)
+
 
 # Default hard limits (FX/CFD, per-trade risk driven).
+# These MUST match the config defaults — a mismatch between the guard's
+# hard ceiling and the config's approved per-trade fraction would let
+# trades through that the account-level policy does not authorize.
 DEFAULT_MAX_POSITION_LOTS = 50.0
-DEFAULT_MAX_CONCENTRATION_PCT = 0.20   # 20% owner portfolio ceiling (blueprint)
+DEFAULT_MAX_CONCENTRATION_PCT = DEFAULT_PORTFOLIO_RISK_CAP_PCT  # 20% owner portfolio ceiling
 DEFAULT_MAX_TOTAL_EXPOSURE_PCT = 1.00  # gross leverage guard, 100% of equity
-DEFAULT_MAX_RISK_PER_TRADE_PCT = 0.0020  # 0.20% hard ceiling per trade
+DEFAULT_MAX_RISK_PER_TRADE_PCT = DEFAULT_PER_TRADE_RISK_PCT  # 0.15% hard ceiling per trade
 
 
 @dataclass

@@ -24,7 +24,7 @@ Trained on **every signal source** the platform provides:
 | Engine + execution + reconciliation | Per-bar online learning in the backtest engine |
 | Equity / risk state | Risk-managed PnL informs trade labels |
 | Risk (1% DD-cap, daily loss cap, lot sizing) | Execution rules |
-| Backtest / forward / paper-trade results | Paper-trade feedback stage (`train_from_paper.py`): 2,792 paper-trade outcomes fed back online+offline — the brain learns from its own paper-trade losses and avoids repeating them |
+| Backtest / forward / paper-trade results | Paper-trade feedback stage (`train_from_paper.py`): 327 replayed paper-trade outcomes from AUDUSD.r fed back online+offline into the brain (verified via `brain_provenance.json`). Full 26-symbol paper evaluation ran 9,267 trades — outcomes feed back as the feedback-learning loop closes. |
 
 ## How to install / attach the brain
 

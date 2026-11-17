@@ -555,13 +555,24 @@ class NexusBrain:
                     "min_lot_risk": round(min_lot_risk, 4),
                     "reason": "MIN_LOT_RISK_EXCEEDS_CAP"}
         lots = risk_usd / risk_per_lot
-        lots = max(lot_min, round(lots / lot_step) * lot_step)
+        # Floor to the broker lot step — never round upward. Rounding up
+        # can push actual_risk above the requested cash-risk budget,
+        # violating the account's approved risk fraction. If the floored
+        # lot is below lot_min, reject (the minimum lot already over-risks).
+        import math
+        lots = math.floor(lots / lot_step) * lot_step
+        if lots < lot_min:
+            return {"lots": 0.0, "risk_usd": risk_usd,
+                    "risk_per_lot": risk_per_lot, "risk_scale": risk_scale,
+                    "stop_distance_points": stop_distance_points,
+                    "reason": "MIN_LOT_RISK_EXCEEDS_CAP"}
         lots = min(lots, lot_max)
         actual_risk = lots * risk_per_lot
         return {"lots": round(lots, 4), "risk_usd": round(risk_usd, 4),
                 "risk_per_lot": round(risk_per_lot, 4),
                 "risk_scale": round(risk_scale, 4),
                 "stop_distance_points": round(stop_distance_points, 4),
+                "actual_risk_usd": round(actual_risk, 4),
                 "reason": "OK"}
 
     # ------------------------------------------------------------------
