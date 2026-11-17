@@ -42,6 +42,38 @@ what is already built, and the concrete steps to reach VERIFIED.
 > **Risk-policy discrepancy:** source default daily loss is 2% while the
 > production owner policy audit records 3%. Neither value was changed.
 >
+### V3 read-only exporter — compiled and staged (17 Nov 2026)
+
+- Compiled broker-safe `mql5/ApexOrderFlowExportV3.mq5` and
+  non-displacing chart **indicator** `mql5/ApexMarketFeedV3.mq5`
+  with MetaEditor **0 errors / 0 warnings** each.
+- Indicator EX5 SHA-256:
+  `a4a5bdbec180f8b4f7d0945b1611a945ca36d1ed49e4e23137133b9e4d592f67`.
+  **Installed on disk** in FP DEMO 0512 and 1636 `MQL5/Indicators/ABUTRON/`.
+  Neither chart was modified or confirmed attached.
+- V3 records `QUOTE` from CopyTicks without fabricating aggressor sides,
+  `MARKET_PRINT` only when LAST+exact BUY/SELL flag and positive actual volume,
+  `DOM` only from subscribed MarketBookGet levels (if the broker supplies
+  a real book), and `STATUS` freshness / drop counts. It never sends orders,
+  refuses LIVE accounts, and caps each daily symbol export at 24 MB.
+- New `src/abutron/feeds/native_market_v3.py` checks native worker identity,
+  broker login/server, pinned compiled binary, file ownership, session nonce,
+  records, flags, timestamps and freshness. The Python parser **must not**
+  mark V3 VERIFIED until there is independent chart attachment evidence and
+  real broker-origin aggressor prints. V3 can correctly produce **quote-only**
+  output on OTC FX/CFD brokers with no exchange tape or real depth.
+- Run read-only `scripts/verify_native_market_v3.py` with the real isolated
+  worker root / connection ID, account login, server, symbol and pinned SHA.
+  It returns a nonzero status until verification prerequisites are fulfilled.
+- **Next step:** attach **ApexMarketFeedV3 indicator** to dedicated DEMO
+  data charts *without displacing existing Expert Advisors*, verify
+  authentic fresh output against the same worker and a second chart inventory
+  check, and collect a representative 24–48 hours. No history older than the
+  actual running collector can be reconstructed as true tick/DOM data.
+- DEMO order writer: **NOT ATTACHED; no new lifecycle or broker trailing
+  certification**. Owner-wide risk and true peak-equity evidence remain
+  blocked. Do not equate the 320+ Python tests with broker execution.
+
 ## 1. Order flow / imbalance / delta / absorption
 **Current: PROXY — candle-derived, NOT true tick/order-book flow**
 
