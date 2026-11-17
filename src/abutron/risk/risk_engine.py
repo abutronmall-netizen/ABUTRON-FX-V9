@@ -78,6 +78,7 @@ class RiskEngine:
         total_balance = 0.0
         unknown: List[str] = []
         unknown_symbols: set = set()
+        exposure_evidence_complete = True
         # Import the symbol registry lazily to avoid circular imports.
         try:
             from ..apex.eligibility import SYMBOL_REGISTRY
@@ -88,6 +89,17 @@ class RiskEngine:
             balance = float(acct.get("equity", 0.0) or 0.0)
             total_balance += balance
             positions = engine_db.recent_open_positions(cid)
+            # A missing broker-native positions snapshot is NOT evidence that
+            # the account is flat. The caller must reconcile a real MT5
+            # position inventory before an owner-wide cap can be certified.
+            if acct.get("native_positions_verified") is not True:
+                exposure_evidence_complete = False
+                if cid not in unknown:
+                    unknown.append(cid)
+            if acct.get("account_currency") != "USD" or balance <= 0:
+                exposure_evidence_complete = False
+                if cid not in unknown:
+                    unknown.append(cid)
             conn_risk = 0.0
             for p in positions:
                 # stop risk recomputed from native SL and fill price, using
@@ -101,24 +113,23 @@ class RiskEngine:
                     point = float(profile.contract.point or 0.0)
                     point_value = float(profile.contract.point_value or 1.0)
                 else:
-                    # Unknown symbol — use a conservative fallback that
-                    # does NOT underestimate exposure. Assume a standard
-                    # FX point (0.0001) and default point_value (1.0 USD
-                    # per point per lot). Flag so operators can reconcile
-                    # against MT5 OrderCalcProfit.
-                    point = 0.0001
-                    point_value = 1.0
-                    if sym not in unknown_symbols:
-                        unknown_symbols.add(sym)
-                if entry and sl:
-                    stop_dist = abs(entry - sl)
-                    if point and point > 0:
-                        stop_dist_pts = stop_dist / point
-                        conn_risk += vol * stop_dist_pts * point_value
-                    else:
-                        conn_risk += vol * stop_dist * point_value
-            if not positions:
-                unknown.append(cid)
+                    # Unknown broker contract point values cannot prove
+                    # exposure, particularly for indices, metals and FX
+                    # with non-USD profit currencies. Never guess dollars.
+                    point = 0.0
+                    point_value = 0.0
+                    unknown_symbols.add(sym)
+                    exposure_evidence_complete = False
+                if not (entry > 0 and sl > 0 and vol > 0
+                        and point > 0 and point_value > 0):
+                    exposure_evidence_complete = False
+                    if cid not in unknown:
+                        unknown.append(cid)
+                    continue
+                stop_dist = abs(entry - sl)
+                stop_dist_pts = stop_dist / point
+                conn_risk += vol * stop_dist_pts * point_value
+            # An authenticated, verified empty inventory *can* be flat.
             total_risk += conn_risk
         cap = DEFAULT_PORTFOLIO_RISK_CAP_PCT * total_balance
         return {
@@ -127,8 +138,10 @@ class RiskEngine:
             "aggregate_balance_usd": total_balance,
             "cap_pct": DEFAULT_PORTFOLIO_RISK_CAP_PCT,
             "cap_usd": cap,
-            "headroom_usd": cap - total_risk,
-            "cap_exceeded": total_risk > cap,
+            "headroom_usd": cap - total_risk if exposure_evidence_complete else None,
+            "cap_exceeded": total_risk > cap if exposure_evidence_complete else None,
+            "owner_risk_certified": exposure_evidence_complete,
+            "risk_usd_is_lower_bound_only": not exposure_evidence_complete,
             "unknown_exposure_connections": unknown,
             "unknown_symbols": sorted(unknown_symbols),
         }
@@ -203,15 +216,19 @@ class RiskEngine:
         confirmed SL price are provided. Without full broker SL
         reconciliation the event is PENDING.
         """
-        engine_db.add_ledger({
-            "connection_id": connection_id,
-            "owner_id": "", "native_ticket": native_ticket,
-            "event": "TRAIL", "symbol": symbol, "direction": direction,
-            "volume": 0.0, "price": new_stop, "realized_pnl": 0.0,
-            "commission": 0.0, "swap": 0.0,
-            "stop_loss": new_stop, "take_profit": 0.0,
-            "balance": 0.0, "observed_at": utc_now(),
-            "source": "native"})
+        # An intended stop change is NOT a broker stop modification. Never
+        # inject a synthetic TRAIL into the native ledger before MT5 confirms
+        # the exact SL on the account-bound open position.
+        if confirmed:
+            engine_db.add_ledger({
+                "connection_id": connection_id,
+                "owner_id": "", "native_ticket": native_ticket,
+                "event": "TRAIL", "symbol": symbol, "direction": direction,
+                "volume": 0.0, "price": new_stop, "realized_pnl": 0.0,
+                "commission": 0.0, "swap": 0.0,
+                "stop_loss": new_stop, "take_profit": 0.0,
+                "balance": 0.0, "observed_at": utc_now(),
+                "source": "native"})
         self.log.append(make_event(
             "risk.trailing_stop", connection_id=connection_id,
             symbol=symbol,
@@ -219,3 +236,4 @@ class RiskEngine:
             payload={"new_stop": new_stop, "old_stop": old_stop,
                      "native_ticket": native_ticket,
                      "confirmed": confirmed}))
+
