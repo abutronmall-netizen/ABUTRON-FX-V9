@@ -21,6 +21,31 @@ from ..events import EventLog, make_event
 from .state import state_machine
 
 
+def _canonical_order(nonce: str, candidate: Dict[str, Any],
+                     connection_id: str) -> str:
+    """Build the canonical order message that is HMAC-signed.
+
+    Covers ALL order parameters so any tampering with any field is
+    detected by the MQL5 verifier. The format must match exactly on
+    both sides (Python and MQL5):
+        nonce|candidate_id|connection_id|symbol|direction|volume|
+        stop_loss|take_profit|entry_type|trigger_price|trail_k|trail_stop
+    """
+    trigger = float(candidate.get('trigger_price',
+                                   candidate.get('price', 0.0)))
+    return (
+        f"{nonce}|{candidate['candidate_id']}|{connection_id}|"
+        f"{candidate['symbol']}|{candidate['direction']}|"
+        f"{float(candidate['volume']):.6f}|"
+        f"{float(candidate.get('stop_loss', 0.0)):.6f}|"
+        f"{float(candidate.get('take_profit', 0.0)):.6f}|"
+        f"{candidate.get('entry_type', 'CONFIRM')}|"
+        f"{trigger:.6f}|"
+        f"{float(candidate.get('trail_k', 0.0)):.6f}|"
+        f"{float(candidate.get('trail_stop', 0.0)):.6f}"
+    )
+
+
 @dataclass
 class WriterStatus:
     connection_id: str
@@ -61,7 +86,7 @@ class SingleWriterGateway:
     # ------------------------------------------------------------------
     def arm(self, *, connection_id: str, ea_path: str,
             expected_sha256: str, activation_revision: str,
-            broker: str) -> WriterStatus:
+            broker: str, mql5_files_dir: str = "") -> WriterStatus:
         ok, actual = verify_file_pin(ea_path, expected_sha256)
         if not ok:
             self.log.append(make_event(
@@ -76,12 +101,68 @@ class SingleWriterGateway:
                                   expected_sha256, activation_revision,
                                   True, False, utc_now())
         self._armed[connection_id] = status
-        self.log.append(make_event(
-            "writer.arm", connection_id=connection_id, broker=broker,
-            ea_sha256=actual, activation_revision=activation_revision,
-            execution_state="ARMED" if status.armed else "DISARMED",
-            reason_code="OK" if status.armed else "BINARY_SOURCE_MISMATCH"))
+        # Provision the HMAC secret to the EA via MQL5/Files so the
+        # native writer can verify request signatures. Provisioning
+        # failure is logged and downgrades the arm — the EA will reject
+        # all orders without a valid secret, so arming is incomplete.
+        secret_ok = self.provision_secret(connection_id, mql5_files_dir)
+        if status.armed and not secret_ok:
+            status.armed = False
+            status.revision_ok = False
+            self.log.append(make_event(
+                "writer.arm", connection_id=connection_id, broker=broker,
+                ea_sha256=actual, activation_revision=activation_revision,
+                execution_state="DISARMED",
+                reason_code="SECRET_PROVISION_FAILED"))
+        else:
+            self.log.append(make_event(
+                "writer.arm", connection_id=connection_id, broker=broker,
+                ea_sha256=actual, activation_revision=activation_revision,
+                execution_state="ARMED" if status.armed else "DISARMED",
+                reason_code="OK" if status.armed else "BINARY_SOURCE_MISMATCH"))
         return status
+
+    def provision_secret(self, connection_id: str,
+                         mql5_files_dir: str) -> bool:
+        """Write the activation secret to MQL5/Files for the EA to read.
+
+        The EA reads MQL5/Files/ABUTRON_ACTIVATION_SECRET.txt on startup
+        (see LoadActivationSecret in ApexNativeWriter.mq5). This closes
+        the provisioning gap so existing terminals can verify signatures
+        without manual EA input configuration.
+
+        The secret file is written with 0600 permissions (owner-only)
+        to prevent other local processes from reading the HMAC key.
+        Provisioning failure during arming is logged and returned as
+        False — the caller should treat arming as incomplete.
+        """
+        if not mql5_files_dir:
+            self.log.append(make_event(
+                "writer.secret_provision_failed", connection_id=connection_id,
+                reason_code="SECRET_PROVISION_FAILED",
+                payload={"error": "no mql5_files_dir"}))
+            return False
+        secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation")
+        try:
+            os.makedirs(mql5_files_dir, exist_ok=True)
+            path = os.path.join(mql5_files_dir,
+                                "ABUTRON_ACTIVATION_SECRET.txt")
+            # Write with restrictive permissions (owner read/write only)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, (secret + "\n").encode())
+            finally:
+                os.close(fd)
+            self.log.append(make_event(
+                "writer.secret_provisioned", connection_id=connection_id,
+                execution_state="ARMED", reason_code="SECRET_PROVISIONED"))
+            return True
+        except OSError as exc:
+            self.log.append(make_event(
+                "writer.secret_provision_failed", connection_id=connection_id,
+                reason_code="SECRET_PROVISION_FAILED",
+                payload={"error": str(exc)}))
+            return False
 
     def disarm(self, connection_id: str) -> None:
         if connection_id in self._armed:
@@ -158,9 +239,13 @@ class SingleWriterGateway:
                 "trail_k": candidate.get("trail_k", 0.0),
                 "trail_stop": candidate.get("trail_stop", 0.0),
                 "activation_revision": status.activation_revision,
+                # Sign the COMPLETE canonical order payload so any tampering
+                # with symbol, direction, volume, SL, or TP is detected.
+                # Canonical: nonce|candidate_id|connection_id|symbol|
+                #           direction|volume|stop_loss|take_profit
                 "signed": hmac_sign(
                     os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation"),
-                    f"{nonce}|{candidate['candidate_id']}|{connection_id}"),
+                    _canonical_order(nonce, candidate, connection_id)),
                 "created_at": utc_now(),
             }
             outcome, receipt_ref = self._deliver_to_ea(request, request_timeout)

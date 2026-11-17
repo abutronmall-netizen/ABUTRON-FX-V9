@@ -64,6 +64,10 @@ class RiskAgent(BaseAgent):
                                     DEFAULT_PORTFOLIO_RISK_CAP_PCT))
 
         detail: Dict[str, Any] = {"equity": equity, "per_trade_pct": per_trade_pct}
+        if (owner_book.get("aggregate_stop_risk_usd") is None
+                or owner_book.get("owner_risk_certified") is False):
+            return RiskDecision(False, False, 0.0, 0.0, "HOLD",
+                                detail | {"block_reason": "OWNER_NATIVE_RISK_UNVERIFIED"})
         stop_risk_usd = float(candidate.get("stop_risk_usd", 0.0) or 0.0)
         volume = float(candidate.get("volume", 0.0) or 0.0)
 
@@ -108,16 +112,29 @@ class RiskAgent(BaseAgent):
                                 detail | {"block_reason": "BAD_RISK_PER_LOT"})
         target_risk = equity * per_trade_pct
         sizing_volume = target_risk / risk_per_lot
-        # Round to broker lot step (0.01 typical FX)
+        # Round to broker lot step — FLOOR, never round upward. Rounding
+        # up can push actual_risk above the approved per-trade budget.
+        # If the floored lot is below the minimum, reject the trade.
+        import math
         lot_step = float(quote.volume_min or 0.01)
-        sizing_volume = max(lot_step, round(sizing_volume / lot_step) * lot_step)
+        sizing_volume = math.floor(sizing_volume / lot_step) * lot_step
+        if sizing_volume < lot_step:
+            return RiskDecision(False, False, 0.0, stop_risk_usd, "HOLD",
+                                detail | {"block_reason": "MIN_LOT_OVER_RISK",
+                                          "target_risk_usd": target_risk,
+                                          "risk_per_lot": risk_per_lot})
         sizing_volume = min(sizing_volume, float(quote.volume_max or sizing_volume))
 
-        # Recompute stop risk at sized volume
+        # Recompute stop risk at sized volume — must not exceed the target.
+        # No 5% tolerance: the approved risk fraction is a hard ceiling.
         actual_stop_risk = sizing_volume * risk_per_lot
-        if actual_stop_risk > target_risk * 1.05:
-            sizing_volume = max(lot_step,
-                                round(target_risk / risk_per_lot / lot_step) * lot_step)
+        if actual_stop_risk > target_risk + 1e-9:
+            sizing_volume = math.floor(target_risk / risk_per_lot / lot_step) * lot_step
+            if sizing_volume < lot_step:
+                return RiskDecision(False, False, 0.0, stop_risk_usd, "HOLD",
+                                    detail | {"block_reason": "MIN_LOT_OVER_RISK",
+                                              "target_risk_usd": target_risk,
+                                              "risk_per_lot": risk_per_lot})
             actual_stop_risk = sizing_volume * risk_per_lot
 
         # --- Owner aggregate cap ---------------------------------------
@@ -131,8 +148,13 @@ class RiskAgent(BaseAgent):
                                     detail | {"block_reason": "OWNER_CAP_EXCEEDED",
                                               "cap_usd": cap_usd,
                                               "aggregate": aggregate})
-            sizing_volume = max(lot_step,
-                                round(headroom / risk_per_lot / lot_step) * lot_step)
+            sizing_volume = math.floor(headroom / risk_per_lot / lot_step) * lot_step
+            if sizing_volume < lot_step:
+                return RiskDecision(False, False, 0.0, stop_risk_usd, "HOLD",
+                                    detail | {"block_reason": "OWNER_CAP_TIGHT",
+                                              "cap_usd": cap_usd,
+                                              "aggregate": aggregate,
+                                              "headroom_usd": headroom})
             actual_stop_risk = sizing_volume * risk_per_lot
             reduced = sizing_volume < volume
 

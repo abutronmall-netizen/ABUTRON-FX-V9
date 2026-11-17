@@ -29,11 +29,40 @@ class NativeDispatcher:
         self.receipts = receipt_mgr
 
     def dispatch_account(self, connection_id: str) -> Dict[str, Any]:
-        """Dispatch all RESERVED candidates for one account."""
+        """Dispatch all RESERVED candidates for one account.
+
+        Before sending, each candidate is gated by the owner-wide
+        exposure guard (BLOCKED_INCOMPLETE_EXPOSURE). If the
+        aggregate stop risk cannot be verified against real contract
+        specs — or exceeds the approved portfolio ceiling — the
+        candidate is blocked before any native order is sent.
+        """
         account = db.engine_db.get_account(connection_id)
         if account is None:
             return {"connection_id": connection_id, "sent": 0,
                     "error": "ACCOUNT_NOT_FOUND"}
+
+        # Pre-flight: verify owner-wide exposure with real contract specs.
+        owner_id = account.get("owner_id", "")
+        if not owner_id:
+            return {"connection_id": connection_id, "sent": 0,
+                    "error": "OWNER_ID_UNVERIFIED"}
+        if owner_id:
+            # Never authorize an order from registry-estimated stop risk.
+            # Only independently reconciled, account-bound MT5 position
+            # inventories and OrderCalcProfit stop losses may open headroom.
+            from ..risk.risk_engine import RiskEngine
+            exposure = RiskEngine(self.log).aggregate_owner_risk(owner_id)
+            if (exposure.get("owner_risk_certified") is not True
+                    or exposure.get("cap_exceeded") is not False):
+                # Block all RESERVED candidates for this owner — do NOT
+                # send any order until exposure is reconciled.
+                blocked = self._block_for_incomplete_exposure(
+                    connection_id, owner_id, exposure)
+                return {"connection_id": connection_id, "sent": 0,
+                        "blocked": blocked,
+                        "error": "BLOCKED_INCOMPLETE_EXPOSURE",
+                        "exposure": exposure}
 
         # Collect reserved (RESERVED state) candidates
         candidates = [self._load_candidate(cid)
@@ -58,6 +87,41 @@ class NativeDispatcher:
             elif outcome["outcome"] == "REJECTED":
                 results["rejected"] += 1
         return results
+
+    def _block_for_incomplete_exposure(self, connection_id: str,
+                                       owner_id: str,
+                                       exposure: Dict) -> List[str]:
+        """Block all RESERVED candidates when exposure is incomplete/unsafe.
+
+        Sets candidate state to BLOCKED_INCOMPLETE_EXPOSURE and logs
+        the event. Returns the list of blocked candidate IDs.
+        """
+        blocked_ids = []
+        from .state import state_machine
+        from ..events import make_event
+        for cid in self._reserved_candidate_ids(connection_id):
+            cand = self._load_candidate(cid)
+            if cand is None:
+                continue
+            if cand.get("execution_state") not in ("RESERVED", "SEND"):
+                continue
+            state_machine.move(cid, "RESERVED", "RESERVED")
+            state_machine.move(cid, "BLOCKED_INCOMPLETE_EXPOSURE",
+                              "OWNER_EXPOSURE_UNVERIFIED")
+            db.engine_db.set_candidate_state(
+                cid, "BLOCKED_INCOMPLETE_EXPOSURE",
+                "OWNER_EXPOSURE_UNVERIFIED")
+            blocked_ids.append(cid)
+        self.log.append(make_event(
+            "dispatch.blocked_incomplete_exposure",
+            connection_id=connection_id, owner_id=owner_id,
+            execution_state="BLOCKED_INCOMPLETE_EXPOSURE",
+            reason_code="OWNER_EXPOSURE_UNVERIFIED",
+            payload={"aggregate_stop_risk_usd":
+                     exposure.get("aggregate_stop_risk_usd", 0.0),
+                     "cap_exceeded": exposure.get("cap_exceeded", False),
+                     "issues": exposure.get("issues", [])}))
+        return blocked_ids
 
     def _dispatch_one(self, account: Dict[str, Any],
                       candidate: Dict[str, Any]) -> Dict[str, Any]:
