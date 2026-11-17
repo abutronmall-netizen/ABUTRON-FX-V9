@@ -54,11 +54,11 @@ def test_rejects_invalid_volume():
 
 
 def test_rejects_risk_cap():
-    # equity 100k, risk cap 0.2% -> max 200 USD; propose 500 USD risk.
+    # equity 100k, risk cap 0.15% -> max 150 USD; propose 500 USD risk.
     r = _guard().check_trade(_proposal(stop_risk_usd=500.0), _portfolio())
     assert r.approved is False
     assert r.reason == "RISKGUARD_RISK_CAP"
-    assert r.detail["max_risk_usd"] == pytest.approx(200.0)
+    assert r.detail["max_risk_usd"] == pytest.approx(150.0)
 
 
 def test_rejects_position_size():

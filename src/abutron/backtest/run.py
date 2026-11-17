@@ -24,6 +24,7 @@ import sys
 from ..brain import make_brain, default_ensemble
 from ..brain.trainer import load_brain
 from ..brain.unified import load_unified, unified_brain_dir
+from ..brain.signals import load_tick_trades, load_depth_signals
 from ..config import (BRAIN_ENSEMBLE_SEED, BRAIN_MODEL_DIR,
                       BRAIN_SIZE_CAP, GEMMA_ENABLED, MARKET_DATA_DIR,
                       RUNTIME_RULES_PATH)
@@ -111,6 +112,12 @@ def main(argv=None) -> int:
     ap.add_argument("--persist-brain", action="store_true",
                     help="allow backtest per-bar learning to mutate the "
                          "loaded brain (default: isolated deep copy)")
+    ap.add_argument("--tick-data", default=None,
+                    help="CSV of true tick/trade prints (from MT5 export "
+                         "or Deriv API) for real order flow + footprint")
+    ap.add_argument("--depth-data", default=None,
+                    help="CSV of market depth snapshots for real "
+                         "bid/ask order-book features")
     args = ap.parse_args(argv)
 
     loader = MarketDataLoader(args.data)
@@ -184,6 +191,35 @@ def main(argv=None) -> int:
         runtime_rules_path=args.runtime_rules,
         use_gemma_signals=bool(args.gemma or GEMMA_ENABLED),
         persist_brain_changes=args.persist_brain)
+    # Load true tick/trade data if provided — replaces candle-derived
+    # order flow / footprint proxies with real broker trades.
+    tick_trades = {}
+    depth_signals = {}
+    if args.tick_data:
+        tick_trades = load_tick_trades(args.tick_data,
+                                       symbol=args.symbol or "")
+        _log(f"Loaded {sum(len(v) for v in tick_trades.values())} tick "
+             f"trades across {len(tick_trades)} bars from {args.tick_data}")
+    if args.depth_data:
+        depth_signals = load_depth_signals(args.depth_data,
+                                           symbol=args.symbol or "")
+        _log(f"Loaded {len(depth_signals)} depth snapshots from "
+             f"{args.depth_data}")
+    # Re-create engine with tick data
+    engine = BacktestEngine(
+        brain, sniper=sniper, equity=args.equity, risk_pct=args.risk_pct,
+        point=args.point, point_value=args.point_value,
+        commission_per_lot=args.commission_per_lot,
+        min_conviction=args.min_conviction,
+        require_trend_regime=args.require_trend,
+        require_momentum=args.require_momentum,
+        min_atr_pct=args.min_atr_pct,
+        max_atr_pct=args.max_atr_pct,
+        runtime_rules_path=args.runtime_rules,
+        use_gemma_signals=bool(args.gemma or GEMMA_ENABLED),
+        persist_brain_changes=args.persist_brain,
+        tick_trades=tick_trades,
+        depth_signals=depth_signals)
     result = engine.run(
         candles, quotes, symbol=args.symbol or "",
         timeframe=args.timeframe or "",
