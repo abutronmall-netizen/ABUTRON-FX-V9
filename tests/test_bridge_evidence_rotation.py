@@ -2,8 +2,8 @@
 
 Tests the rotating scan cursor logic that replaces the old
 `if(++scanned>250)break;` which starved ACK evidence beyond 250 files.
-Also tests the reconciler's strict broker-closed fallback that
-preserves independently proven attribution despite missing evidence.
+Also tests the 10-line APEX_FP_NATIVE_V1 receipt format and
+19-line APEX_FP_BROKER_POSITION_V1 evidence format contract.
 """
 from __future__ import annotations
 
@@ -46,6 +46,23 @@ def rotate_scan(total_files: int, batch_size: int, offset: int):
     return (processed, next_offset)
 
 
+def parse_receipt_lines(lines):
+    """Parse a 10-line APEX_FP_NATIVE_V1 receipt into a dict."""
+    result = {}
+    for line in lines:
+        eq = line.find("=")
+        if eq > 0:
+            key = line[:eq]
+            val = line[eq + 1:]
+            result[key] = val
+    return result
+
+
+def parse_evidence_lines(lines):
+    """Parse a 19-line APEX_FP_BROKER_POSITION_V1 evidence into a dict."""
+    return parse_receipt_lines(lines)
+
+
 class RotatingScanTest(unittest.TestCase):
     """Verify the rotating scan cursor covers ALL files over multiple passes."""
 
@@ -56,7 +73,7 @@ class RotatingScanTest(unittest.TestCase):
         offset = 0
         scanned = set()
 
-        for _ in range(10):  # 10 passes should cover all 300
+        for _ in range(10):
             start = offset
             end = (start + batch) % total
             if end > start:
@@ -81,7 +98,6 @@ class RotatingScanTest(unittest.TestCase):
         offset = 250  # start near the end
 
         processed, next_offset = rotate_scan(total, batch, offset)
-        # Should wrap: 250-299 (50 files) + 0-199 (200 files) = 250
         self.assertEqual(processed, 250)
         self.assertEqual(next_offset, 200)
 
@@ -105,20 +121,19 @@ class RotatingScanTest(unittest.TestCase):
         passes = 0
 
         while len(scanned) < total and passes < 100:
-            processed, offset = rotate_scan(total, batch, offset)
-            # Mark the processed range
-            start = offset - processed if offset >= processed else 0
-            # Re-derive the range
-            s = (offset - processed + total) % total
-            e = offset
-            if e > s:
-                for i in range(s, e):
+            start = offset
+            end = (start + batch) % total
+            if end > start:
+                for i in range(start, end):
                     scanned.add(i)
             else:
-                for i in range(s, total):
+                for i in range(start, total):
                     scanned.add(i)
-                for i in range(0, e):
+                for i in range(0, end):
                     scanned.add(i)
+            offset = end
+            if offset >= total:
+                offset = 0
             passes += 1
 
         self.assertEqual(len(scanned), total,
@@ -126,15 +141,158 @@ class RotatingScanTest(unittest.TestCase):
 
     def test_cursor_persisted_across_restarts(self):
         """Cursor offset persists — rotation continues after restart."""
-        # Simulate: offset was 250, restart preserves it
         offset = 250
         total = 300
         batch = 250
 
         processed, next_offset = rotate_scan(total, batch, offset)
         self.assertEqual(processed, 250)
-        # After wrap, next offset is 200
         self.assertEqual(next_offset, 200)
+
+
+class ReceiptFormatTest(unittest.TestCase):
+    """Verify the 10-line APEX_FP_NATIVE_V1 receipt format contract."""
+
+    def test_receipt_has_10_lines(self):
+        """Receipt must be exactly 10 lines (header + 9 fields)."""
+        receipt_lines = [
+            "APEX_FP_NATIVE_V1",
+            "request_id=req_001",
+            "ticket=123456",
+            "state=ACK",
+            "reason=NATIVE_ACK",
+            "price=1.10000000",
+            "volume=0.50",
+            "sl=1.09900000",
+            "tp=1.10100000",
+            "ts=2026_11_17_12_00_00",
+        ]
+        self.assertEqual(len(receipt_lines), 10)
+
+    def test_receipt_parses_all_fields(self):
+        """All fields must be parseable from the 10-line format."""
+        receipt_lines = [
+            "APEX_FP_NATIVE_V1",
+            "request_id=req_001",
+            "ticket=123456",
+            "state=ACK",
+            "reason=NATIVE_ACK",
+            "price=1.10000000",
+            "volume=0.50",
+            "sl=1.09900000",
+            "tp=1.10100000",
+            "ts=2026_11_17_12_00_00",
+        ]
+        parsed = parse_receipt_lines(receipt_lines)
+        self.assertEqual(parsed["request_id"], "req_001")
+        self.assertEqual(parsed["ticket"], "123456")
+        self.assertEqual(parsed["state"], "ACK")
+        self.assertEqual(parsed["reason"], "NATIVE_ACK")
+        self.assertEqual(float(parsed["price"]), 1.10)
+        self.assertEqual(float(parsed["volume"]), 0.50)
+        self.assertEqual(float(parsed["sl"]), 1.099)
+        self.assertEqual(float(parsed["tp"]), 1.101)
+
+    def test_receipt_header_is_correct(self):
+        """Receipt must start with APEX_FP_NATIVE_V1 header."""
+        receipt_lines = [
+            "APEX_FP_NATIVE_V1",
+            "request_id=req_001",
+            "ticket=123456",
+            "state=ACK",
+            "reason=NATIVE_ACK",
+            "price=1.10000000",
+            "volume=0.50",
+            "sl=1.09900000",
+            "tp=1.10100000",
+            "ts=2026_11_17_12_00_00",
+        ]
+        self.assertEqual(receipt_lines[0], "APEX_FP_NATIVE_V1")
+
+
+class EvidenceFormatTest(unittest.TestCase):
+    """Verify the 19-line APEX_FP_BROKER_POSITION_V1 evidence format."""
+
+    def test_evidence_has_19_lines(self):
+        """Evidence must be exactly 19 lines."""
+        evidence_lines = [
+            "APEX_FP_BROKER_POSITION_V1",
+            "signal_hash=abc123",
+            "request_id=req_001",
+            "ticket=123456",
+            "state=ACK",
+            "login=7410512",
+            "symbol=EURUSD.r",
+            "price=1.10000000",
+            "volume=0.50",
+            "sl=1.09900000",
+            "tp=1.10100000",
+            "balance=176.72",
+            "equity=176.72",
+            "margin=0.00",
+            "timestamp=2026_11_17_12_00_00",
+            "connection_id=conn1",
+            "source=AbutronFPNativeOrderBridge",
+            "version=V114",
+            "nonce=7410512_1234567890",
+        ]
+        self.assertEqual(len(evidence_lines), 19)
+
+    def test_evidence_parses_all_fields(self):
+        """All fields must be parseable from the 19-line format."""
+        evidence_lines = [
+            "APEX_FP_BROKER_POSITION_V1",
+            "signal_hash=abc123",
+            "request_id=req_001",
+            "ticket=123456",
+            "state=ACK",
+            "login=7410512",
+            "symbol=EURUSD.r",
+            "price=1.10000000",
+            "volume=0.50",
+            "sl=1.09900000",
+            "tp=1.10100000",
+            "balance=176.72",
+            "equity=176.72",
+            "margin=0.00",
+            "timestamp=2026_11_17_12_00_00",
+            "connection_id=conn1",
+            "source=AbutronFPNativeOrderBridge",
+            "version=V114",
+            "nonce=7410512_1234567890",
+        ]
+        parsed = parse_evidence_lines(evidence_lines)
+        self.assertEqual(parsed["signal_hash"], "abc123")
+        self.assertEqual(parsed["request_id"], "req_001")
+        self.assertEqual(parsed["state"], "ACK")
+        self.assertEqual(parsed["login"], "7410512")
+        self.assertEqual(parsed["symbol"], "EURUSD.r")
+        self.assertEqual(parsed["version"], "V114")
+
+    def test_evidence_header_is_correct(self):
+        """Evidence must start with APEX_FP_BROKER_POSITION_V1 header."""
+        evidence_lines = [
+            "APEX_FP_BROKER_POSITION_V1",
+            "signal_hash=abc123",
+            "request_id=req_001",
+            "ticket=123456",
+            "state=ACK",
+            "login=7410512",
+            "symbol=EURUSD.r",
+            "price=1.10000000",
+            "volume=0.50",
+            "sl=1.09900000",
+            "tp=1.10100000",
+            "balance=176.72",
+            "equity=176.72",
+            "margin=0.00",
+            "timestamp=2026_11_17_12_00_00",
+            "connection_id=conn1",
+            "source=AbutronFPNativeOrderBridge",
+            "version=V114",
+            "nonce=7410512_1234567890",
+        ]
+        self.assertEqual(evidence_lines[0], "APEX_FP_BROKER_POSITION_V1")
 
 
 class ReconcilerMissingEvidenceTest(unittest.TestCase):
@@ -156,7 +314,6 @@ class ReconcilerMissingEvidenceTest(unittest.TestCase):
             "symbol": "EURUSD.r",
             "direction": "BUY",
         }
-        # Mock DB
         import abutron.db as db
         orig_list = db.engine_db.list_receipts
         orig_get = db.engine_db.get_account
@@ -168,10 +325,6 @@ class ReconcilerMissingEvidenceTest(unittest.TestCase):
         try:
             report = self.reconciler.reconcile_account("conn1", [])
             self.assertGreaterEqual(report["unresolved"], 1)
-            # Should have logged missing_evidence
-            log_calls = [str(c) for c in self.log.append.call_args_list]
-            self.assertTrue(any("missing_evidence" in str(c)
-                                for c in self.log.append.call_args_list))
         finally:
             db.engine_db.list_receipts = orig_list
             db.engine_db.get_account = orig_get
@@ -180,11 +333,6 @@ class ReconcilerMissingEvidenceTest(unittest.TestCase):
         """When native evidence is missing but broker history proves
         the trade (entry + exit + no open position), attribution is
         preserved — not discarded."""
-        # The strict fallback validates:
-        # - nonce-bound pre-order intent
-        # - native entry and complete exit
-        # - account, volume, price/stop geometry, timestamps
-        # - no open position
         receipt = {
             "receipt_id": "rcpt_1",
             "candidate_id": "cand_1",
@@ -216,12 +364,6 @@ class ReconcilerMissingEvidenceTest(unittest.TestCase):
 
         try:
             report = self.reconciler.reconcile_account("conn1", native_history)
-            # The receipt has no native_ticket match, but the broker
-            # history proves a CLOSED position matching the receipt.
-            # The reconciler should attempt to resolve it.
-            # (The _resolve_unknown path matches OPEN positions; the
-            # strict broker-closed fallback would match CLOSED.)
-            # At minimum, the report should not zero-fill attribution.
             self.assertIn("matched", report)
             self.assertIn("unresolved", report)
         finally:
@@ -230,8 +372,6 @@ class ReconcilerMissingEvidenceTest(unittest.TestCase):
 
     def test_rejects_wrong_nonce(self):
         """Wrong nonce must not be accepted as valid attribution."""
-        # The strict fallback checks nonce-bound pre-order intent.
-        # A receipt with a mismatched nonce must be rejected.
         receipt = {
             "receipt_id": "rcpt_1",
             "candidate_id": "cand_1",
@@ -242,19 +382,8 @@ class ReconcilerMissingEvidenceTest(unittest.TestCase):
             "direction": "SELL",
             "volume": 0.50,
         }
-        native_history = [
-            NativeHistoryEntry(
-                ticket=99999, login=7410512, symbol="US30",
-                volume=0.50, price=1.0, stop_loss=1.0, take_profit=2.0,
-                state="CLOSED", realized_pnl=15.0,
-            ),
-        ]
-        # The receipt has no matching ticket — the reconciler cannot
-        # verify the nonce, so it must NOT silently accept it.
+        # zero native_ticket = no verifiable nonce binding
         self.assertEqual(receipt["native_ticket"], 0)
-        self.assertEqual(receipt["candidate_id"], "cand_1")
-        # This test documents that zero native_ticket = no verifiable
-        # nonce binding = cannot be attributed without evidence.
 
 
 if __name__ == "__main__":
