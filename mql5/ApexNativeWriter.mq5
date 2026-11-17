@@ -35,9 +35,17 @@ input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
 input ENUM_TIMEFRAMES InpExportPeriod = PERIOD_M5; // export timeframe
 
 string g_activation_secret = "";                // resolved at OnInit
+string g_session_nonce = "";
 
 int OnInit()
 {
+   // Refuse account-ambiguous attachments.
+   if(InpConnectionId == "" || InpBrokerServer == "" ||
+      AccountInfoString(ACCOUNT_SERVER) != InpBrokerServer)
+      return(INIT_FAILED);
+   g_session_nonce = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
+                     IntegerToString((long)TimeLocal()) + "_" +
+                     IntegerToString((long)ChartID());
    // MT5 terminal controls Algo Trading permissions; no local override.
    g_activation_secret = LoadActivationSecret();
    EventSetTimer(5);                                  // export + handoff loop
@@ -163,6 +171,32 @@ void ProcessOrderRequests()
    double trigger = JsonNum(body, "trigger_price");
    double trailK  = JsonNum(body, "trail_k");
    double trailSt = JsonNum(body, "trail_stop");
+   string expiresText = JsonStr(body, "expires_at");
+   long expiresAt = (long)StringToInteger(expiresText);
+   long loginClaim = (long)JsonNum(body, "mt5_login");
+
+   // Do not execute empty, unsafe or previously processed identifiers.
+   if(!SafeRequestId(reqId) || FileIsExist(RequestReceiptFile(reqId)))
+   {
+      FileDelete(pending);
+      return;
+   }
+   if(expiresAt <= 0 || TimeGMT() > expiresAt ||
+      expiresAt > (long)TimeGMT() + 120)
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "SIGNED_REQUEST_EXPIRED",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
+   if(loginClaim != AccountInfoInteger(ACCOUNT_LOGIN) ||
+      InpBrokerServer != AccountInfoString(ACCOUNT_SERVER))
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "NATIVE_ACCOUNT_IDENTITY_MISMATCH",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
 
    // Verify connection binding + activation (single-writer authority)
    if(cid != InpConnectionId || actRev != ActivationRevision())
@@ -182,7 +216,8 @@ void ProcessOrderRequests()
                       "|" + StringFormat("%.6f", tp) +
                       "|" + entryTy + "|" + StringFormat("%.6f", trigger) +
                       "|" + StringFormat("%.6f", trailK) +
-                      "|" + StringFormat("%.6f", trailSt);
+                      "|" + StringFormat("%.6f", trailSt) +
+                      "|" + expiresText;
    if(InpActivationSecret == "") g_activation_secret = LoadActivationSecret();
    if(!VerifySignature(sig, canonical))
    {
@@ -316,7 +351,9 @@ void WriteReceipt(string reqId, long ticket, string state, string reason,
                   string deal)
 {
    string dir = "";  // FileOpen is already sandboxed inside MQL5/Files
-   string file = dir + "ABUTRON_NATIVE_RECEIPTS_V2_" + Nonce() + ".txt";
+   if(!SafeRequestId(reqId)) return;
+   string file = RequestReceiptFile(reqId);
+   if(FileIsExist(file)) return;
    string json = StringFormat(
       "{\"request_id\":\"%s\",\"ticket\":%d,\"state\":\"%s\",\"reason\":\"%s\",\"login\":%d,\"price\":%.5f,\"volume\":%.2f,\"sl\":%.5f,\"tp\":%.5f,\"deal\":\"%s\",\"ts\":\"%s\"}",
       reqId, ticket, state, reason,
@@ -328,8 +365,26 @@ void WriteReceipt(string reqId, long ticket, string state, string reason,
 
 string Nonce()
 {
-   return(StringFormat("%d_%d", AccountInfoInteger(ACCOUNT_LOGIN),
-                       (long)TimeCurrent()));
+   return(g_session_nonce);
+}
+
+string RequestReceiptFile(string reqId)
+{
+   return("ABUTRON_NATIVE_RECEIPT_" + reqId + ".json");
+}
+
+bool SafeRequestId(string reqId)
+{
+   int n = StringLen(reqId);
+   if(n < 8 || n > 110) return(false);
+   for(int i=0; i<n; i++)
+   {
+      ushort c=StringGetCharacter(reqId,i);
+      if(!((c>='A' && c<='Z') || (c>='a' && c<='z') ||
+           (c>='0' && c<='9') || c=='_' || c=='-'))
+         return(false);
+   }
+   return(true);
 }
 
 string Challenge()
