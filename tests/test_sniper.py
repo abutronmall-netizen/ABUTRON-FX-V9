@@ -241,12 +241,17 @@ class TestSniperEngineIntegration:
 # Execution path — the sniper entry geometry reaches the order request
 # ---------------------------------------------------------------------------
 class TestSniperExecutionPath:
-    def test_gateway_sends_sniper_entry_geometry(self):
+    def test_gateway_sends_sniper_entry_geometry(self, monkeypatch):
         from abutron.events import EventLog
-        from abutron.execution.writer_gateway import SingleWriterGateway
+        from abutron.execution.writer_gateway import SingleWriterGateway, WriterStatus
 
+        monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "unit-test-secret")
         log = EventLog(os.path.join(DATA_ROOT, "t_sniper_gw.jsonl"))
         gw = SingleWriterGateway(log)
+        # Explicit authenticated in-memory fixture. Disarmed gateways must
+        # never pass even when a fake native receiver would return ACK.
+        gw._armed["c1"] = WriterStatus("c1", True, "pin", "pin",
+                                       "test-rev", True, False, "now")
         captured = {}
 
         def _fake_deliver(request, timeout):
@@ -270,7 +275,7 @@ class TestSniperExecutionPath:
         assert captured["stop_loss"] == 1.2532
         assert captured["take_profit"] == 1.2560
 
-    def test_dispatcher_receipt_uses_trigger_price(self):
+    def test_dispatcher_rejects_disarmed_limit_without_fabricated_fill(self):
         from abutron.events import EventLog
         from abutron.execution.dispatcher import NativeDispatcher
         from abutron.execution.writer_gateway import SingleWriterGateway
@@ -310,8 +315,8 @@ class TestSniperExecutionPath:
             "sniper_plan": "{}", "execution_state": "RESERVED",
             "reason_code": "", "created_at": "", "updated_at": ""})
         res = disp.dispatch_account("snip_disp")
-        assert res["ack"] == 1
+        # No arm/secret. A mocked native ACK must never manufacture a fill.
+        assert res["ack"] == 0
         receipts = dbmod.engine_db.list_receipts("snip_disp")
-        receipt = next(r for r in receipts if r.get("candidate_id") == "cand_disp1")
-        # the recorded fill price is the sniper trigger, not the close
-        assert receipt["fill_price"] == 1.2540
+        assert not any(r.get("candidate_id") == "cand_disp1" and
+                       r.get("outcome") == "ACK" for r in receipts)
