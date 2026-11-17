@@ -17,19 +17,19 @@ Each item is labelled with one of:
 
 ## Phase 1 — Risk & Lot-Size Mathematics
 
-**Status: VERIFIED (code + tests + CLI)**
+**Status: CODE-INSTALLED / BROKER-NATIVE CERTIFICATION PENDING (310 tests passed in isolated Ubuntu checkout)**
 
 | Component | Status | Evidence |
 |-----------|--------|----------|
-| Tick size / point | VERIFIED | `SYMBOL_REGISTRY` in `apex/eligibility.py` records point for all 9 registered symbols; `scripts/verify_contracts.py` verifies all 9/9 |
-| Point value (USD/point/lot) | VERIFIED | `SymbolContract.point_value` in registry; verified in contract_verify tests |
-| Account currency | VERIFIED | `ContractVerification.account_currency` (default USD); configurable via env |
-| Minimum lot | VERIFIED | `SymbolContract.lot_min`; `brain.size_position()` rejects under lot_min |
-| Lot step | VERIFIED | `SymbolContract.lot_step`; `brain.size_position()` floors to step (never rounds up) |
-| Max loss at SL | VERIFIED | `contract_verify.verify_contract()` computes `min_lot_stop_risk_usd = lot_min * stop_pts * point_value` |
-| Daily loss cap | VERIFIED | `config.DEFAULT_DAILY_LOSS_CAP_PCT = 0.02` (2%); enforced via risk policy |
-| Owner-wide exposure | VERIFIED | `risk_engine.aggregate_owner_risk()` uses real contract specs (point, point_value from registry); `contract_verify.verify_owner_exposure()` flags unknown symbols and cap violations; dispatcher gates on this before sending |
-| Risk-policy mismatch (2% vs 20%) | **FIXED** | `riskguard.DEFAULT_MAX_RISK_PER_TRADE_PCT` now imports from config (0.15%), eliminating the divergent 0.20% hardcode. Production risk authorization was NOT silently increased — the guard is aligned to the approved config |
+| Tick size / point | REGISTRY-ONLY | Registry entries are estimates for model testing, not same-account MT5 SymbolInfo evidence. `verify_contract()` now reports non-certification without a native `OrderCalcProfit` proof. |
+| Point value (USD/point/lot) | REGISTRY-ONLY | Broker-native tick value and account-currency conversion remain outstanding for execution certification. |
+| Account currency | CODE-INSTALLED | Native sizing requires verified USD account currency; a USD default is not broker proof. |
+| Minimum lot | CODE-INSTALLED | Native sizing validates broker minimum/maximum/step and refuses minimum-lot risk overruns; latest account-bound MT5 specs must still be provided. |
+| Lot step | CODE-INSTALLED | `native_contract_sizing.py` floors to verified broker lot step; same-account contract attestation required. |
+| Max loss at SL | NOT-CERTIFIED | Registry formula is an estimate. Production must supply same-account MT5 `OrderCalcProfit(1 lot, entry, SL)` before accepting a lot size. |
+| Daily loss cap | PARTIAL | V9 source defaults to 2%; prior Ubuntu production risk report declared 3%. Native day-start equity and authoritative policy reconciliation remain outstanding. |
+| Owner-wide exposure | NOT-CERTIFIED | The dispatcher now requires `RiskEngine.aggregate_owner_risk().owner_risk_certified is True`, and the risk engine rejects incomplete broker-native position/risk evidence. Production still reports `BLOCKED_INCOMPLETE_EXPOSURE`. |
+| Risk-policy mismatch (2% vs 20%) | PARTIAL | The 0.15% default is aligned in code; 2% aggregate-open stop risk and 20% portfolio drawdown are distinct measures, not the same limit. Daily 2% source default vs 3% production report needs reconciliation. |
 
 **Tests:** `tests/test_contract_verify.py` (7 tests), `tests/test_risk.py` (8 tests), `tests/test_riskguard.py` — all pass.
 
@@ -43,7 +43,7 @@ Each item is labelled with one of:
 |-----------|--------|----------|
 | Brain direction → order path | VERIFIED | Candidate flow: brain → APEX engine → dispatcher → writer gateway; 12-field canonical HMAC signing covers direction |
 | Sniper geometry → order path | CODE-INSTALLED | `entry_type`, `trigger_price`, `stop_loss`, `take_profit` carried in canonical payload; `ApexNativeWriter.mq5` places LIMIT/CONFIRM orders at trigger |
-| Position sizing → order path | VERIFIED | `brain.size_position()` computes lots from risk fraction, floors to lot_step, rejects under lot_min; `RiskAgent.evaluate()` enforces hard ceiling |
+| Position sizing → order path | CODE-INSTALLED / NOT-CERTIFIED | Strict native `OrderCalcProfit` sizing exists but current production account-bound dynamic proof is incomplete. No production lot sizing certification claimed. |
 | Account-bound order path | VERIFIED | `SingleWriterGateway.send_order()` holds per-account lock, verifies SHA256 pin, provisions HMAC secret |
 | Broker receipts (ACK) | CODE-INSTALLED | `ReceiptManager.record_native_receipt()` records ACK receipts; `_deliver_to_ea()` returns ACK/UNKNOWN/REJECTED (never fabricates) |
 | Protective SL/TP on DEMO | CODE-INSTALLED | `ReceiptManager.verify_protective_stops()` verifies broker SL/TP vs requested geometry; **NOT yet proven on live DEMO** |
@@ -80,10 +80,10 @@ Each item is labelled with one of:
 | 9 | Chandelier trailing stop | CODE-INSTALLED | Code installed; **NO fresh broker-side trailing modification verified** |
 | 10 | Engine / execution / reconciliation | **PARTIAL** | `BLOCKED_INCOMPLETE_EXPOSURE` guard + dispatcher + receipts implemented; native broker-order reconciliation cycle not yet proven on live DEMO |
 | 11 | Equity / risk learning | CODE-INSTALLED | `learning/feedback.py` implements closed-trade feedback; **account-specific continuous learning unproven in production** |
-| 12 | Drawdown / daily loss / lot sizing | VERIFIED (calc) / CODE-INSTALLED (deploy) | Lot-sizing math verified (floor to step, reject under min, cap at max, min-lot-risk guard). Daily loss cap constant added. **Deployment on live DEMO unproven** |
+| 12 | Drawdown / daily loss / lot sizing | CODE-TESTED / NOT-CERTIFIED | Strict native sizing module and regressions pass; production MT5 contract proof, day-start equity, daily cap consistency and DEMO sizing authority remain incomplete. |
 | 13 | 2,792 paper-trade outcomes | **FIXED** | README corrected to verified 327 replayed paper outcomes (AUDUSD.r); full 26-symbol eval ran 9,267 trades. `brain_provenance.json` is source of truth |
-| 14 | Owner-wide risk (`BLOCKED_INCOMPLETE_EXPOSURE`) | **FIXED** | Guard implemented in state machine + dispatcher; exposure verified via real contract specs |
-| 15 | Risk-policy mismatch (2% vs 20%) | **FIXED** | riskguard aligned to config (0.15%); no silent increase |
+| 14 | Owner-wide risk (`BLOCKED_INCOMPLETE_EXPOSURE`) | **NOT-CERTIFIED** | Fail-closed native exposure guard repaired in PR17, but Ubuntu owner-wide risk remains blocked due independent native proof and equity history gaps. |
+| 15 | Risk-policy mismatch (2% vs 20%) | **PARTIAL** | Per-trade default aligned; aggregate-open 2%, drawdown 20%, and daily-loss policy require explicit measure-by-measure certification. |
 
 ---
 
