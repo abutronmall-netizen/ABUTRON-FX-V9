@@ -1,5 +1,5 @@
 #property strict
-#property version "1.10"
+#property version "1.17"
 #property description "ABUTRON APEX account-bound FP Markets DEMO one-shot native order bridge"
 
 // Attach to an FP Markets DEMO MT5 chart in each isolated customer terminal.
@@ -121,6 +121,29 @@ void WriteReadiness()
  {
   FileWriteString(h,"FP_NATIVE_BRIDGE_READY_V1\r\n"+base);
   FileFlush(h);FileClose(h);
+ }
+ // Option C V2 capability marker: 9-line positional native proof that this
+ // EA supports adaptive equity-budget native risk intents.
+ // Written ONLY when the active broker/account is verified AND the native
+ // adaptive risk settings match (EnableAdaptiveEquityV2 && AdaptiveV2ReconcilerApproved).
+ // The native reconciler/activation requires this marker before accepting
+ // Option C V2 native requests from this bridge.
+ if(EnableAdaptiveEquityV2 && AdaptiveV2ReconcilerApproved)
+ {
+  string capFile="ABUTRON_OPTIONC_FP_CAPABILITY_V2_"+gNonce+".txt";
+  int ch=FileOpen(capFile,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
+  if(ch!=INVALID_HANDLE)
+  {
+   string capBody="ABUTRON_OPTIONC_FP_CAPABILITY_V2\r\n"+
+     gNonce+"\r\n"+gLogin+"\r\n"+gServer+"\r\n"+
+     "FP_DEMO\r\n"+
+     "0.001\r\n"+           // max budget: equity * 0.001 (0.10%)
+     "13\r\n"+             // max positions in multi-symbol DEMO portfolio
+     "1\r\n"+              // EnableAdaptiveEquityV2 = true
+     IntegerToString((long)TimeGMT())+"\r\n";
+   FileWriteString(ch,capBody);
+   FileFlush(ch);FileClose(ch);
+  }
  }
 }
 
@@ -525,22 +548,49 @@ void UpdateEvidence()
 
 int OnInit()
 {
- if(!VerifiedNativeFeed(true))
- {Print("APEX_V2_FRESH_NATIVE_FP_DEMO_FEED_REQUIRED");return INIT_FAILED;}
+ // V117 cold-start fix: do NOT return INIT_FAILED if the native heartbeat
+ // is not yet available. The worker may still be bringing up history/feed
+ // sidecars. Register the timer first; OnTimer binds identity asynchronously
+ // when the trusted native heartbeat arrives. HandleRequest() stays
+ // unreachable until VerifiedNativeFeed passes.
  FolderCreate("ABUTRON_FP");FolderCreate("ABUTRON_FP\\receipts");FolderCreate("ABUTRON_FP\\evidence");
- gReady="ABUTRON_FP_BRIDGE_READY_V2_"+gNonce+".txt";
  LoadEvidenceScanOffset();
- WriteReadiness();EventSetTimer(2);
- Print("APEX_V2_BRIDGE_READY; automatic order submission input is ",EnableNativeDemoOrders);
+ EventSetTimer(2);
+ if(VerifiedNativeFeed(true))
+ {
+  gReady="ABUTRON_FP_BRIDGE_READY_V2_"+gNonce+".txt";
+  WriteReadiness();
+  Print("APEX_V2_BRIDGE_READY; automatic order submission input is ",EnableNativeDemoOrders);
+ }
+ else
+ {
+  Print("APEX_V2_FRESH_NATIVE_FP_DEMO_FEED_PENDING; identity will bind when heartbeat arrives");
+ }
  return INIT_SUCCEEDED;
 }
 void OnDeinit(const int reason){EventKillTimer();}
 void OnTimer()
 {
+ // V117: bind identity asynchronously on first successful verification.
+ // HandleRequest() stays unreachable until the feed is verified.
+ bool feedOk;
+ if(gNonce=="")
+ {
+  feedOk=VerifiedNativeFeed(true);
+  if(feedOk)
+  {
+   gReady="ABUTRON_FP_BRIDGE_READY_V2_"+gNonce+".txt";
+   Print("APEX_V2_BRIDGE_IDENTITY_BOUND");
+  }
+ }
+ else
+ {
+  feedOk=VerifiedNativeFeed(false);
+ }
  // Do not treat a partially written heartbeat as a permanent disconnect.
  // While any read/identity proof fails, DO NOT publish a fresh readiness proof,
  // accept an order request, or certify a broker position. Fail closed.
- if(!VerifiedNativeFeed(false))
+ if(!feedOk)
  {
    gConsecutiveFeedFailures++;
    if(gConsecutiveFeedFailures==1)
