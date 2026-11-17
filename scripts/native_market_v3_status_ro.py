@@ -62,12 +62,16 @@ def scan():
                     approved_binary_sha256=SHA,
                     broker_clock_offset_seconds=broker_offset)
                 entry["symbols"].append(detail.summary())
+                if detail.native_chart_attested:
+                    entry["native_chart_attested"]=True
         if not entry["indicator_pinned_on_disk"]:
             entry["state"]="BINARY_NOT_PINNED"
         elif not symbols:
             entry["state"]="STAGED_NOT_ATTACHED_NO_NATIVE_V3_FILES"
         elif any(x.get("verified_broker_orderflow") for x in entry["symbols"]):
-            entry["state"]="NATIVE_DATA_PARTIALLY_CERTIFIED"
+            entry["state"]="BROKER_NATIVE_MARKET_PRINTS_VERIFIED"
+        elif any(x.get("verified_native_quote_ticks") for x in entry["symbols"]):
+            entry["state"]="BROKER_QUOTES_AND_OPTIONAL_DOM_VERIFIED_NO_MARKET_PRINTS"
         else:
             entry["state"]="NATIVE_DATA_UNCERTIFIED"
         evidence.append(entry)

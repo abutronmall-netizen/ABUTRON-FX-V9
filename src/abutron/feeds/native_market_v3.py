@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
@@ -44,6 +44,9 @@ class NativeMarketV3Result:
     source_files: int=0
     identity_verified: bool=False
     pinned_binary_verified: bool=False
+    native_chart_attested: bool=False
+    verified_native_quote_ticks: bool=False
+    verified_native_dom_levels: bool=False
     latest_heartbeat_utc: str=""
     largest_record_gap_seconds: float=0
     quote_only: bool=True
@@ -59,7 +62,9 @@ class NativeMarketV3Result:
         return {k:getattr(self,k) for k in (
             "account","symbol","accepted_market_prints","accepted_quotes",
             "accepted_dom_snapshots","source_files","identity_verified",
-            "pinned_binary_verified","latest_heartbeat_utc",
+            "pinned_binary_verified","native_chart_attested",
+            "verified_native_quote_ticks","verified_native_dom_levels",
+            "latest_heartbeat_utc",
             "largest_record_gap_seconds","quote_only",
             "execution_enabled_by_importer","verified_broker_orderflow",
             "status","blockers","source_sha256")}
@@ -149,6 +154,51 @@ def trusted_fp_demo_clock_offset(
                 raise
             time.sleep(0.25)
     raise ValueError("FP_CLOCK_NATIVE_RECONCILIATION_EXHAUSTED")
+
+
+def native_mt5_chart_attached(worker_root: Path, symbol: str) -> bool:
+    """Independent native terminal-log chart-load proof (never self-attested by V3).
+
+    A successful MT5 indicator-load log is evidence that *MetaTrader* loaded the
+    pinned indicator. Coupled with currently streaming account-bound V3 data
+    this proves the chart is still running. No GUI assumption or mock STATUS
+    row alone can prove attachment.
+    """
+    terminal=worker_root/"terminal"
+    logs=terminal/"logs"
+    if not logs.is_dir() or logs.is_symlink():
+        return False
+    owner=terminal.stat().st_uid
+    today=datetime.now(timezone.utc).date()
+    candidates=[logs/(d.strftime("%Y%m%d")+".log") for d in
+        (today, today-timedelta(days=1))]
+    event_re=re.compile(
+        r"Indicators\tcustom indicator ApexMarketFeedV3 \("+
+        re.escape(symbol)+r",(M1|M5|M15|M30|H1|H4|D1)\) loaded succesfully")
+    for path in candidates:
+        if not path.is_file() or path.is_symlink():
+            continue
+        for attempt in range(3):
+            try:
+                raw=_read_bound(path,max_bytes=4_000_000,
+                                max_age=2*86400,expected_uid=owner)
+                break
+            except ValueError as e:
+                if str(e)!="NATIVE_SOURCE_CHANGED_DURING_READ" or attempt==2:
+                    return False
+                time.sleep(0.05)
+        if not raw.startswith(b"\xff\xfe"):
+            continue
+        text=raw.decode("utf-16",errors="strict")
+        matches=[line for line in text.splitlines()
+                 if "ApexMarketFeedV3" in line]
+        if not matches:
+            continue
+        last=matches[-1]
+        if event_re.search(last) and not any(x in last.lower()
+                         for x in ("failed","unloaded","removed","error")):
+            return True
+    return False
 
 
 def read_v3(
@@ -312,10 +362,18 @@ def read_v3(
             latest_status_time/1000,timezone.utc).isoformat()
         if last_status.get("dropped_records",0)!=0:
             raise ValueError("NATIVE_V3_DROPPED_RECORDS_BREAK_CONTINUITY")
-        # Broker print flags and pinned binary establish *candidate* evidence.
-        # To certify production authority, require an independently verified
-        # chart-inventory attestation (not currently implemented).
-        result.blockers.append("NATIVE_V3_CHART_ATTACHMENT_ATTESTATION_PENDING")
+        # Cross-check independent MT5 terminal log AND live, identity-bound
+        # rows. A broker-origin log entry alone or a generated STATUS alone
+        # cannot prove active attachment.
+        result.native_chart_attested=native_mt5_chart_attached(root,symbol)
+        if not result.native_chart_attested:
+            result.blockers.append("NATIVE_V3_CHART_ATTACHMENT_ATTESTATION_PENDING")
+        result.verified_native_quote_ticks=bool(
+            result.identity_verified and result.pinned_binary_verified and
+            result.native_chart_attested and result.accepted_quotes>0)
+        result.verified_native_dom_levels=bool(
+            result.identity_verified and result.pinned_binary_verified and
+            result.native_chart_attested and result.accepted_dom_snapshots>0)
         if result.accepted_market_prints==0:
             result.blockers.append("NATIVE_V3_GENUINE_AGGRESSOR_PRINTS_UNAVAILABLE")
         result.verified_broker_orderflow=bool(
@@ -325,6 +383,10 @@ def read_v3(
             if result.verified_broker_orderflow else
             "BROKER_NATIVE_PRINTS_OBSERVED_NOT_CERTIFIED"
             if result.accepted_market_prints else
+            "BROKER_NATIVE_QUOTE_AND_DOM_VERIFIED_NO_MARKET_PRINT"
+            if result.verified_native_quote_ticks and result.verified_native_dom_levels else
+            "BROKER_NATIVE_QUOTES_VERIFIED_NO_MARKET_PRINT"
+            if result.verified_native_quote_ticks else
             "NATIVE_QUOTE_OR_DOM_ONLY_PROVENANCE_PARTIAL")
     except (OSError,ValueError,TypeError,KeyError,IndexError,json.JSONDecodeError) as err:
         result.blockers.append(str(err)[:110])
