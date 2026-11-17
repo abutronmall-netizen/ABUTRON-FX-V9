@@ -48,7 +48,8 @@ class TickIngestionTest(unittest.TestCase):
                 ],
             })
         ingestion = TickIngestion(self.tmpdir)
-        trades = ingestion.load_trades()
+        self.assertEqual(ingestion.load_trades(), {})
+        trades = ingestion.load_account_execution_deals()
         self.assertEqual(len(trades), 1)  # all in one M5 bar
         total = sum(len(t) for t in trades.values())
         self.assertEqual(total, 3)
@@ -74,12 +75,13 @@ class TickIngestionTest(unittest.TestCase):
                 "source": "ApexOrderFlowExport",
             })
         ingestion = TickIngestion(self.tmpdir)
-        depth = ingestion.load_depth()
+        self.assertEqual(ingestion.load_depth(), {})
+        depth = ingestion.load_quote_snapshots()
         self.assertEqual(len(depth), 1)
         snap = list(depth.values())[0]
         self.assertEqual(snap["bid"], 1.1000)
         self.assertEqual(snap["ask"], 1.1002)
-        self.assertEqual(snap["source"], "native_depth")
+        self.assertEqual(snap["source"], "mt5_latest_bid_ask_quote_not_dom")
 
     def test_verification_summary_verified(self):
         self._write_export(
@@ -96,9 +98,10 @@ class TickIngestionTest(unittest.TestCase):
             })
         ingestion = TickIngestion(self.tmpdir)
         summary = ingestion.verification_summary()
-        self.assertTrue(summary["verified"])
-        self.assertEqual(summary["total_trade_events"], 1)
-        self.assertIn("VERIFIED", summary["honest_status"])
+        self.assertFalse(summary["verified"])
+        self.assertEqual(summary["total_trade_events"], 0)
+        self.assertEqual(summary["account_execution_deals_not_market_trades"], 1)
+        self.assertIn("PROXY", summary["honest_status"])
 
     def test_verification_summary_no_data(self):
         ingestion = TickIngestion(self.tmpdir)

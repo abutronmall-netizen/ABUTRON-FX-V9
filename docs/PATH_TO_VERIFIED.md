@@ -8,6 +8,103 @@ what is already built, and the concrete steps to reach VERIFIED.
 
 ---
 
+> **Independent Ubuntu verification hold (17 Nov 2026).** The V2 exporter
+> is **NOT DEPLOYABLE / NOT TRUE ORDER FLOW**: it uses unsupported MQL5
+> deal-history APIs, writes account executions rather than market-wide prints,
+> treats a last bid/ask tick as depth, and uses incorrect MQL5 file paths.
+> No original-exporter MetaEditor compilation evidence is available.
+> A Python-only 317-pass suite does not compile MQL5 or certify broker orders.
+>
+> **Verification fix:** `TickIngestion.load_trades()` and `.load_depth()` now
+> reject V2 account-fills/quote-only files as market tape or DOM;
+> `scripts/verify_tick_data.py` will not self-certify arbitrary CSV/JSON.
+> The old V2 records remain accessible only for diagnostics through
+> `load_account_execution_deals()` and `load_quote_snapshots()`.
+> True market order-flow requires broker-origin `CopyTicks` with actual LAST,
+> volume and BUY/SELL flags, identity-bound export proof, causal time alignment
+> and deduplication. Real DOM requires `MarketBookAdd/MarketBookGet` levels.
+> Some OTC FX/CFD brokers may never expose aggressor print or book-volume data.
+>
+> **Execution hold:** PR18 native writer remains staged and unattached. Current
+> owner-wide risk, true day-start/peak equity and lifetime history proof
+> remain incomplete; a 90-day exit ledger is not lifetime certification.
+> Attaching an EA to an existing MT5 EA chart would replace that EA: use
+> dedicated data-only charts for any future collector.
+>
+> **Performance classification:** reported last-20% replay is an offline
+> historical split, not a live forward test or an independently retrained
+> walk-forward holdout. Reported 225 online updates are on *paper outcomes*,
+> not 225 broker-acknowledged closed trades. The cited
+> `data/results/integration_test/integration_report.json` does not exist in
+> the checked-out Git branch; performance figures cannot be independently
+> reproduced from the repository's tracked artifacts alone.
+>
+> **Risk-policy discrepancy:** source default daily loss is 2% while the
+> production owner policy audit records 3%. Neither value was changed.
+>
+### Native MT5 attachment checkpoint — 17 November 2026 (12:55 SAST onward)
+
+- **FP DEMO 0512:** Indicator `ApexMarketFeedV3 3.00` attached using
+  the active MT5 chart's indicator dialog on EURUSD.r M5. File created:
+  `MQL5/Files/ABUTRON_V9_NATIVE/ABUTRON_NATIVE_MARKET_V3_EURUSD.r_20261117.jsonl`.
+  Live broker quote-ticks observed, no broker trade prints or DOM on this
+  symbol at the checked interval.
+- **FP DEMO 1636:** Same version attached via separate MT5 Navigator on
+  EURUSD M1. File created:
+  `MQL5/Files/ABUTRON_V9_NATIVE/ABUTRON_NATIVE_MARKET_V3_EURUSD_20261117.jsonl`.
+  Live broker quote-ticks and `MarketBookGet` level arrays observed
+  (2 book levels per sample in the first snapshots).
+- Both indicators coexist with existing chart EAs; the native DEMO order
+  writer is NOT attached by this work and zero new native orders were sent.
+- Important native clock finding: FP Markets MQL5 tick `time_msc` is **broker
+  server time**, +7200 seconds relative to UTC on the checked DEMO hosts,
+  while the V3 `STATUS` and `DOM` collector records use `TimeGMT()`.
+  The V3 reader now gets this offset only from *independently reconciled*
+  account-bound V101 native broker history, normalizes market quote/trade
+  tick timestamps to UTC, and preserves native raw values in the JSONL.
+- MQL5 quote flags `1026`, `1028`, `1030` were observed. The former
+  Python validator's 255 maximum was incorrect; fixed. True trade prints
+  still require `LAST` and exclusive `BUY/SELL` flags with positive traded
+  volume. Ordinary quote ticks do not satisfy this condition.
+- Tick/depth availability is broker- and symbol-dependent. Broker-provided
+  OTC market depth is *not automatically* exchange-wide depth.
+  No 24–48h coverage or any order lifecycle certification is claimed.
+- UI attachment plus resulting native status files is operator-verification
+  evidence. The automated V3 verifier continues to require its separate
+  chart inventory attestation before changing certification to VERIFIED.
+
+### V3 read-only exporter — compiled and staged (17 Nov 2026)
+
+- Compiled broker-safe `mql5/ApexOrderFlowExportV3.mq5` and
+  non-displacing chart **indicator** `mql5/ApexMarketFeedV3.mq5`
+  with MetaEditor **0 errors / 0 warnings** each.
+- Indicator EX5 SHA-256:
+  `a4a5bdbec180f8b4f7d0945b1611a945ca36d1ed49e4e23137133b9e4d592f67`.
+  **Installed on disk** in FP DEMO 0512 and 1636 `MQL5/Indicators/ABUTRON/`.
+  Neither chart was modified or confirmed attached.
+- V3 records `QUOTE` from CopyTicks without fabricating aggressor sides,
+  `MARKET_PRINT` only when LAST+exact BUY/SELL flag and positive actual volume,
+  `DOM` only from subscribed MarketBookGet levels (if the broker supplies
+  a real book), and `STATUS` freshness / drop counts. It never sends orders,
+  refuses LIVE accounts, and caps each daily symbol export at 24 MB.
+- New `src/abutron/feeds/native_market_v3.py` checks native worker identity,
+  broker login/server, pinned compiled binary, file ownership, session nonce,
+  records, flags, timestamps and freshness. The Python parser **must not**
+  mark V3 VERIFIED until there is independent chart attachment evidence and
+  real broker-origin aggressor prints. V3 can correctly produce **quote-only**
+  output on OTC FX/CFD brokers with no exchange tape or real depth.
+- Run read-only `scripts/verify_native_market_v3.py` with the real isolated
+  worker root / connection ID, account login, server, symbol and pinned SHA.
+  It returns a nonzero status until verification prerequisites are fulfilled.
+- **Next step:** attach **ApexMarketFeedV3 indicator** to dedicated DEMO
+  data charts *without displacing existing Expert Advisors*, verify
+  authentic fresh output against the same worker and a second chart inventory
+  check, and collect a representative 24–48 hours. No history older than the
+  actual running collector can be reconstructed as true tick/DOM data.
+- DEMO order writer: **NOT ATTACHED; no new lifecycle or broker trailing
+  certification**. Owner-wide risk and true peak-equity evidence remain
+  blocked. Do not equate the 320+ Python tests with broker execution.
+
 ## 1. Order flow / imbalance / delta / absorption
 **Current: PROXY — candle-derived, NOT true tick/order-book flow**
 
