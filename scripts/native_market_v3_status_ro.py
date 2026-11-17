@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
-from abutron.feeds.native_market_v3 import read_v3
+from abutron.feeds.native_market_v3 import read_v3, trusted_fp_demo_clock_offset
 
 SHA="a4a5bdbec180f8b4f7d0945b1611a945ca36d1ed49e4e23137133b9e4d592f67"
 CID={
@@ -42,11 +42,26 @@ def scan():
                 sym=p.name.removeprefix("ABUTRON_NATIVE_MARKET_V3_")[:-15]
                 if sym and re.fullmatch(r"[A-Za-z0-9._-]{1,64}",sym):
                     symbols.append(sym)
-        for symbol in sorted(set(symbols))[:25]:
-            detail=read_v3(worker_root=str(root),connection_id=cid,
-                login=login,server="FPMarketsSC-Demo",symbol=symbol,
-                approved_binary_sha256=SHA)
-            entry["symbols"].append(detail.summary())
+        if symbols:
+            if suffix=="0512":
+                hist="/var/lib/apex-signup/fp-native-history/"+cid+".json"
+                recon="/var/lib/abutron-fp-execution/reconciliation/latest.json"
+            else:
+                hist="/var/lib/apex/operator-live/fp-native-history-account-"+cid+".json"
+                recon="/var/lib/abutron-fp-execution/1636/reconciliation/latest.json"
+            try:
+                broker_offset=trusted_fp_demo_clock_offset(
+                    native_history_file=hist,
+                    native_reconciliation_file=recon,account_suffix=suffix)
+            except (OSError,ValueError,TypeError) as exc:
+                broker_offset=None
+                entry["clock_proof_blocker"]=str(exc)[:120]
+            for symbol in sorted(set(symbols))[:25]:
+                detail=read_v3(worker_root=str(root),connection_id=cid,
+                    login=login,server="FPMarketsSC-Demo",symbol=symbol,
+                    approved_binary_sha256=SHA,
+                    broker_clock_offset_seconds=broker_offset)
+                entry["symbols"].append(detail.summary())
         if not entry["indicator_pinned_on_disk"]:
             entry["state"]="BINARY_NOT_PINNED"
         elif not symbols:

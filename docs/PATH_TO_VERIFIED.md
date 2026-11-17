@@ -42,6 +42,37 @@ what is already built, and the concrete steps to reach VERIFIED.
 > **Risk-policy discrepancy:** source default daily loss is 2% while the
 > production owner policy audit records 3%. Neither value was changed.
 >
+### Native MT5 attachment checkpoint — 17 November 2026 (12:55 SAST onward)
+
+- **FP DEMO 0512:** Indicator `ApexMarketFeedV3 3.00` attached using
+  the active MT5 chart's indicator dialog on EURUSD.r M5. File created:
+  `MQL5/Files/ABUTRON_V9_NATIVE/ABUTRON_NATIVE_MARKET_V3_EURUSD.r_20261117.jsonl`.
+  Live broker quote-ticks observed, no broker trade prints or DOM on this
+  symbol at the checked interval.
+- **FP DEMO 1636:** Same version attached via separate MT5 Navigator on
+  EURUSD M1. File created:
+  `MQL5/Files/ABUTRON_V9_NATIVE/ABUTRON_NATIVE_MARKET_V3_EURUSD_20261117.jsonl`.
+  Live broker quote-ticks and `MarketBookGet` level arrays observed
+  (2 book levels per sample in the first snapshots).
+- Both indicators coexist with existing chart EAs; the native DEMO order
+  writer is NOT attached by this work and zero new native orders were sent.
+- Important native clock finding: FP Markets MQL5 tick `time_msc` is **broker
+  server time**, +7200 seconds relative to UTC on the checked DEMO hosts,
+  while the V3 `STATUS` and `DOM` collector records use `TimeGMT()`.
+  The V3 reader now gets this offset only from *independently reconciled*
+  account-bound V101 native broker history, normalizes market quote/trade
+  tick timestamps to UTC, and preserves native raw values in the JSONL.
+- MQL5 quote flags `1026`, `1028`, `1030` were observed. The former
+  Python validator's 255 maximum was incorrect; fixed. True trade prints
+  still require `LAST` and exclusive `BUY/SELL` flags with positive traded
+  volume. Ordinary quote ticks do not satisfy this condition.
+- Tick/depth availability is broker- and symbol-dependent. Broker-provided
+  OTC market depth is *not automatically* exchange-wide depth.
+  No 24–48h coverage or any order lifecycle certification is claimed.
+- UI attachment plus resulting native status files is operator-verification
+  evidence. The automated V3 verifier continues to require its separate
+  chart inventory attestation before changing certification to VERIFIED.
+
 ### V3 read-only exporter — compiled and staged (17 Nov 2026)
 
 - Compiled broker-safe `mql5/ApexOrderFlowExportV3.mq5` and

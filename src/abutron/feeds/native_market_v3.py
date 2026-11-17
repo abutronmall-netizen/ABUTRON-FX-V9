@@ -88,15 +88,81 @@ def _read_bound(path: Path, *, max_bytes: int, max_age: int | None=None,
     finally:
         os.close(fd)
 
+def _trusted_fp_demo_clock_offset_once(
+    *, native_history_file: str, native_reconciliation_file: str,
+    account_suffix: str
+) -> int:
+    """Return independently reconciled MT5 broker clock offset (seconds).
+
+    V101 native broker history must match the independent current receipt /
+    position reconciler generation. Never infer UTC offset from the system
+    locale or from a possibly forged V3 market-data file.
+    """
+    if not re.fullmatch(r"[0-9]{4}",account_suffix):
+        raise ValueError("FP_CLOCK_ACCOUNT_SUFFIX_INVALID")
+    hist=json.loads(_read_bound(Path(native_history_file),
+        max_bytes=3_000_000,max_age=150))
+    recon=json.loads(_read_bound(Path(native_reconciliation_file),
+        max_bytes=2_000_000,max_age=150))
+    expected="••••"+account_suffix
+    if (hist.get("schema")!="abutron.fpmarkets.native.account_history.readonly.v1"
+        or hist.get("history_verified_from_mt5") is not True
+        or hist.get("broker")!="FP Markets" or hist.get("environment")!="DEMO"
+        or hist.get("account_masked")!=expected
+        or not re.fullmatch(r"[0-9a-f]{64}",
+                            str(hist.get("native_file_sha256","")))
+        or recon.get("broker")!="FP Markets" or
+        recon.get("environment")!="DEMO" or
+        recon.get("account_masked")!=expected or
+        recon.get("status")!="RECONCILED_READONLY" or
+        recon.get("history_sha256")!=hist.get("native_file_sha256") or
+        recon.get("native_broker_open_risk_verified") is not True or
+        recon.get("bridge_proof_matches_broker") is not True or
+        recon.get("blockers")):
+        raise ValueError("FP_CLOCK_NATIVE_BROKER_RECONCILIATION_UNVERIFIED")
+    offset=hist.get("broker_clock_offset_seconds")
+    if type(offset) is not int or offset not in (0,3600,7200,10800,14400):
+        raise ValueError("FP_CLOCK_NATIVE_OFFSET_INVALID")
+    return offset
+
+
+def trusted_fp_demo_clock_offset(
+    *, native_history_file: str, native_reconciliation_file: str,
+    account_suffix: str
+) -> int:
+    """Read until one exact fresh broker-generation reconciles or fail closed.
+
+    Both FP V101 history and independent position/ACK proof are periodically
+    written. A SHA race can exist for a fraction of a second. Every attempt
+    repeats the COMPLETE native identity, risk and SHA validation; no cached
+    success or fallback inferred offset is accepted.
+    """
+    for attempt in range(12):
+        try:
+            return _trusted_fp_demo_clock_offset_once(
+                native_history_file=native_history_file,
+                native_reconciliation_file=native_reconciliation_file,
+                account_suffix=account_suffix)
+        except ValueError as exc:
+            if (str(exc)!="FP_CLOCK_NATIVE_BROKER_RECONCILIATION_UNVERIFIED"
+                or attempt==11):
+                raise
+            time.sleep(0.25)
+    raise ValueError("FP_CLOCK_NATIVE_RECONCILIATION_EXHAUSTED")
+
+
 def read_v3(
     *, worker_root: str, connection_id: str, login: str,
     server: str, symbol: str, approved_binary_sha256: str,
-    max_age_seconds: int=240
+    max_age_seconds: int=240, broker_clock_offset_seconds: int | None=None
 ) -> NativeMarketV3Result:
     result=NativeMarketV3Result(account=str(login)[-4:],symbol=symbol)
     try:
         if not HEX32.fullmatch(connection_id) or not HEX64.fullmatch(approved_binary_sha256):
             raise ValueError("NATIVE_CONNECTION_OR_BINARY_PIN_INVALID")
+        if (type(broker_clock_offset_seconds) is not int or
+            broker_clock_offset_seconds not in (0,3600,7200,10800,14400)):
+            raise ValueError("NATIVE_V3_BROKER_CLOCK_OFFSET_UNVERIFIED")
         if not str(login).isdigit() or not server or not symbol:
             raise ValueError("NATIVE_ACCOUNT_IDENTITY_MISSING")
         root=Path(worker_root)
@@ -153,9 +219,16 @@ def read_v3(
                     raise ValueError("NATIVE_V3_ROW_IDENTITY_MISMATCH")
                 kind=d.get("record_type")
                 ms=d.get("time_msc")
-                if type(ms) is not int or not 1600000000000<=ms<=int(time.time()*1000)+120000:
+                if type(ms) is not int:
                     raise ValueError("NATIVE_V3_MILLISECOND_CLOCK_INVALID")
-                if ms<int(time.time()*1000)-(3*86400*1000):
+                # MQL5 CopyTicks on this broker uses broker-server epoch.
+                # STATUS/DOM use TimeGMT() (actual UTC). Normalize only
+                # market ticks using independently reconciled history offset.
+                utc_ms=(ms-broker_clock_offset_seconds*1000
+                        if kind in ("QUOTE","MARKET_PRINT") else ms)
+                if not 1600000000000<=utc_ms<=int(time.time()*1000)+120000:
+                    raise ValueError("NATIVE_V3_MILLISECOND_CLOCK_INVALID")
+                if utc_ms<int(time.time()*1000)-(3*86400*1000):
                     raise ValueError("NATIVE_V3_EXPIRED_RECORD")
                 if kind=="STATUS":
                     if ms>=latest_status_time:
@@ -181,7 +254,7 @@ def read_v3(
                 if kind not in ("QUOTE","MARKET_PRINT"):
                     raise ValueError("NATIVE_V3_RECORD_KIND_UNRECOGNIZED")
                 flags=d.get("flags")
-                if type(flags) is not int or flags<0 or flags>255:
+                if type(flags) is not int or flags<0 or flags>65535:
                     raise ValueError("NATIVE_V3_TICK_FLAGS_INVALID")
                 bid=float(d.get("bid",0))
                 ask=float(d.get("ask",0))
@@ -209,12 +282,12 @@ def read_v3(
                     volume=float(d.get("volume",0))
                 if not math.isfinite(price) or not math.isfinite(volume) or price<=0 or volume<=0:
                     raise ValueError("NATIVE_V3_MARKET_PRINT_INVALID")
-                bar_open=ms//300000*300
+                bar_open=utc_ms//300000*300
                 bar_key=datetime.fromtimestamp(bar_open,timezone.utc).strftime(
                     "%Y-%m-%dT%H:%M:%SZ")
                 result.trade_bars.setdefault(bar_key,[]).append(Trade(
                     price=price,size=volume,side=side.lower(),
-                    time=str(ms//1000),order_id=0))
+                    time=str(utc_ms//1000),order_id=0))
                 result.accepted_market_prints+=1
         # Reconfirm worker session identity; market data must not cross a
         # profile/account nonce switch while a multi-MB file was read.

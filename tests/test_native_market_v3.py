@@ -42,12 +42,17 @@ def fixture(tmp_path:Path,*,rows=None):
     ]
     if rows is None:rows=default
     p=files/("ABUTRON_NATIVE_MARKET_V3_"+SYMBOL+"_20261117.jsonl")
-    p.write_text("".join(json.dumps({**base,**v})+"\n" for v in rows))
+    def broker_time(row):
+        if row["record_type"] in ("QUOTE","MARKET_PRINT"):
+            return {**base, **row, "time_msc":ms+7200000}
+        return {**base, **row}
+    p.write_text("".join(json.dumps(broker_time(v))+"\n" for v in rows))
     return worker,hashlib.sha256(BIN).hexdigest(),p
 
 def scan(root,sha,**kw):
     return read_v3(worker_root=str(root),connection_id=CONN,login=LOGIN,
-                   server=SERVER,symbol=SYMBOL,approved_binary_sha256=sha,**kw)
+                   server=SERVER,symbol=SYMBOL,approved_binary_sha256=sha,
+                   broker_clock_offset_seconds=kw.pop("broker_clock_offset_seconds",7200),**kw)
 
 def test_broker_native_prints_without_chart_proof_never_become_verified(tmp_path):
     root,sha,_=fixture(tmp_path)
@@ -116,3 +121,58 @@ def test_symlink_native_file_denied(tmp_path):
     p.symlink_to(target)
     r=scan(root,sha)
     assert "NATIVE_SOURCE_SYMLINK" in r.blockers
+
+
+def test_mql5_real_quote_flags_1030_and_broker_utc_offset(tmp_path):
+    worker,sha,path=fixture(tmp_path)
+    contents=path.read_text().replace('"flags": 2','"flags": 1030')
+    path.write_text(contents)
+    result=scan(worker,sha)
+    assert result.accepted_quotes==1
+    assert result.accepted_market_prints==1
+    assert result.status=="BROKER_NATIVE_PRINTS_OBSERVED_NOT_CERTIFIED"
+    from datetime import datetime,timezone
+    key=next(iter(result.trade_bars.keys()))
+    assert abs((datetime.strptime(key,"%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc).timestamp())-time.time())<300
+
+
+def test_broker_clock_offset_mismatch_rejected(tmp_path):
+    worker,sha,_=fixture(tmp_path)
+    result=scan(worker,sha,broker_clock_offset_seconds=0)
+    assert "NATIVE_V3_MILLISECOND_CLOCK_INVALID" in result.blockers
+    assert not result.verified_broker_orderflow
+
+
+def test_broker_clock_missing_proof_rejected(tmp_path):
+    worker,sha,_=fixture(tmp_path)
+    result=scan(worker,sha,broker_clock_offset_seconds=None)
+    assert "NATIVE_V3_BROKER_CLOCK_OFFSET_UNVERIFIED" in result.blockers
+    assert result.status=="NOT_CERTIFIED"
+
+
+def test_independent_native_history_clock_must_match_reconciliation(tmp_path):
+    from abutron.feeds.native_market_v3 import trusted_fp_demo_clock_offset
+    h=tmp_path/"history.json"
+    r=tmp_path/"recon.json"
+    digest="c"*64
+    h.write_text(json.dumps({
+        "schema":"abutron.fpmarkets.native.account_history.readonly.v1",
+        "history_verified_from_mt5":True,"broker":"FP Markets",
+        "environment":"DEMO","account_masked":"••••0512",
+        "native_file_sha256":digest,"broker_clock_offset_seconds":7200
+    }))
+    r.write_text(json.dumps({
+        "broker":"FP Markets","environment":"DEMO",
+        "account_masked":"••••0512","status":"RECONCILED_READONLY",
+        "history_sha256":digest,"native_broker_open_risk_verified":True,
+        "bridge_proof_matches_broker":True,"blockers":[]
+    }))
+    args=dict(native_history_file=str(h),native_reconciliation_file=str(r),
+              account_suffix="0512")
+    assert trusted_fp_demo_clock_offset(**args)==7200
+    values=json.loads(r.read_text());values["history_sha256"]="d"*64
+    r.write_text(json.dumps(values))
+    import pytest
+    with pytest.raises(ValueError,match="RECONCILIATION_UNVERIFIED"):
+        trusted_fp_demo_clock_offset(**args)
