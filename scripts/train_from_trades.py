@@ -156,11 +156,13 @@ def market_return_for_trade(t: Trade) -> float:
     A SELL profit is a down market. When prices are missing, the PnL sign is
     used as a trade-direction-relative return and converted to market space.
     """
+    # Neural labels represent MARKET direction, not side-relative profit.
+    # Profitable SELL on falling prices -> DOWN (0), not UP (1).
+    # Net broker PnL is separately used by the loss-pattern memory.
     if t.exit_price and t.entry_price:
-        trade_return = t.exit_price - t.entry_price
-    else:
-        trade_return = 1.0 if t.pnl > 0 else -1.0
-    return trade_return if t.direction == "BUY" else -trade_return
+        return t.exit_price - t.entry_price
+    trade_relative = 1.0 if t.pnl > 0 else -1.0
+    return trade_relative if t.direction == "BUY" else -trade_relative
 
 
 def _to_dir(v: Any) -> str:
