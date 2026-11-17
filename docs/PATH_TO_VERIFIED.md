@@ -8,6 +8,40 @@ what is already built, and the concrete steps to reach VERIFIED.
 
 ---
 
+> **Independent Ubuntu verification hold (17 Nov 2026).** The V2 exporter
+> is **NOT DEPLOYABLE / NOT TRUE ORDER FLOW**: it uses unsupported MQL5
+> deal-history APIs, writes account executions rather than market-wide prints,
+> treats a last bid/ask tick as depth, and uses incorrect MQL5 file paths.
+> No original-exporter MetaEditor compilation evidence is available.
+> A Python-only 317-pass suite does not compile MQL5 or certify broker orders.
+>
+> **Verification fix:** `TickIngestion.load_trades()` and `.load_depth()` now
+> reject V2 account-fills/quote-only files as market tape or DOM;
+> `scripts/verify_tick_data.py` will not self-certify arbitrary CSV/JSON.
+> The old V2 records remain accessible only for diagnostics through
+> `load_account_execution_deals()` and `load_quote_snapshots()`.
+> True market order-flow requires broker-origin `CopyTicks` with actual LAST,
+> volume and BUY/SELL flags, identity-bound export proof, causal time alignment
+> and deduplication. Real DOM requires `MarketBookAdd/MarketBookGet` levels.
+> Some OTC FX/CFD brokers may never expose aggressor print or book-volume data.
+>
+> **Execution hold:** PR18 native writer remains staged and unattached. Current
+> owner-wide risk, true day-start/peak equity and lifetime history proof
+> remain incomplete; a 90-day exit ledger is not lifetime certification.
+> Attaching an EA to an existing MT5 EA chart would replace that EA: use
+> dedicated data-only charts for any future collector.
+>
+> **Performance classification:** reported last-20% replay is an offline
+> historical split, not a live forward test or an independently retrained
+> walk-forward holdout. Reported 225 online updates are on *paper outcomes*,
+> not 225 broker-acknowledged closed trades. The cited
+> `data/results/integration_test/integration_report.json` does not exist in
+> the checked-out Git branch; performance figures cannot be independently
+> reproduced from the repository's tracked artifacts alone.
+>
+> **Risk-policy discrepancy:** source default daily loss is 2% while the
+> production owner policy audit records 3%. Neither value was changed.
+>
 ## 1. Order flow / imbalance / delta / absorption
 **Current: PROXY — candle-derived, NOT true tick/order-book flow**
 

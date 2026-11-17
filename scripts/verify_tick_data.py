@@ -78,9 +78,9 @@ def main():
                                            symbol=args.symbol)
             total = sum(len(v) for v in tick_trades.values())
             if total > 0:
-                result["order_flow_status"] = "VERIFIED"
-                result["footprint_status"] = "VERIFIED"
-                result["detail"]["source"] = "csv_tick_data"
+                result["order_flow_status"] = "UNATTESTED_CSV"
+                result["footprint_status"] = "UNATTESTED_CSV"
+                result["detail"]["source"] = "csv_unverified_market_tape_provenance"
                 result["detail"]["tick_trades"] = {
                     "bars_with_trades": len(tick_trades),
                     "total_trades": total,
@@ -93,8 +93,8 @@ def main():
                                                symbol=args.symbol)
             result["detail"]["depth_snapshots"] = len(depth_signals)
             if depth_signals and result["order_flow_status"] == "PROXY":
-                result["order_flow_status"] = "PARTIAL"
-                result["detail"]["source"] = "depth_only"
+                result["order_flow_status"] = "UNATTESTED_DEPTH"
+                result["detail"]["source"] = "depth_csv_not_broker_attested"
 
     if not args.json:
         print(f"=== V9 Tick Data Verification ===")
@@ -104,7 +104,7 @@ def main():
                   f"with trades, {mt5_summary['total_trade_events']} "
                   f"trade events")
         else:
-            print(f"  MT5 exports: none found")
+            print(f"  MT5 legacy V2 exports: NOT verified market tape; "f"{mt5_summary.get('account_execution_deals_not_market_trades', 0)} "f"account deals, {mt5_summary.get('quote_snapshots_not_dom', 0)} quote snapshots")
         if tick_trades:
             print(f"  Tick trades: {len(tick_trades)} bars, "
                   f"{sum(len(t) for t in tick_trades.values())} trades")

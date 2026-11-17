@@ -1,5 +1,8 @@
-"""True tick/trade data ingestion — replaces candle-derived proxies.
+"""Legacy MT5 V2 export diagnostics; NOT verified market-wide tick prints.
 
+The V2 ApexOrderFlowExport.mq5 files contain account execution history and
+last bid/ask quotes, not a broker market tape or actual depth-of-market.
+Active load_trades/load_depth deliberately reject these as signal input.
 Reads the native MT5 export files produced by ApexOrderFlowExport.mq5
 (or Deriv API tick history) and converts them into the Trade objects
 that OrderFlowEngine and VolumeFootprintBuilder already consume.
@@ -73,7 +76,18 @@ class TickIngestion:
     # Trade ingestion
     # ------------------------------------------------------------------
     def load_trades(self) -> Dict[str, List[Trade]]:
-        """Load all trade deals from export files, grouped by bar time.
+        """Market-wide trades only. V2 account fills are never a true tape.
+
+        The legacy exporter has no CopyTicks/TICK_FLAG_BUY/SELL evidence.
+        A broker-attested market-print importer is required before this can
+        emit true market prints for the execution signal pipeline.
+        """
+        return {}
+
+    def load_account_execution_deals(self) -> Dict[str, List[Trade]]:
+        """Diagnostic account execution history, NOT market tick prints.
+
+        Load all trade deals from export files, grouped by bar time.
 
         Returns a dict mapping bar-time (epoch seconds) → list of Trade
         objects. This is the ``tick_trades`` argument for
@@ -124,7 +138,11 @@ class TickIngestion:
     # Depth ingestion
     # ------------------------------------------------------------------
     def load_depth(self) -> Dict[str, Dict[str, Any]]:
-        """Load market depth snapshots, keyed by timestamp.
+        """Verified order-book levels only; the V2 bid/ask is not DOM."""
+        return {}
+
+    def load_quote_snapshots(self) -> Dict[str, Dict[str, Any]]:
+        """Load latest bid/ask quotes for diagnostics, NOT order book depth.
 
         Returns a dict mapping timestamp string → depth features dict.
         This is the ``depth`` argument for ``prepare_signal_data()``.
@@ -146,7 +164,7 @@ class TickIngestion:
                 "last": float(data.get("last", 0.0)),
                 "volume": int(data.get("volume", 0)),
                 "symbol": data.get("symbol", ""),
-                "source": "native_depth",
+                "source": "mt5_latest_bid_ask_quote_not_dom",
             }
         return result
 
@@ -227,24 +245,29 @@ class TickIngestion:
         trade data instead of candle-derived proxies.
         """
         trades = self.load_trades()
-        depth = self.load_depth()
+        legacy_deals = self.load_account_execution_deals()
+        quotes = self.load_quote_snapshots()
         bars = self.load_bars()
         ident = self.load_identity()
 
         total_trades = sum(len(t) for t in trades.values())
+        account_deals = sum(len(t) for t in legacy_deals.values())
         return {
             "mql5_files_dir": self.dir,
             "bars_with_trades": len(trades),
             "total_trade_events": total_trades,
-            "depth_snapshots": len(depth),
+            "account_execution_deals_not_market_trades": account_deals,
+            "quote_snapshots_not_dom": len(quotes),
+            "depth_snapshots": 0,
             "bars_exported": len(bars),
             "identity_exported": ident is not None,
-            "source": "native_mt5_export",
-            "verified": total_trades > 0,
+            "source": "mt5_account_executions_and_latest_quotes",
+            "verified": False,
             "honest_status": (
-                "VERIFIED — true broker tick/trade data from MT5 export"
-                if total_trades > 0
-                else "NO_DATA — no tick export files found; using "
-                     "candle-derived proxies"
+                "PROXY — MT5 account fills and bid/ask quotes are not "
+                "market-wide aggressor trades or order book depth"
+                if account_deals or quotes
+                else "NO_DATA — no certified market tape or DOM; "
+                     "using candle-derived proxies"
             ),
         }
