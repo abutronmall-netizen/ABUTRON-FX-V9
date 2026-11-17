@@ -44,20 +44,17 @@ class NativeDispatcher:
 
         # Pre-flight: verify owner-wide exposure with real contract specs.
         owner_id = account.get("owner_id", "")
+        if not owner_id:
+            return {"connection_id": connection_id, "sent": 0,
+                    "error": "OWNER_ID_UNVERIFIED"}
         if owner_id:
-            from ..risk.contract_verify import verify_owner_exposure
-            from ..config import DEFAULT_PORTFOLIO_RISK_CAP_PCT
-            equity_by_conn = {}
-            open_positions: Dict[str, list] = {}
-            for acct in db.engine_db.list_accounts(owner_id=owner_id):
-                cid = acct["connection_id"]
-                equity_by_conn[cid] = float(acct.get("equity", 0.0) or 0.0)
-                open_positions[cid] = db.engine_db.recent_open_positions(cid)
-            exposure = verify_owner_exposure(
-                owner_id, equity_by_conn=equity_by_conn,
-                open_positions=open_positions,
-                portfolio_cap_pct=DEFAULT_PORTFOLIO_RISK_CAP_PCT)
-            if not exposure["verified"] or exposure["cap_exceeded"]:
+            # Never authorize an order from registry-estimated stop risk.
+            # Only independently reconciled, account-bound MT5 position
+            # inventories and OrderCalcProfit stop losses may open headroom.
+            from ..risk.risk_engine import RiskEngine
+            exposure = RiskEngine(self.log).aggregate_owner_risk(owner_id)
+            if (exposure.get("owner_risk_certified") is not True
+                    or exposure.get("cap_exceeded") is not False):
                 # Block all RESERVED candidates for this owner — do NOT
                 # send any order until exposure is reconciled.
                 blocked = self._block_for_incomplete_exposure(

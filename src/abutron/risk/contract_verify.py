@@ -108,6 +108,14 @@ def verify_contract(symbol: str, *, equity: float,
     if contract.lot_step <= 0:
         issues.append(f"INVALID_LOT_STEP: {symbol} lot_step={contract.lot_step}")
 
+    # Contract specs alone are NOT broker certification. The SYMBOL_REGISTRY
+    # provides a static price/tick profile; it is not proof of the account's
+    # real MT5 OrderCalcProfit loss. Broker-native verification requires an
+    # authenticated, current native positions snapshot confirming the actual
+    # SL distance and point value. This issue is always flagged so the
+    # contract math is never mistaken for broker-certified risk.
+    issues.append("BROKER_NATIVE_ORDER_CALC_PROFIT_NOT_VERIFIED")
+
     # --- Compute minimum-lot stop risk ---
     # USD risk at minimum lot = lot_min * stop_dist_points * point_value
     min_lot_stop_risk = contract.lot_min * stop_distance_points * contract.point_value

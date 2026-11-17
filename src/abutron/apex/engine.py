@@ -674,7 +674,10 @@ class ApexEngine:
         risk_engine = RiskEngine(self.log)
         exposure = risk_engine.aggregate_owner_risk(owner_id)
         return {
+            # NULL is not zero: unknown native stop risk must not create
+            # artificial headroom for APEX candidate reservations.
             "aggregate_stop_risk_usd": exposure["aggregate_stop_risk_usd"],
+            "owner_risk_certified": exposure.get("owner_risk_certified") is True,
             "balance_by_conn": balances,
         }
 

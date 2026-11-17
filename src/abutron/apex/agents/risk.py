@@ -64,6 +64,10 @@ class RiskAgent(BaseAgent):
                                     DEFAULT_PORTFOLIO_RISK_CAP_PCT))
 
         detail: Dict[str, Any] = {"equity": equity, "per_trade_pct": per_trade_pct}
+        if (owner_book.get("aggregate_stop_risk_usd") is None
+                or owner_book.get("owner_risk_certified") is False):
+            return RiskDecision(False, False, 0.0, 0.0, "HOLD",
+                                detail | {"block_reason": "OWNER_NATIVE_RISK_UNVERIFIED"})
         stop_risk_usd = float(candidate.get("stop_risk_usd", 0.0) or 0.0)
         volume = float(candidate.get("volume", 0.0) or 0.0)
 
