@@ -83,7 +83,10 @@ def verify_contract(symbol: str, *, equity: float,
         ContractVerification with computed values and any issues found.
     """
     profile = SYMBOL_REGISTRY.get(symbol)
-    issues: List[str] = []
+    # Registry profiles are simulation estimates, not live MT5 proof.
+    # Native acceptance requires same-account SymbolInfoDouble AND
+    # OrderCalcProfit(entry -> SL) supplied to native_contract_sizing.
+    issues: List[str] = ["BROKER_NATIVE_ORDER_CALC_PROFIT_NOT_VERIFIED"]
 
     if profile is None:
         # Conservative fallback — cannot verify without contract data

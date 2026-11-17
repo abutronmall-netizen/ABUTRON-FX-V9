@@ -277,7 +277,7 @@ def test_broker_confirms_sl_requires_ticket_and_matching_sl():
     assert re._broker_confirms_sl(12345, None, 1.0850, 1.0800, "BUY") is False
 
     # Ticket + matching SL → confirmed
-    assert re._broker_confirms_sl(12345, 1.0850, 1.0850, 1.0800, "BUY") is True
+    assert re._broker_confirms_sl(12345, 1.0850, 1.0850, 1.0800, "BUY", True) is True
 
     # Ticket + mismatched SL → not confirmed
     assert re._broker_confirms_sl(12345, 1.0800, 1.0850, 1.0800, "BUY") is False
@@ -297,7 +297,8 @@ def test_trailing_stop_pending_without_broker_sl():
         entry_price=1.0880, current_stop=1.0850, atr=0.0005,
         point=0.00001, point_value=1.0,
         native_ticket=12345, broker_sl=None)
-    assert result["tightened"] is True
+    assert result["proposed"] is True
+    assert result["tightened"] is False
     assert result["confirmed"] is False  # PENDING, not PROTECTED
 
 
@@ -313,7 +314,8 @@ def test_trailing_stop_protected_with_broker_sl():
         symbol="EURUSD.r", direction="BUY", current_price=1.0900,
         entry_price=1.0880, current_stop=1.0850, atr=0.0005,
         point=0.00001, point_value=1.0,
-        native_ticket=12345, broker_sl=1.0890)
+        native_ticket=12345, broker_sl=1.0890,
+        broker_reconciliation_verified=True)
     assert result["tightened"] is True
     assert result["confirmed"] is True
 
@@ -344,9 +346,8 @@ def test_position_risk_without_point_falls_back():
     from abutron.risk.risk_engine import RiskEngine
     re = RiskEngine.__new__(RiskEngine)
 
-    pr = re.position_risk(
-        connection_id="conn-1", symbol="UNKNOWN", direction="BUY",
-        volume=1.0, entry_price=1.0850, stop_loss=1.0840,
-        atr=20.0, point_value=1.0, point=0.0)
-    # Falls back: 1.0 * 0.001 * 1.0 = 0.001
-    assert pr.stop_risk_usd == pytest.approx(0.001, rel=1e-3)
+    with pytest.raises(ValueError, match="BROKER_NATIVE_STOP_RISK_GEOMETRY_UNVERIFIED"):
+        re.position_risk(
+            connection_id="conn-1", symbol="UNKNOWN", direction="BUY",
+            volume=1.0, entry_price=1.0850, stop_loss=1.0840,
+            atr=20.0, point_value=1.0, point=0.0)
