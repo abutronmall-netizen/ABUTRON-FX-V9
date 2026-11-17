@@ -34,9 +34,11 @@ def test_canonical_order_covers_all_fields():
         "trail_k": 2.0,
         "trail_stop": 1.0860,
     }
-    canonical = _canonical_order("ABUTRON_REQ_abc123", cand, "conn-0512")
+    canonical = _canonical_order("ABUTRON_REQ_abc123", cand, "conn-0512",
+                                 expires_at="1794879999")
     fields = canonical.split("|")
-    assert len(fields) == 12, f"expected 12 fields, got {len(fields)}"
+    assert len(fields) == 13, f"expected 13 fields, got {len(fields)}"
+    assert fields[-1] == "1794879999"
     assert "ABUTRON_REQ_abc123" in canonical
     assert "cand-001" in canonical
     assert "conn-0512" in canonical
