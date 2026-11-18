@@ -11,6 +11,16 @@ WorkingDirectory=/opt/abutron-fx-v9
 Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-fx-v9/data
 Environment=ABUTRON_ENV=demo
 Environment=PYTHONPATH=/opt/abutron-fx-v9/src
+# The MT5 API gateway is embedded: portal :19743 + gateway :19744 in this
+# process. Disable with ABUTRON_GATEWAY_ENABLED=false and use the
+# abutron-gateway.service unit instead for a split deployment.
+Environment=ABUTRON_GATEWAY_ENABLED=true
+Environment=ABUTRON_GATEWAY_PORT=19744
+Environment=ABUTRON_GATEWAY_DEMO=false
+Environment=ABUTRON_GATEWAY_DEFAULT_MODE=bridge
+Environment=ABUTRON_GATEWAY_ALLOW_SIMULATED=false
+# Gateway secrets (pepper, bridge secret, admin secret) live here.
+EnvironmentFile=-/etc/abutron/gateway.env
 ExecStart=/opt/abutron-fx-v9/.venv/bin/python -m abutron.main
 Restart=always
 RestartSec=5

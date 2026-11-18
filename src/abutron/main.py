@@ -16,8 +16,8 @@ from typing import Any, Dict, List, Optional
 
 import uvicorn
 
-from .config import (DATA_ROOT, ENGINE_TICK_SECONDS, PORTAL_HOST, PORTAL_PORT,
-                     utc_now)
+from .config import (DATA_ROOT, ENGINE_TICK_SECONDS, GATEWAY_ENABLED,
+                     PORTAL_HOST, PORTAL_PORT, utc_now)
 from .events import EventLog
 from .db import engine_db
 from .crm.controls import crm
@@ -202,9 +202,39 @@ class ApexRuntime:
             t.start()
             threads.append(t)
 
-        app = create_app(self.log)
-        uvicorn.run(app, host=PORTAL_HOST, port=PORTAL_PORT,
-                    log_level="info")
+        # The multi-tenant MT5 API gateway is part of the platform, not a
+        # third-party dependency. It listens on its own port/database while
+        # sharing this process and data root. A failure here must never take
+        # the autotrader down, so it is logged and skipped.
+        gateway = None
+        if GATEWAY_ENABLED:
+            try:
+                from .gateway.embedded import EmbeddedGateway
+                gateway = EmbeddedGateway()
+                if gateway.start():
+                    self.log.append(_safe_event(
+                        "gateway.started", execution_state="CONNECTED",
+                        reason_code="OK",
+                        payload={"url": gateway.url,
+                                 "port": gateway.settings.port}))
+                else:
+                    self.log.append(_safe_event(
+                        "gateway.start_failed", execution_state="UNKNOWN",
+                        reason_code=f"GATEWAY_START_FAILED:{type(gateway.error).__name__}",
+                        payload={"port": gateway.settings.port}))
+            except Exception as exc:  # never break the trading runtime
+                import logging
+                logging.getLogger(__name__).warning(
+                    "gateway failed to start: %s", exc)
+                gateway = None
+
+        try:
+            app = create_app(self.log)
+            uvicorn.run(app, host=PORTAL_HOST, port=PORTAL_PORT,
+                        log_level="info")
+        finally:
+            if gateway is not None:
+                gateway.stop()
 
     def engine_tick_loop(self) -> None:
         while not self._stop.is_set():

@@ -126,6 +126,15 @@ RISKGUARD_ENABLED = os.getenv("ABUTRON_RISKGUARD_ENABLED", "false").lower() in (
 PORTAL_HOST = os.getenv("ABUTRON_PORTAL_HOST", "0.0.0.0")
 PORTAL_PORT = int(os.getenv("ABUTRON_PORTAL_PORT", "19743"))
 
+# Multi-tenant MT5 API gateway (src/abutron/gateway). When enabled, the
+# platform process starts it as a second listener alongside the portal.
+# It is a separate surface with its own tenant keys and database; disabling
+# it or running it as a standalone unit does not affect the autotrader.
+GATEWAY_ENABLED = os.getenv("ABUTRON_GATEWAY_ENABLED", "true").lower() in (
+    "1", "true", "yes", "on")
+GATEWAY_HOST = os.getenv("ABUTRON_GATEWAY_HOST", "0.0.0.0")
+GATEWAY_PORT = int(os.getenv("ABUTRON_GATEWAY_PORT", "19744"))
+
 # Audit
 AUDIT_HASH_ALGO = "sha256"
 

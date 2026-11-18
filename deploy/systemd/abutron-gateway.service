@@ -1,0 +1,37 @@
+[Unit]
+Description=ABUTRON MT5 API Gateway (multi-tenant REST + WebSocket)
+# Use this unit for a STANDALONE gateway deployment. The default
+# abutron-portal.service already runs the gateway embedded on port 19744;
+# do not enable both against the same port.
+
+[Service]
+Type=simple
+User=abutron
+Group=abutron
+WorkingDirectory=/opt/abutron-fx-v9
+Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-fx-v9/data
+Environment=ABUTRON_ENV=production
+Environment=PYTHONPATH=/opt/abutron-fx-v9/src
+Environment=ABUTRON_GATEWAY_HOST=0.0.0.0
+Environment=ABUTRON_GATEWAY_PORT=19744
+# No demo tenant with a published key in production.
+Environment=ABUTRON_GATEWAY_DEMO=false
+# Real accounts connect through the bridge EA; simulated is opt-in.
+Environment=ABUTRON_GATEWAY_DEFAULT_MODE=bridge
+Environment=ABUTRON_GATEWAY_ALLOW_SIMULATED=false
+# Inject the secret via systemd EnvironmentFile, e.g.
+# /etc/abutron/gateway.env containing:
+#   ABUTRON_GATEWAY_PEPPER=...
+#   ABUTRON_GATEWAY_BRIDGE_SECRET=...
+#   ABUTRON_GATEWAY_ADMIN_SECRET=...
+EnvironmentFile=-/etc/abutron/gateway.env
+ExecStart=/opt/abutron-fx-v9/.venv/bin/python -m abutron.gateway
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/abutron-fx-v9/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

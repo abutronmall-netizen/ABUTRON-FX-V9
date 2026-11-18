@@ -143,6 +143,10 @@ execution, broker-native reconciliation, and three operator surfaces
 - **Broker-native reconciliation** — ticket/deal/SL/TP matching, trailing
   stops, UNKNOWN resolution, no zero-filling of missing exposure.
 - **Three portals** — client, admin CRM, APEX command center (FastAPI).
+- **Multi-tenant MT5 API gateway** — a MetaApi-style REST + WebSocket
+  bridge (`src/abutron/gateway/`) with API keys, scopes, rate limits,
+  idempotent trading, signed webhooks and a NAT-friendly MQL5 bridge EA.
+  See [`docs/MT5_GATEWAY.md`](docs/MT5_GATEWAY.md).
 - **Ubuntu/Wine deployment** — systemd units, per-account MT5 worker
   template, install script.
 
@@ -183,6 +187,57 @@ execution, broker-native reconciliation, and three operator surfaces
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full blueprint.
 
+## MT5 API gateway (multi-tenant)
+
+A second product surface ships alongside the autotrader: a **MetaApi-style
+MT5 API bridge** (`src/abutron/gateway/`) that gives each client an API key
+and lets them read market data, positions and history, trade, and stream
+events over REST/WebSocket — with no shared writer and full tenant
+isolation.
+
+```
+client bots ── REST/WS (API keys) ──▶ API tier
+                                      │ per-account bridge token
+                                      ▼
+                              bridge EA / simulated transport
+                                      │ single writer
+                                      ▼
+                              MT5 terminal (Wine or Windows)
+```
+
+- **REST + WebSocket** — accounts, symbols/quotes/candles, positions,
+  orders, deals, market/pending orders, modify, partial close, cancel,
+  `/v1/stream` event feed, signed webhooks, audit.
+- **Tenant isolation** — hashed `abk_...` keys, `read`/`trade`/`manage`
+  scopes, per-key rate limits, cross-tenant ids return 404.
+- **One writer per account** — `control_mode: api` vs `read_only`;
+  provisioning refuses an account APEX automation is currently driving
+  (`409 AUTOMATION_WRITER_ACTIVE`), and accounts the platform already
+  automates are mirrored **read-only** (`market_data_mode: engine`) so
+  positions, deals, quotes and candles are visible through the same API.
+- **Honest execution** — `200 EXECUTED` only on a transport ACK; a slow
+  bridge yields `202 QUEUED` + a command id, never a fabricated fill.
+- **Runs without Wine** — a deterministic simulated transport powers the
+  preview and the 35 gateway tests; the MQL5 bridge
+  (`mql5/AbuGatewayBridge.mq5`) connects real terminals over outbound HTTP
+  (NAT-friendly pull/push).
+- **Part of the platform, not a vendor** — `./run.sh` starts the portal
+  (`:19743`) and the gateway (`:19744`) in one process. No MetaApi account,
+  SDK or outbound third-party call is involved; broker access is the MT5
+  terminal's own login.
+
+```bash
+./run-gateway.sh
+# → http://localhost:19744/docs      (Swagger)
+# → http://localhost:19744/          (demo key + quickstart)
+
+export ABUTRON_GATEWAY_KEY=abk_demo_0123456789abcdef0123456789abcdef
+python examples/gateway_client.py --demo
+```
+
+Full design, API reference, bridge protocol and scaling notes:
+[`docs/MT5_GATEWAY.md`](docs/MT5_GATEWAY.md).
+
 ## Quick start
 
 ```bash
@@ -195,18 +250,23 @@ cp .env.example .env
 # → http://localhost:19743/client  (client)
 # → http://localhost:19743/admin   (admin CRM)
 # → http://localhost:19743/command (command center)
+
+# The platform starts the multi-tenant MT5 API gateway too
+# → http://localhost:19744/docs   (ABUTRON_GATEWAY_ENABLED=true)
+# Standalone instead: ./run-gateway.sh
 ```
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest            # 168 platform tests
+.venv/bin/python -m pytest            # platform + gateway tests
+.venv/bin/python -m pytest tests/test_gateway.py tests/test_gateway_platform.py -q   # 35 gateway tests
 .venv/bin/python -m pytest vendor/abutron-apex/apex11/tests   # 210 vendored APEX tests
 ```
 
 `pytest.ini` registers `src/` on the path, so no `PYTHONPATH` is needed.
 
-**168 tests** covering feed quality, the **NexusBrain** decision brain
+**202 tests** covering feed quality, the **NexusBrain** decision brain
 (neural backprop, ensemble uncertainty, conviction-based sizing,
 walk-forward training, engine integration), decision logic, account auth,
 risk sizing/caps, single-writer execution, client OFF, order flow +
