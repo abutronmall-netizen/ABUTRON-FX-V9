@@ -327,35 +327,36 @@ def main() -> int:
         import abutron.main as _main
         _main.get_feed = _bf.get_feed
 
-        # Certify owner exposure (simulated broker-reconciled DEMO account).
-        original_aggregate = RiskEngine.aggregate_owner_risk
-
-        def _certified_exposure(self, owner_id):
-            return {
-                "owner_id": owner_id,
-                "aggregate_stop_risk_usd": 0.0,
-                "observed_verified_stop_risk_usd": 0.0,
-                "aggregate_balance_usd": 10000.0,
-                "cap_pct": DEFAULT_PORTFOLIO_RISK_CAP_PCT,
-                "cap_usd": 10000.0 * DEFAULT_PORTFOLIO_RISK_CAP_PCT,
-                "headroom_usd": 10000.0 * DEFAULT_PORTFOLIO_RISK_CAP_PCT,
-                "cap_exceeded": False,
-                "owner_risk_certified": True,
-                "risk_usd_is_partial_observed_only": False,
-                "risk_usd_is_lower_bound_only": False,
-                "unknown_exposure_connections": [],
-                "unknown_symbols": [],
-            }
+        # Certify owner exposure via the REAL broker-worker path: the
+        # CRM stores equity + native_positions_verified from broker-native
+        # evidence, and RiskEngine.aggregate_owner_risk reads them from the
+        # DB (no patching). This is exactly what the broker worker does in
+        # production when a reconciled native positions snapshot + MT5
+        # balance are verified.
+        from abutron.crm.controls import crm
+        cert_acct = crm.certify_exposure(
+            connection_id, equity=10000.0, account_currency="USD",
+            native_positions_verified=True)
+        report.check(
+            "broker_worker_certifies_exposure",
+            cert_acct.get("equity") == 10000.0
+            and cert_acct.get("native_positions_verified") == 1,
+            "broker worker certified exposure (equity + native_positions_verified "
+            "stored in DB)")
+        # Confirm the exposure guard now certifies from the DB fields.
+        exposure_cert = RiskEngine(runtime.log).aggregate_owner_risk(
+            "owner_cert")
+        report.check(
+            "exposure_guard_certified",
+            exposure_cert.get("owner_risk_certified") is True
+            and exposure_cert.get("cap_exceeded") is False,
+            "owner exposure certified from DB fields (dispatcher will proceed)")
 
         # ------------------------------------------------------------------
         # ENGINE TICK: run the real production decision path.
         # ------------------------------------------------------------------
         print("\n--- ENGINE TICK (real ApexRuntime.engine_tick) ---")
-        RiskEngine.aggregate_owner_risk = _certified_exposure
-        try:
-            runtime.engine_tick()
-        finally:
-            RiskEngine.aggregate_owner_risk = original_aggregate
+        runtime.engine_tick()
 
         # The brain holds on weak-signal candles (correct, fail-closed).
         # Certify the decision path produced valid verdicts (no crash).
@@ -388,22 +389,18 @@ def main() -> int:
             tp=ack_candle.close + 0.0030,
             risk_usd=10000.0 * DEFAULT_PER_TRADE_RISK_PCT)
 
-        # Dispatch through the runtime dispatcher with certified exposure.
-        RiskEngine.aggregate_owner_risk = _certified_exposure
-        try:
-            stored = runtime.apex.store_ready_candidate(
-                connection_id=connection_id, account=account,
-                ready=ready, candle=candle_dict)
-            report.check(
-                "ready_candidate_stored",
-                stored is not None and stored["execution_state"] == "RESERVED",
-                f"gate-approved READY candidate stored RESERVED "
-                f"(candidate_id={stored['candidate_id'] if stored else None})")
+        # Dispatch through the runtime dispatcher (exposure certified in DB).
+        stored = runtime.apex.store_ready_candidate(
+            connection_id=connection_id, account=account,
+            ready=ready, candle=candle_dict)
+        report.check(
+            "ready_candidate_stored",
+            stored is not None and stored["execution_state"] == "RESERVED",
+            f"gate-approved READY candidate stored RESERVED "
+            f"(candidate_id={stored['candidate_id'] if stored else None})")
 
-            # Dispatch via the runtime dispatcher (exposure certified).
-            res_dispatch = runtime.dispatcher.dispatch_account(connection_id)
-        finally:
-            RiskEngine.aggregate_owner_risk = original_aggregate
+        # Dispatch via the runtime dispatcher (exposure certified).
+        res_dispatch = runtime.dispatcher.dispatch_account(connection_id)
 
         ack_ok = (res_dispatch.get("ack", 0) > 0
                   and res_dispatch.get("sent", 0) > 0)
@@ -436,12 +433,8 @@ def main() -> int:
             stop_loss=ack_receipts[0]["stop_loss"],
             take_profit=ack_receipts[0]["take_profit"],
             state="OPEN")]
-        RiskEngine.aggregate_owner_risk = _certified_exposure
-        try:
-            recon = runtime.reconciler.reconcile_account(
-                connection_id, native_history)
-        finally:
-            RiskEngine.aggregate_owner_risk = original_aggregate
+        recon = runtime.reconciler.reconcile_account(
+            connection_id, native_history)
 
         report.check(
             "reconciliation_matched",
@@ -485,13 +478,27 @@ def main() -> int:
         # FAIL-CLOSED SAFETY GATES (certification must prove the gate holds)
         # ------------------------------------------------------------------
         print("\n--- FAIL-CLOSED SAFETY GATES ---")
-        # Without certified exposure, the dispatcher blocks.
-        exposure_uncert = RiskEngine(runtime.log).aggregate_owner_risk("owner_cert")
+        # Without certified exposure, the dispatcher blocks. Register a
+        # second account and leave it UN-certified (no broker-native
+        # evidence) — the exposure guard must refuse to certify it.
+        uncert_cid = "cert_uncert_" + "e" * 20
+        engine_db.upsert_account({
+            "connection_id": uncert_cid, "broker": "fp_markets",
+            "mt5_login": 70123456, "owner_id": "owner_uncert",
+            "display_name": "Uncertified DEMO", "environment": "demo",
+            "server": "synthetic-demo-server",
+            "per_trade_risk_pct": DEFAULT_PER_TRADE_RISK_PCT,
+            "portfolio_cap_pct": DEFAULT_PORTFOLIO_RISK_CAP_PCT,
+            "desired_on": 1, "effective_on": 1, "symbols": "EURUSD.r",
+            "conn_status": "CONNECTED", "worker_binding": "cert-worker",
+        })
+        exposure_uncert = RiskEngine(runtime.log).aggregate_owner_risk(
+            "owner_uncert")
         report.check(
             "exposure_guard_fail_closed",
-            exposure_uncert.get("owner_risk_certified") is not True
-            or True,  # native positions not in DB -> uncertified
-            "exposure guard refuses to certify without broker-native positions")
+            exposure_uncert.get("owner_risk_certified") is not True,
+            "exposure guard refuses to certify an account without "
+            "broker-native positions (dispatcher will block it)")
 
         rg = RiskGuard()
         eq = 10000.0

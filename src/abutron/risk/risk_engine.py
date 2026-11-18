@@ -94,7 +94,9 @@ class RiskEngine:
             if (type(equity) not in (int, float)
                     or not math.isfinite(equity) or equity <= 0
                     or acct.get("account_currency") != "USD"
-                    or acct.get("native_positions_verified") is not True):
+                    # Accept both True (bool) and 1 (int from SQLite) as
+                    # "verified"; 0/None/False fail-closed.
+                    or not acct.get("native_positions_verified")):
                 complete = False
                 unknown.append(cid)
             else:

@@ -89,6 +89,28 @@ class CrmService:
         self.engine.upsert_account(acct)
         return self.engine.get_account(connection_id)
 
+    def certify_exposure(self, connection_id: str, *, equity: float,
+                         account_currency: str = "USD",
+                         native_positions_verified: bool = True) -> Dict:
+        """Certify owner exposure from broker-native evidence.
+
+        Sets the fields RiskEngine.aggregate_owner_risk reads to decide
+        whether an owner's exposure is certified (equity > 0, USD
+        currency, native_positions_verified=True). Only a trusted broker
+        worker should call this after a reconciled native positions
+        snapshot + MT5 balance are verified. Until this is called,
+        exposure is uncertified and the dispatcher blocks all RESERVED
+        candidates (BLOCKED_INCOMPLETE_EXPOSURE) — fail-closed.
+        """
+        acct = self.engine.get_account(connection_id)
+        if acct is None:
+            raise CrmError(f"account {connection_id} not found")
+        acct["equity"] = float(equity)
+        acct["account_currency"] = account_currency
+        acct["native_positions_verified"] = 1 if native_positions_verified else 0
+        self.engine.upsert_account(acct)
+        return self.engine.get_account(connection_id)
+
     # ------------------------------------------------------------------
     # Broker connection lifecycle (blueprint C10–C16, seven statuses)
     # ------------------------------------------------------------------
