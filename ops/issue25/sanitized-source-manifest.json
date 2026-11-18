@@ -15,7 +15,7 @@
     "ops/issue25/scripts/chronological_owner_holdout.py": {
       "bytes": 7732,
       "changed_in_sanitization": true,
-      "published_sha256": "49ea6708ae14a28deb7a0432688290e9e192183e6f435494caf72c8b97795ac0",
+      "published_sha256": "9b40ac73e34389779f710fc2a7cf49f2db681490aee4a6e109c6a088b4ce2f91",
       "source_sha256": "49ea6708ae14a28deb7a0432688290e9e192183e6f435494caf72c8b97795ac0"
     },
     "ops/issue25/scripts/correlation_confidence.py": {
@@ -27,7 +27,7 @@
     "ops/issue25/scripts/deriv_precision_m5.py": {
       "bytes": 6506,
       "changed_in_sanitization": true,
-      "published_sha256": "526e2deee6ca394a1dbc58a8a1dce7ed7562ad175aa0d1be6ca4abbf068165e8",
+      "published_sha256": "09fded4ce04a2eb8e2944a39b0639142384b9b0bffc2a1cf605a3b95f8d4eaaf",
       "source_sha256": "526e2deee6ca394a1dbc58a8a1dce7ed7562ad175aa0d1be6ca4abbf068165e8"
     },
     "ops/issue25/scripts/fp_m5_candidate_prepare.py": {
@@ -45,7 +45,7 @@
     "ops/issue25/scripts/frozen_entry_trade_oos.py": {
       "bytes": 8420,
       "changed_in_sanitization": true,
-      "published_sha256": "7d1925b5fbf47627c57be926dd1777f3bc3f0be3c9a987d6ea04efaa7951e061",
+      "published_sha256": "3dea997b6450258c70d9e365228a2097169487990093fac48c2ae435f7eeaee3",
       "source_sha256": "7d1925b5fbf47627c57be926dd1777f3bc3f0be3c9a987d6ea04efaa7951e061"
     },
     "ops/issue25/scripts/native_trade_archive.py": {
@@ -57,7 +57,7 @@
     "ops/issue25/scripts/prospective_m5_shadow.py": {
       "bytes": 21691,
       "changed_in_sanitization": true,
-      "published_sha256": "0ef226c87916042f70dce4869ce24368cdae977d5f492f25263e268585cf7e0a",
+      "published_sha256": "742e3141cf156785076e737e4a068fe7a5b75a84a6411a748f7f4ca605484a9a",
       "source_sha256": "0ef226c87916042f70dce4869ce24368cdae977d5f492f25263e268585cf7e0a"
     },
     "ops/issue25/scripts/verified_native_hcc_m5.py": {
