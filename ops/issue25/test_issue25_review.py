@@ -136,8 +136,11 @@ class FullStagedTransferContractTests(unittest.TestCase):
             self.assertNotIn("32456207",text)
 
     def test_staged_bundle_contains_only_reviewable_utf8_files(self):
-        stage=ROOT.parents[1]
+        stage=ROOT
         paths=[p for p in stage.rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+        workflow=ROOT.parents[1]/".github"/"workflows"/"abutron-issue25-source.yml"
+        self.assertTrue(workflow.is_file())
+        paths.append(workflow)
         self.assertEqual(len(paths),28)
         for file in paths:
             self.assertFalse(file.is_symlink())
@@ -147,3 +150,4 @@ class FullStagedTransferContractTests(unittest.TestCase):
 
 if __name__=="__main__":
     unittest.main()
+
