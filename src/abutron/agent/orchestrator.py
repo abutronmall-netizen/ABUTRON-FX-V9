@@ -118,6 +118,7 @@ class AgentOrchestrator:
         }
 
     # ------------------------------------------------------------------ #
+    @property
     def ledger(self):
         return self.monitoring_agent.ledger
 

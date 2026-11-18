@@ -132,6 +132,45 @@ hard-wired to refuse any action the gate did not approve.
 - `RiskGate` is always in the path.
 - Every decision is journalled in the `DecisionLedger`.
 
+## The agentic system replaces apex
+
+**The agentic AI + brains + V9 now replace the apex system as the
+authoritative production decision path.**
+
+`abutron.agent.production.AgenticDecisionEngine` implements the same
+`run_decision_pass(...) -> List[Candidate]` contract the platform's
+downstream consumers (dispatcher, receipts, decision journal) already
+expect, so it is a **drop-in replacement** for
+`abutron.apex.engine.ApexEngine`. Instead of the apex 6-step chain,
+every symbol runs the full agentic pipeline:
+
+```
+run_decision_pass (per closed candle)
+        |
+        v
+  AgenticDecisionEngine._evaluate_symbol
+        |
+        v
+  AgentOrchestrator.decide  (sense -> think -> gate -> act -> monitor -> recover)
+        |
+        v
+  Candidate  (same contract as apex)  ->  dispatcher / receipts / journal
+```
+
+- **Brains** (`NexusBrain` / `UnifiedBrain`) are the signal authority
+  via `BrainSubstrate` -- the same brains apex used, now served through
+  the agentic sense stage.
+- **V9 risk** (`RiskGuard` / `RiskEngine`) is enforced by the
+  unbypassable `RiskGate` -- the same proven risk engine, wrapped as the
+  agentic gate.
+- **V9 execution** (native dispatcher) is routed via `ExecutionAgent`.
+- **LLM advisors** (gemma / debate) are wrapped by the pluggable
+  `LLMReasoningBackend` -- the agentic think stage.
+
+The `abutron.apex` package is **retained as a legacy rollback
+reference** (marked deprecated) but is no longer the active decision
+authority. New decision paths must use `AgenticDecisionEngine`.
+
 ## Module map
 
 ```
@@ -144,6 +183,7 @@ src/abutron/agent/
   risk_gate.py        RiskGate (wires abutron.risk, unbypassable)
   memory.py           DecisionLedger (evidence)
   orchestrator.py     AgentOrchestrator (the runtime)
+  production.py       AgenticDecisionEngine (replaces apex engine)
   agents/
     signal_agent.py       sense
     orchestrator_agent.py think
@@ -152,3 +192,5 @@ src/abutron/agent/
     monitoring_agent.py   monitor
     recovery_agent.py     recover
 ```
+
+`src/abutron/apex/` -- LEGACY (deprecated rollback reference).

@@ -23,7 +23,9 @@ from abutron.agent import (
 )
 from abutron.agent.interfaces import AgentAction, AgentDecision, Signal
 from abutron.agent.memory import DecisionLedger
+from abutron.agent.production import AgenticDecisionEngine
 from abutron.agent.substrate import BrainSubstrate
+from abutron.feeds.feed_quality import Candle, Quote
 
 
 # ---------------------------------------------------------------------- #
@@ -222,7 +224,7 @@ class OrchestratorEndToEndTests(unittest.TestCase):
         self.assertEqual(stages, ["sense", "think", "gate", "act",
                                   "monitor", "recover"])
         # Ledger recorded the decision.
-        self.assertEqual(system.ledger().count, 1)
+        self.assertEqual(system.ledger.count, 1)
 
     def test_gate_rejection_blocks_execution(self):
         # Inject a signal that produces a bad-R:R action by forcing a
@@ -287,6 +289,87 @@ class OrchestratorEndToEndTests(unittest.TestCase):
         summary = ledger.summary()
         self.assertEqual(summary["total_decisions"], 3)
         self.assertEqual(summary["executed"], 0)
+
+
+# ---------------------------------------------------------------------- #
+class ProductionEngineTests(unittest.TestCase):
+    """The agentic production engine replaces the apex decision path."""
+
+    def _engine(self, signal):
+        sub = BrainSubstrate(brain=None)
+        sub.predict = lambda ctx, features=None: signal
+        return AgenticDecisionEngine(brain_substrate=sub, live=False)
+
+    def _candle(self):
+        return Candle(symbol="V50", timeframe="M5",
+                      open_time="2026-11-18T10:00:00Z",
+                      close_time="2026-11-18T10:05:00Z",
+                      open=100.0, high=100.30, low=99.90, close=100.20,
+                      closed=True, point=0.01)
+
+    def _quote(self):
+        return Quote(symbol="V50", bid=100.19, ask=100.21, spread=0.002,
+                     tick_size=0.0001, point=0.01)
+
+    def _run(self, engine):
+        return engine.run_decision_pass(
+            connection_id="a" * 32, broker="FP Markets", owner_id="owner1",
+            candles=[self._candle()], quotes=[self._quote()],
+            account={"equity": 10000.0}, equity=10000.0)
+
+    def test_produces_candidate_for_strong_signal(self):
+        engine = self._engine(make_signal(Direction.BUY, 0.8, 0.7, 0.2))
+        cands = self._run(engine)
+        self.assertEqual(len(cands), 1)
+        c = cands[0]
+        self.assertEqual(c.symbol, "V50")
+        self.assertEqual(c.direction, "BUY")
+        self.assertGreater(c.conviction, 0.0)
+        self.assertGreater(c.stop_loss, 0.0)
+        self.assertGreater(c.take_profit, 0.0)
+        self.assertEqual(c.reason_code, "all_invariants_passed")
+        self.assertEqual(engine.ledger.count, 1)
+
+    def test_fail_closed_no_candidate_for_low_edge(self):
+        engine = self._engine(make_signal(Direction.BUY, 0.1, 0.1, 0.5))
+        cands = self._run(engine)
+        self.assertEqual(cands, [])  # reasoning held -> no order
+        self.assertEqual(engine.ledger.count, 1)  # still journalled
+
+    def test_skips_unclosed_candles(self):
+        engine = self._engine(make_signal(Direction.BUY, 0.8, 0.7, 0.2))
+        open_candle = Candle(symbol="V50", timeframe="M5",
+                             open_time="2026-11-18T10:05:00Z",
+                             close_time="2026-11-18T10:10:00Z",
+                             open=100.0, high=100.30, low=99.90, close=100.20,
+                             closed=False, point=0.01)
+        cands = engine.run_decision_pass(
+            connection_id="a" * 32, broker="FP", owner_id="o1",
+            candles=[open_candle], quotes=[self._quote()],
+            account={"equity": 10000.0}, equity=10000.0)
+        self.assertEqual(cands, [])
+
+    def test_candidates_ranked_by_conviction(self):
+        engine = self._engine(make_signal(Direction.BUY, 0.8, 0.7, 0.2))
+        c_low = Candle(symbol="V50", timeframe="M5",
+                      open_time="2026-11-18T10:00:00Z",
+                      close_time="2026-11-18T10:05:00Z",
+                      open=100.0, high=100.30, low=99.90, close=100.20,
+                      closed=True, point=0.01)
+        c_high = Candle(symbol="V60", timeframe="M5",
+                      open_time="2026-11-18T10:00:00Z",
+                      close_time="2026-11-18T10:05:00Z",
+                      open=200.0, high=200.30, low=199.90, close=200.20,
+                      closed=True, point=0.01)
+        # Both get the same signal; conviction ranking is deterministic.
+        cands = engine.run_decision_pass(
+            connection_id="a" * 32, broker="FP", owner_id="o1",
+            candles=[c_low, c_high], quotes=[self._quote()],
+            account={"equity": 10000.0}, equity=10000.0)
+        self.assertGreaterEqual(len(cands), 1)
+        # Convictions must be non-increasing down the list.
+        convs = [c.conviction for c in cands]
+        self.assertEqual(convs, sorted(convs, reverse=True))
 
 
 if __name__ == "__main__":

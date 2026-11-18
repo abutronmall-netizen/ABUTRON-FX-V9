@@ -1,4 +1,17 @@
-"""APEX decision engine — closed-candle decision and order chain.
+"""APEX decision engine — LEGACY (replaced by the agentic system).
+
+.. deprecated::
+    The ``abutron.agent`` hybrid multi-agent system is now the
+    **authoritative production decision path**. ``AgenticDecisionEngine``
+    (in ``abutron.agent.production``) implements the same
+    ``run_decision_pass`` contract and produces the same ``Candidate``
+    output, but routes every symbol through the agentic
+    sense -> think -> gate -> act -> monitor -> recover pipeline with the
+    V9 brains as signal authority and the unbypassable RiskGate.
+
+    This module is retained as a **legacy rollback reference** only. New
+    decision paths must use ``abutron.agent.production.AgenticDecisionEngine``.
+    See ``docs/AGENTIC_SYSTEM_DESIGN.md``.
 
 Implements the blueprint's 6-step chain:
   1. Capture authenticated, account-bound OHLC + quotes; M5 candle closed
