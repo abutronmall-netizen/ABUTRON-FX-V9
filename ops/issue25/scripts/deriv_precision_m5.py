@@ -54,6 +54,7 @@ def original_market():
    old[key]=x
  return old
 def main():
+ validate_snapshot,utc_now=_load_scanner()
  safe_file(DB);safe_file(LIVE);safe_file(REPORT)
  dbstat=DB.stat();check(dbstat.st_uid==DB.parent.stat().st_uid,'PRECISION_WRITER_UID_UNVERIFIED')
  source=json.loads(LIVE.read_text())
@@ -135,3 +136,4 @@ def main():
    'current_native_M5_overlap_verified':current_counts,'candidate_only':True,
    'orders_sent':0},sort_keys=True))
 if __name__=='__main__':main()
+
