@@ -162,6 +162,41 @@ class LazyRuntimeExecutionTests(unittest.TestCase):
             sys.modules["numpy"] = types.ModuleType("numpy")
         return load(name + ".py")
 
+    def test_causal_helper_resolves_release_src_in_sandbox(self):
+        from unittest import mock
+        import sys
+        mod=self.module("chronological_owner_holdout")
+        with tempfile.TemporaryDirectory() as td:
+            release=Path(td)/"release"
+            src=release/"src"
+            src.mkdir(parents=True)
+            (src/"issue25_fake_broker_runtime.py").write_text(
+                "PROOF='FAKE_BROKER_IMPORT_IN_ISOLATED_RELEASE'\\n",encoding="utf-8")
+            helper=Path(td)/"train_from_trades_causal.py"
+            helper.write_text(
+                "from issue25_fake_broker_runtime import PROOF\\n",encoding="utf-8")
+            original_paths=list(sys.path)
+            try:
+                with mock.patch.object(mod,"RELEASE",release), \\
+                     mock.patch.object(mod,"BRAINTRAIN",str(helper)):
+                    loaded=mod._load_helper()
+                    self.assertEqual(loaded.PROOF,
+                        "FAKE_BROKER_IMPORT_IN_ISOLATED_RELEASE")
+            finally:
+                sys.path[:]=original_paths
+                sys.modules.pop("issue25_fake_broker_runtime",None)
+
+    def test_brain_service_data_paths_explicit_and_sandbox_writable(self):
+        units=("abutron-v9-four-owner-chronological-holdout-ro.service",
+               "abutron-v9-forward-frozen-owner-oos-ro.service",
+               "abutron-v9-prospective-broker-m5-shadow-ro.service")
+        for unit in units:
+            service=(ROOT/"systemd"/unit).read_text()
+            self.assertIn("ProtectSystem=strict",service)
+            self.assertIn("Environment=ABUTRON_DATA_ROOT=",service)
+            self.assertIn("ReadWritePaths=",service)
+            self.assertIn("Environment=ABUTRON_LIVE_TRADING_ENABLED=false",service)
+
     def test_chronological_replay_resolves_all_deps_before_events(self):
         from unittest import mock
         mod = self.module("chronological_owner_holdout")
