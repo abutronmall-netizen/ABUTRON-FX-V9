@@ -45,10 +45,13 @@ for _d in (DATA_ROOT, NATIVE_ROOT, DECISIONS_ROOT, RECEIPTS_ROOT,
 # ---------------------------------------------------------------------------
 # Trading policy (blueprint-defined defaults; per-account overrides in CRM)
 # ---------------------------------------------------------------------------
-DEFAULT_PORTFOLIO_RISK_CAP_PCT = float(os.getenv("ABUTRON_RISK_CAP_PCT", "1.00"))
-DEFAULT_PER_TRADE_RISK_PCT = float(os.getenv("ABUTRON_PER_TRADE_PCT", "0.50"))
+DEFAULT_PORTFOLIO_RISK_CAP_PCT = float(os.getenv("ABUTRON_RISK_CAP_PCT", "0.20"))
+DEFAULT_PER_TRADE_RISK_PCT = float(os.getenv("ABUTRON_PER_TRADE_PCT", "0.0015"))
 DEFAULT_TRAILING_ATR_MULT = float(os.getenv("ABUTRON_TRAIL_ATR_MULT", "2.0"))
 DEFAULT_MIN_BROKER_RISK_BUFFER_USD = float(os.getenv("ABUTRON_MIN_RISK_BUFFER", "0.0"))
+# Daily loss cap — maximum loss allowed per calendar day as a fraction
+# of the day-start equity. 0.02 = 2% daily loss cap.
+DEFAULT_DAILY_LOSS_CAP_PCT = float(os.getenv("ABUTRON_DAILY_LOSS_CAP_PCT", "0.02"))
 
 # ---------------------------------------------------------------------------
 # NexusBrain — aggressive self-learning decision brain (signal authority)
@@ -117,6 +120,17 @@ DEBATE_ENABLED = os.getenv("ABUTRON_DEBATE_ENABLED", "false").lower() in (
     "1", "true", "yes")
 DEBATE_ROUNDS = int(os.getenv("ABUTRON_DEBATE_ROUNDS", "1"))
 DEBATE_MAX_CALLS = int(os.getenv("ABUTRON_DEBATE_MAX_CALLS", "8"))
+
+# Agentic decision engine: when enabled, the agentic multi-agent system
+# (sense -> think -> gate -> act -> monitor -> recover) replaces the
+# vendored apex engine as the authoritative production decision path in
+# ApexIntegration.process_candle. Default OFF (shadow/staging) — the
+# platform keeps using the apex path until the agentic system is
+# certified. When ON, the RiskGate (which delegates to the existing
+# RiskGuard) enforces the hard invariants before any candidate is
+# produced. The fail-closed posture is preserved through all phases.
+AGENTIC_ENGINE_ENABLED = os.getenv("ABUTRON_AGENTIC_ENGINE", "false").lower() in (
+    "1", "true", "yes")
 
 # Hardened pre-trade RiskGuard (kweinmeister pattern; fail-closed, opt-in)
 # When enabled, an independent hard-limit gate runs on every READY candidate

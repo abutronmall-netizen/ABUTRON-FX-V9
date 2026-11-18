@@ -55,6 +55,15 @@ class AccountRow(Base):
     # trusted broker worker (never by a client request or a login record).
     worker_binding: Mapped[str] = mapped_column(String(64), default="")
     broker_verified_at: Mapped[str] = mapped_column(String(32), default="")
+    # Exposure certification (read by RiskEngine.aggregate_owner_risk).
+    # These MUST come from broker-native evidence (MT5 balance + a
+    # reconciled positions snapshot). Defaults are fail-closed: equity 0
+    # and native_positions_verified 0 -> owner exposure never certified ->
+    # the dispatcher blocks all RESERVED candidates (BLOCKED_INCOMPLETE_
+    # EXPOSURE) until a trusted broker worker populates them.
+    equity: Mapped[float] = mapped_column(Float, default=0.0)
+    account_currency: Mapped[str] = mapped_column(String(8), default="")
+    native_positions_verified: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class LinkAttemptRow(Base):
@@ -297,6 +306,9 @@ class EngineDB:
                 "conn_error": "VARCHAR(256) DEFAULT ''",
                 "worker_binding": "VARCHAR(64) DEFAULT ''",
                 "broker_verified_at": "VARCHAR(32) DEFAULT ''",
+                "equity": "FLOAT DEFAULT 0",
+                "account_currency": "VARCHAR(8) DEFAULT ''",
+                "native_positions_verified": "INTEGER DEFAULT 0",
             })
             _migrate_columns(self._engine, "candidates", {
                 "price": "FLOAT DEFAULT 0",
@@ -336,7 +348,9 @@ class EngineDB:
                       "portfolio_cap_pct", "desired_on", "effective_on",
                       "activation_revision", "ea_sha256", "symbols",
                       "conn_status", "conn_updated_at", "conn_error",
-                      "worker_binding", "broker_verified_at"):
+                      "worker_binding", "broker_verified_at",
+                      "equity", "account_currency",
+                      "native_positions_verified"):
                 if k in acct:
                     setattr(row, k, acct[k])
             s.commit()

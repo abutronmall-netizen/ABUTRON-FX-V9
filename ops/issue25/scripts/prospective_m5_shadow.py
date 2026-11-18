@@ -188,10 +188,13 @@ def record(owner,acct,symbol,rawsource,rows,cand,candsha,base,now):
        (acct,symbol)):
    if bar in known and abs(known[bar]-outcome_close)>1e-8*max(1,abs(outcome_close)):
     raise ValueError("SETTLED_SHADOW_M5_OUTCOME_PRICE_REVISED_REVIEW_REQUIRED")
-  for bar,close in db.execute(
+  # NOTE: loop variable MUST NOT shadow the outer `close` (the current bar's
+  # close used to store base_close). Renaming to outcome_close prevents the
+  # staged prediction from recording a horizon-outcome price as base_close.
+  for bar,outcome_close in db.execute(
        "SELECT target_bar_open,next_close FROM horizon_outcomes WHERE account=? AND symbol=?",
        (acct,symbol)):
-   if bar in known and abs(known[bar]-close)>1e-8*max(1,abs(close)):
+   if bar in known and abs(known[bar]-outcome_close)>1e-8*max(1,abs(outcome_close)):
     raise ValueError("SETTLED_MULTIHORIZON_M5_OUTCOME_PRICE_REVISED_REVIEW_REQUIRED")
   scored=0;excluded=0;new_horizons={30:0,60:0}
   old=db.execute("SELECT base_bar_open,observed_utc,base_close FROM predictions WHERE account=? AND symbol=? "

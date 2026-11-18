@@ -35,7 +35,7 @@ data/brains/unified_m5/*
 .DS_Store
 .vscode/
 .idea/
- 
+
 # Host-only broker/evidence payloads must never enter public Git history
 issue25-*.tgz
 host_evidence/

@@ -1,6 +1,8 @@
 """Privacy, reconnect discovery, and broker-ticket uniqueness regression tests."""
 from __future__ import annotations
+import datetime as dt
 import importlib.util
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -270,6 +272,193 @@ class LazyRuntimeExecutionTests(unittest.TestCase):
                 for name in ("load_unified","build_signal_bundle",
                              "features_for_brain","validate_snapshot","utc_now"):
                     self.assertIn(name,vars(mod))
+
+class RuntimeDefectRegressionTests(unittest.TestCase):
+    """Permanent regression tests for the three post-merge staging defects.
+
+    These reproduce the deterministic runtime failures found in the
+    post-merge staging review of PR #29 (issue #25) and guard against
+    their recurrence.
+    """
+
+    @staticmethod
+    def module(name):
+        import sys
+        import types
+        from unittest import mock
+        if "numpy" not in sys.modules:
+            sys.modules["numpy"] = types.ModuleType("numpy")
+        return load(name + ".py")
+
+    # ---- P1: prospective_m5_shadow base_close must not be shadowed ----
+    def test_prospective_shadow_base_close_not_shadowed_by_horizon_outcome(self):
+        mod = self.module("prospective_m5_shadow")
+        from unittest import mock
+        import sqlite3
+        # Fixed base time aligned to a 300s M5 boundary.
+        now_ts = (1700000000 // 300 + 1) * 300
+        bars = []
+        t = now_ts - 300 * 65
+        for _ in range(65):
+            bars.append({
+                "open_time": dt.datetime.fromtimestamp(t, dt.timezone.utc).isoformat(),
+                "close": "100.0",
+            })
+            t += 300
+        # Current (last closed) bar close = 164.
+        bars[-1]["close"] = "164.0"
+        acct = "a" * 32
+        symbol = "Volatility 50 Index.0"
+        rawsource = "test-source"
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "shadow"
+            out.mkdir()
+            dbdir = out / "owners" / "ownerhash"
+            dbdir.mkdir(parents=True, mode=0o700)
+            dbfile = dbdir / "shadow.sqlite3"
+            mod.init_db(sqlite3.connect(dbfile))
+            # Pre-seed a horizon_outcome whose next_close (120) differs from
+            # the current bar close (164). target_bar_open is intentionally
+            # NOT in the known bars so the revision check is skipped, but the
+            # verification loop still iterates over this row.
+            with sqlite3.connect(dbfile) as db:
+                db.execute(
+                    "INSERT OR IGNORE INTO horizon_outcomes VALUES (?,?,?,?,?,?,?,?,?)",
+                    (acct, symbol, 1, 30, 9999999999, 1, 120.0, now_ts, rawsource))
+            fake_bundle = mock.MagicMock()
+            fake_bundle.at.return_value = {"market_features": "feats"}
+            with mock.patch.object(mod, "OUT", out), \
+                 mock.patch.object(mod, "build_signal_bundle",
+                                   return_value=fake_bundle, create=True), \
+                 mock.patch.object(mod, "probability", return_value=0.5):
+                mod.record("ownerhash", acct, symbol, rawsource, bars,
+                           mock.MagicMock(), "candsha", mock.MagicMock(), now_ts)
+            with sqlite3.connect(dbfile) as db:
+                rows = db.execute(
+                    "SELECT base_close FROM predictions WHERE account=? AND symbol=?",
+                    (acct, symbol)).fetchall()
+            self.assertEqual(len(rows), 1, "expected one staged prediction")
+            stored = float(rows[0][0])
+            self.assertAlmostEqual(stored, 164.0, places=6,
+                msg="base_close must be the current bar close (164), "
+                    "not the horizon outcome next_close (120)")
+            self.assertNotAlmostEqual(stored, 120.0, places=6)
+
+    # ---- P2a: causal trainer quarantines orphan incomplete runs ----
+    def test_causal_trainer_quarantines_orphan_incomplete_run(self):
+        mod = self.module("causal_owner_candidate_trainer")
+        with tempfile.TemporaryDirectory() as td:
+            ownerbase = Path(td) / "cand" / "ownerhash"
+            runs = ownerbase / "runs"
+            runs.mkdir(parents=True, mode=0o700)
+            # One verified run (manifest + trades.csv) -- must be untouched.
+            verified = runs / "20260101T000000Z"
+            verified.mkdir()
+            (verified / "candidate-manifest.json").write_text("{}")
+            (verified / "trades.csv").write_text("x")
+            # One orphan run: trades.csv written, trainer failed before the
+            # verified manifest -- must be quarantined, not block retries.
+            orphan = runs / "20260102T000000Z"
+            orphan.mkdir()
+            (orphan / "trades.csv").write_text("y")
+
+            quarantined = mod.quarantine_incomplete_runs(ownerbase)
+            self.assertEqual(quarantined, ["20260102T000000Z"])
+            # Orphan preserved under _quarantine, verified run untouched.
+            self.assertTrue(
+                (runs / "_quarantine" / "20260102T000000Z" / "trades.csv").is_file())
+            self.assertTrue((verified / "candidate-manifest.json").is_file())
+            self.assertTrue((verified / "trades.csv").is_file())
+            # Idempotent: second call finds nothing to quarantine.
+            self.assertEqual(mod.quarantine_incomplete_runs(ownerbase), [])
+
+    def test_causal_trainer_equality_check_passes_after_quarantine(self):
+        mod = self.module("causal_owner_candidate_trainer")
+        from unittest import mock
+        import hashlib
+        # With an orphan trades.csv present the equality check raises
+        # MISSING_RUN_MANIFEST_OR_TRAIN_CSV; after quarantine it must not.
+        with tempfile.TemporaryDirectory() as td:
+            ownerbase = Path(td) / "cand" / "ownerhash"
+            runs = ownerbase / "runs"
+            runs.mkdir(parents=True, mode=0o700)
+            # verified run: empty trades.csv + manifest + checkpoint file
+            verified = runs / "20260101T000000Z"
+            verified.mkdir()
+            (verified / "trades.csv").write_text("")
+            csv_sha = hashlib.sha256(b"").hexdigest()
+            model_file = verified / "model" / "nexus_brain.json"
+            model_file.parent.mkdir()
+            model_body = b'{"n_features":49,"members":[]}'
+            model_file.write_bytes(model_body)
+            model_sha = hashlib.sha256(model_body).hexdigest()
+            manifest = {
+                "schema": "abutron.v9.owner_isolated_broker_causal_candidate.v1",
+                "owner_hash": "ownerhash",
+                "pinned_baseline_sha256": mod.BASESHA,
+                "model_promotion_allowed": False,
+                "broker_orders_sent": 0,
+                "candidate_model_path": str(model_file),
+                "candidate_model_sha256": model_sha,
+                "source_private_training_csv_sha256": csv_sha,
+                "newly_trained_events": 0,
+                "trained_event_ids": [],
+            }
+            (verified / "candidate-manifest.json").write_text(
+                json.dumps(manifest, sort_keys=True))
+            # orphan run: trades.csv, no manifest (failed/incomplete attempt)
+            orphan = runs / "20260102T000000Z"
+            orphan.mkdir()
+            (orphan / "trades.csv").write_text("")
+            # safe_json enforces root-owned 0o600; bypass for the fixture so
+            # the test exercises the equality check, not the trust machinery.
+            def fake_safe_json(p):
+                return json.loads(Path(p).read_text())
+            with mock.patch.object(mod, "safe_json", side_effect=fake_safe_json), \
+                 mock.patch.object(mod, "owner_native_lookup", return_value={}):
+                # trained_history_from_runs auto-quarantines the orphan, so the
+                # equality check no longer raises MISSING_RUN_MANIFEST_OR_TRAIN_CSV.
+                learned, checkpoints = mod.trained_history_from_runs(ownerbase, {})
+                self.assertEqual(len(checkpoints), 1)
+                # Orphan moved aside; verified run preserved.
+                self.assertTrue(
+                    (runs / "_quarantine" / "20260102T000000Z" / "trades.csv").is_file())
+                self.assertTrue((verified / "candidate-manifest.json").is_file())
+
+    # ---- P2b: chronological holdout empty owner -> INSUFFICIENT, no IndexError ----
+    def test_chronological_holdout_empty_owner_returns_insufficient_not_indexerror(self):
+        mod = self.module("chronological_owner_holdout")
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "private"
+            root.mkdir(mode=0o700)
+            owner = "c" * 64
+            parent = {
+                "sources": lambda: (
+                    {"total_causally_closed_positions_in_private_archive": 0}, {}),
+                "events": lambda audit: ({}, {}),
+                "market_index": lambda: 0,
+                "eligible": lambda owners, index: ({owner: []}, 0, {}),
+                "BASESHA": "b" * 64,
+                "runtime_market": lambda *a, **k: None,
+                "csvbytes": lambda rows, fields: b"",
+                "TRADEFIELDS": ["a"],
+            }
+            with mock.patch.object(mod, "_load_parent", return_value=parent), \
+                 mock.patch.object(mod, "_load_helper", return_value=mock.MagicMock()), \
+                 mock.patch.object(mod, "_load_brain_modules",
+                                   return_value=(mock.MagicMock(), mock.MagicMock())), \
+                 mock.patch.object(mod, "ROOT", root):
+                # Must NOT raise IndexError on rows[int(len(rows)*0.7)].
+                mod.run()
+            report_path = root / "validation" / "latest-chronological-holdout.json"
+            self.assertTrue(report_path.is_file(), "holdout report should be written")
+            report = json.loads(report_path.read_text())
+            entry = report["owners"][owner[:12]]
+            self.assertEqual(entry["status"], "INSUFFICIENT_PURGED_HISTORY")
+            self.assertEqual(entry["train"], 0)
+            self.assertEqual(entry["holdout"], 0)
+
 
 if __name__=="__main__":
     unittest.main()

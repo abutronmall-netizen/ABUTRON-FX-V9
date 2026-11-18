@@ -23,7 +23,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import (BRAIN_MODEL_DIR, DATA_ROOT, DEPTH_SNAPSHOTS_PATH,
-                      GEMMA_ENABLED, RISKGUARD_ENABLED, TICK_TRADES_PATH)
+                      GEMMA_ENABLED, RISKGUARD_ENABLED, TICK_TRADES_PATH,
+                      DEFAULT_PER_TRADE_RISK_PCT, DEFAULT_PORTFOLIO_RISK_CAP_PCT,
+                      AGENTIC_ENGINE_ENABLED)
 from .events import EventLog, make_event
 from .ops.portal_ops import portal_ops
 from .risk.riskguard import RiskGuard, PortfolioState, TradeProposal
@@ -153,6 +155,28 @@ class ApexIntegration:
         self.brain.online_enabled = True
         self._brain_save_interval = 50
         self._brain_updates = 0
+        # Agentic decision engine: when AGENTIC_ENGINE_ENABLED is on, the
+        # agentic multi-agent system replaces the vendored apex engine as
+        # the authoritative decision path in process_candle(). Built
+        # lazily (only when the flag is on) to avoid startup cost. Runs
+        # in shadow mode (live=False) — the RiskGate enforces hard
+        # invariants before any candidate is produced.
+        self._agentic_engine = None
+        if AGENTIC_ENGINE_ENABLED:
+            try:
+                from .agent.production import AgenticDecisionEngine
+                from .agent.substrate import BrainSubstrate
+                from .agent.reasoning import LLMReasoningBackend
+                # Reuse the loaded unified brain as the signal authority.
+                substrate = BrainSubstrate(brain=self.brain)
+                reasoning = LLMReasoningBackend.from_config().or_fallback()
+                self._agentic_engine = AgenticDecisionEngine(
+                    brain_substrate=substrate, reasoning=reasoning,
+                    live=False)
+            except Exception as exc:  # noqa: BLE001
+                self._agentic_engine = None
+                self._agentic_error = str(exc)
+        self._agentic_error = ""
         # Equity-aware symbol eligibility: trade only the symbols the
         # client equity can carry (min-lot risk <= per-trade risk budget).
         self.eligibility = SymbolEligibility()
@@ -217,6 +241,21 @@ class ApexIntegration:
         The `candidate` is only present when all engineering gates pass; it
         is NOT an order — it must go through the single-writer dispatcher.
         """
+        # --- Agentic decision engine (replaces the apex bridge) ----------
+        # When AGENTIC_ENGINE_ENABLED is on, the agentic multi-agent system
+        # is the authoritative decision path — it runs the full
+        # sense -> think -> gate -> act -> monitor -> recover cycle and
+        # produces gate-approved candidates. The RiskGate (which delegates
+        # to the existing RiskGuard) enforces the hard invariants before
+        # any candidate is produced. Fail-closed: no candidate when the
+        # gate rejects or the brain signal is weak. This check runs BEFORE
+        # the apex availability check so the agentic engine does not need
+        # the vendored apex source at all.
+        if self._agentic_engine is not None:
+            return self._run_agentic_decision(
+                connection_id, account, candle, equity,
+                orderflow_features, footprint_features, native_geometry)
+
         # If the vendored APEX source is absent, do not crash: report a clear
         # non-trading status so the runtime keeps ticking on the NexusBrain.
         if not self.apex_available():
@@ -306,7 +345,8 @@ class ApexIntegration:
         native = self._build_native(native_geometry or {}, status, candle)
         review = self._apex["review_candidate"](
             signal=decision, gate=gate, native=native, now=int(time.time()),
-            per_trade_risk_pct=0.001, portfolio_ceiling_pct=0.20)
+            per_trade_risk_pct=DEFAULT_PER_TRADE_RISK_PCT,
+            portfolio_ceiling_pct=DEFAULT_PORTFOLIO_RISK_CAP_PCT)
 
         if not review["engineering_gates_passed"]:
             self._record(connection_id, account, candle, "BLOCKED",
@@ -354,6 +394,167 @@ class ApexIntegration:
                         riskguard="approved" if RISKGUARD_ENABLED else "")
         return {"status": "READY", "decision": decision,
                 "candidate": review["order_candidate"],
+                "review": review, "blockers": []}
+
+    # ------------------------------------------------------------------
+    # Agentic decision engine (replaces the apex bridge)
+    # ------------------------------------------------------------------
+    def _run_agentic_decision(self, connection_id: str,
+                              account: Dict[str, Any],
+                              candle: Dict[str, Any],
+                              equity: float,
+                              orderflow_features: Optional[Dict[str, float]],
+                              footprint_features: Optional[Dict[str, Any]],
+                              native_geometry: Optional[Dict[str, Any]],
+                              ) -> Dict[str, Any]:
+        """Run the agentic multi-agent system for one closed candle.
+
+        Replaces the apex bridge call: the agentic engine runs the full
+        sense -> think -> gate -> act -> monitor -> recover cycle and
+        produces gate-approved candidates. The RiskGate delegates to the
+        existing RiskGuard, so the hard invariants (0.15%/trade, 20%
+        ceiling, R:R >= 1.50) are enforced before any candidate is
+        produced. Fail-closed: no candidate when the gate rejects.
+
+        Returns the same dict shape as the apex path so downstream
+        consumers (store_ready_candidate, dispatcher, receipts) work
+        unchanged.
+        """
+        from .agent.production import AgenticDecisionEngine
+        from .feeds.feed_quality import Candle, Quote
+
+        symbol = candle["symbol"]
+        # Convert the candle dict to a feed_quality.Candle.
+        feed_candle = Candle(
+            symbol=symbol, timeframe="M5",
+            open_time=candle.get("open_time", ""),
+            close_time=candle.get("close_time", ""),
+            open=float(candle.get("open", 0.0)),
+            high=float(candle.get("high", 0.0)),
+            low=float(candle.get("low", 0.0)),
+            close=float(candle.get("close", 0.0)),
+            volume=float(candle.get("volume", 0.0)),
+            closed=True,
+            point=float(candle.get("point", 0.0001)),
+        )
+        # Register trailing history if available (brain warm-up).
+        if self._signal_hist.get(symbol):
+            self._agentic_engine.set_history(symbol, "M5",
+                                             self._signal_hist[symbol])
+        # Build a quote from the candle (bid/ask around close).
+        close = float(candle.get("close", 0.0))
+        spread = float(candle.get("spread", 0.0001)) or 0.0001
+        quote = Quote(
+            symbol=symbol, bid=close - spread / 2.0,
+            ask=close + spread / 2.0, spread=spread,
+            tick_size=float(candle.get("tick_size", 0.0001)),
+            point=float(candle.get("point", 0.0001)),
+        )
+
+        # Run the agentic decision pass.
+        candidates = self._agentic_engine.run_decision_pass(
+            connection_id=connection_id,
+            broker=account.get("broker", ""),
+            owner_id=account.get("owner_id", ""),
+            candles=[feed_candle],
+            quotes=[quote],
+            account=account,
+            orderflow_trades={symbol: [orderflow_features]}
+            if orderflow_features else {},
+            equity=equity,
+        )
+
+        # Fail-closed: no gate-approved candidate -> HOLD.
+        if not candidates:
+            self._record(connection_id, account, candle, "AGENTIC_HOLD",
+                         reason="AGENTIC_NO_GATE_APPROVED_CANDIDATE")
+            self._trace_run(connection_id, account, candle,
+                            status="HOLD", decision=None,
+                            blockers=["AGENTIC_NO_GATE_APPROVED_CANDIDATE"])
+            return {"status": "HOLD", "reason": "AGENTIC_NO_GATE_APPROVED",
+                    "decision": None, "candidate": None,
+                    "blockers": ["AGENTIC_NO_GATE_APPROVED_CANDIDATE"],
+                    "review": None}
+
+        # Convert the agentic candidate to the ready dict format.
+        cand = candidates[0]
+        decision_dict = {
+            "symbol": cand.symbol,
+            "direction": cand.direction,
+            "conviction": cand.conviction,
+            "regime": {"regime": cand.regime},
+            "agent_votes": cand.agent_votes,
+            "brain_source": cand.agent_votes.get("signal_source", ""),
+            "reasoning_backend": cand.agent_votes.get("reasoning_backend", ""),
+            "engine": "AGENTIC",
+        }
+        order_candidate = {
+            "signal_id": cand.replay_key,
+            "side": cand.direction,
+            "broker": cand.broker,
+            "symbol": cand.symbol,
+            "volume_lots": cand.volume,
+            "stop_price": cand.stop_loss,
+            "take_price": cand.take_profit,
+            "price": cand.price,
+        }
+        review = {
+            "engineering_gates_passed": True,
+            "risk_budget_usd": cand.stop_risk_usd,
+            "nominal_stop_risk_usd": cand.stop_risk_usd,
+            "risk_fraction": cand.risk_fraction,
+        }
+        ready = {
+            "decision": decision_dict,
+            "candidate": order_candidate,
+            "review": review,
+            "blockers": [],
+        }
+
+        # Hardened pre-trade RiskGuard (opt-in, fail-closed). The agentic
+        # RiskGate already delegates to RiskGuard, but when RISKGUARD_ENABLED
+        # is on we run an independent hard-limit check on the READY candidate
+        # before storing — same pattern as the apex path.
+        if RISKGUARD_ENABLED:
+            proposal = TradeProposal(
+                symbol=cand.symbol, direction=cand.direction,
+                volume_lots=cand.volume,
+                price=float((native_geometry or {}).get("price", cand.price)),
+                stop_loss=cand.stop_loss, take_profit=cand.take_profit,
+                stop_risk_usd=cand.stop_risk_usd)
+            portfolio = PortfolioState(equity=float(equity or 0.0))
+            rg = self.riskguard.check_trade(proposal, portfolio)
+            if not rg.approved:
+                self._record(connection_id, account, candle, "BLOCKED",
+                             reason=f"RISKGUARD_{rg.reason}")
+                self._trace_run(connection_id, account, candle,
+                                status="BLOCKED", decision=decision_dict,
+                                riskguard=rg.reason,
+                                blockers=[f"RISKGUARD_{rg.reason}"])
+                return {"status": "BLOCKED", "decision": decision_dict,
+                        "candidate": None,
+                        "blockers": [f"RISKGUARD_{rg.reason}"],
+                        "review": review, "riskguard": rg.to_dict()}
+
+        # Store the ready candidate for the single-writer dispatcher.
+        stored = self.store_ready_candidate(
+            connection_id=connection_id, account=account,
+            ready=ready, candle=candle)
+        if stored is None:
+            self._trace_run(connection_id, account, candle,
+                            status="BLOCKED", decision=decision_dict,
+                            blockers=["CANDLE_ALREADY_CONSUMED"])
+            return {"status": "BLOCKED", "decision": decision_dict,
+                    "candidate": None,
+                    "blockers": ["CANDLE_ALREADY_CONSUMED"],
+                    "review": review}
+
+        self._trace_run(connection_id, account, candle, status="READY",
+                        decision=decision_dict,
+                        signal_id=cand.replay_key,
+                        riskguard="approved" if RISKGUARD_ENABLED else "")
+        return {"status": "READY", "decision": decision_dict,
+                "candidate": order_candidate,
                 "review": review, "blockers": []}
 
     # ------------------------------------------------------------------
@@ -556,13 +757,20 @@ class ApexIntegration:
         (at-most-once). Returns the stored row, or None if the replay key
         was already consumed (CANDLE_ALREADY_CONSUMED).
         """
-        from .. import db
-        from ..db import engine_db
+        from . import db
+        from .db import engine_db
         cand = ready["candidate"]
         signal_id = cand["signal_id"]
         side = cand["side"]
         row = {
-            "candidate_id": f"cand_{signal_id[:12]}",
+            # Collision-safe candidate_id: derive from a SHA256 of the full
+            # replay_key. The previous ``signal_id[:12]`` truncation collided
+            # for same-symbol candidates sharing a date prefix (e.g. two
+            # READY candidates on the same symbol/day), crashing the second
+            # insert with a PRIMARY KEY violation. Hash -> deterministic and
+            # collision-free (same replay_key -> same candidate_id, preserving
+            # at-most-once idempotency via the replay_key unique constraint).
+            "candidate_id": f"cand_{_to_hex32(signal_id)}",
             "connection_id": connection_id,
             "owner_id": account.get("owner_id", ""),
             "broker": cand["broker"],
@@ -576,7 +784,7 @@ class ApexIntegration:
             "regime": (ready.get("decision", {}).get("regime", {}) or {}).get(
                 "regime", ""),
             "agent_votes": str(ready.get("decision", {})),
-            "risk_fraction": 0.001,
+            "risk_fraction": DEFAULT_PER_TRADE_RISK_PCT,
             "stop_risk_usd": float(ready.get("review", {}).get(
                 "nominal_stop_risk_usd", 0.0)),
             "volume": float(cand.get("volume_lots", 0.0)),

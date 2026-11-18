@@ -118,11 +118,45 @@ def owner_native_lookup(alltrades):
   out[full]=row
  return out
 
+def quarantine_incomplete_runs(ownerbase):
+ """Move orphan run dirs (trades.csv without candidate-manifest.json) aside.
+
+ A trainer subprocess that fails after writing trades.csv but before the
+ verified candidate-manifest.json is produced leaves an incomplete attempt
+ that has no authorization value. Left in runs/, its trades.csv makes the
+ manifest-vs-CSV equality check fail permanently and blocks every future
+ retry with MISSING_RUN_MANIFEST_OR_TRAIN_CSV.
+
+ Quarantine preserves the incomplete attempt for inspection under
+ runs/_quarantine/<runid>/ without rewriting or trusting it. Committed
+ learning history (verified runs) is never touched.
+
+ Returns the list of quarantined run-id names.
+ """
+ runs_dir=ownerbase/"runs"
+ if not runs_dir.is_dir():
+  return []
+ quarantined=[]
+ for rundir in sorted(p for p in runs_dir.iterdir() if p.is_dir() and p.name!="_quarantine"):
+  # Only a trades.csv with NO verified manifest is an incomplete attempt.
+  if (rundir/"trades.csv").is_file() and not (rundir/"candidate-manifest.json").is_file():
+   qdir=runs_dir/"_quarantine"/rundir.name
+   qdir.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+   # Never overwrite an existing quarantine slot for the same run id.
+   if not qdir.exists():
+    import shutil as _sh
+    _sh.move(str(rundir),str(qdir))
+    quarantined.append(rundir.name)
+ return quarantined
+
 def trained_history_from_runs(ownerbase,alltrades):
  """Only original broker-matched run CSVs can authorize pre-patch dedup."""
  native=owner_native_lookup(alltrades)
  learned={}
  checkpoints=[]
+ # Quarantine incomplete attempts first so they cannot break the
+ # manifest-vs-CSV equality check or block future retries.
+ quarantine_incomplete_runs(ownerbase)
  runs=sorted((ownerbase/"runs").glob("*/candidate-manifest.json"))
  for p in runs:
   m=safe_json(p)
