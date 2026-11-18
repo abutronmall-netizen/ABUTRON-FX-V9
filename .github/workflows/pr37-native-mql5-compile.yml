@@ -63,10 +63,20 @@ jobs:
           & $compiler "/compile:$source" '/log'
           # MetaEditor may return a positive count on successful CLI compilation.
           # Trust its actual log and EX5 artifact rather than a process exit code.
-          if (-not (Test-Path -LiteralPath $log)) {
-            throw 'MetaEditor did not produce a native compilation log'
+          # The GUI MetaEditor process can return before the compiler worker
+          # flushes its UTF-16 log. Wait for the definitive Result line.
+          $deadline = (Get-Date).AddMinutes(3)
+          $report = ''
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $log) {
+              $report = Get-Content -LiteralPath $log -Encoding Unicode -Raw
+              if ($report -match '(?mi)^Result:') { break }
+            }
+            Start-Sleep -Milliseconds 750
           }
-          $report = Get-Content -LiteralPath $log -Encoding Unicode -Raw
+          if (-not $report -or $report -notmatch '(?mi)^Result:') {
+            throw 'MetaEditor did not produce a complete native compilation report'
+          }
           Write-Host $report
           if ($report -notmatch '(?mi)Result:\s*0 errors') {
             throw 'Native MetaEditor reported errors or did not finish compiling'

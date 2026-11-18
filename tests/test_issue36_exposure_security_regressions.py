@@ -188,3 +188,8 @@ def test_mql5_uses_documented_profit_api_and_matching_signature_fields():
     assert "if(n != posCount)" in source
     assert "if(!PositionSelectByTicket(ticket))" in source
     assert "TerminalInfoInteger(TERMINAL_CONNECTED)" in source
+    assert "ZeroMemory(req); ZeroMemory(res);" in source
+    assert "ushort &inputBytes[]" in source
+    assert "ushort &bytes[]" in source
+    assert "TimeTradeServer()" in source
+    assert "OrderCalcProfit(ticket" not in source

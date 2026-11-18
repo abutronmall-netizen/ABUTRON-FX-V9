@@ -23,7 +23,7 @@
 //| InpActivationSecret input.                                        |
 //+------------------------------------------------------------------+
 #property copyright "ABUTRON FX V9"
-#property version   "1.1.0"
+#property version   "1.10"
 
 input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
@@ -150,13 +150,13 @@ void ExportNativeData()
                                   (long)TimeGMT());
 
    // Collect ticket list and sort ascending for a deterministic canonical.
-   long allTickets[];
+   ulong allTickets[];
    int posCount = PositionsTotal();
    ArrayResize(allTickets, posCount);
    int n = 0;
    for(int i = 0; i < PositionsTotal(); i++)
    {
-      long t = PositionGetTicket(i);
+      ulong t = PositionGetTicket(i);
       if(t != 0) allTickets[n++] = t;
    }
    // A failed ticket read is an incomplete inventory, NOT broker-flat.
@@ -169,7 +169,7 @@ void ExportNativeData()
    string posJson = "";
    for(int k = 0; k < ArraySize(allTickets); k++)
    {
-      long ticket = allTickets[k];
+      ulong ticket = allTickets[k];
       if(!PositionSelectByTicket(ticket))
          return;  // session/position changed: do not publish partial proof.
       string sym = PositionGetString(POSITION_SYMBOL);
@@ -309,7 +309,7 @@ void ProcessOrderRequests()
 
    MqlTradeRequest req;
    MqlTradeResult  res;
-   Zero(req); Zero(res);
+   ZeroMemory(req); ZeroMemory(res);
    req.action    = TRADE_ACTION_DEAL;
    req.symbol    = symbol;
    req.volume    = normVol;
@@ -326,7 +326,7 @@ void ProcessOrderRequests()
       {
          // Real broker ACK — write native receipt with ticket/deal
          WriteReceipt(reqId, res.order, "ACK", "NATIVE_ACK",
-                      res.price, res.volume, sl, tp, LongToString(res.deal));
+                      res.price, res.volume, sl, tp, IntegerToString((long)res.deal));
       }
       else
       {
@@ -406,7 +406,7 @@ string Nonce()
 string Challenge()
 {
    return(StringFormat("%d", AccountInfoInteger(ACCOUNT_LOGIN) +
-                       (long)ServerTime()));
+                       (long)TimeTradeServer()));
 }
 
 string ActivationRevision()
@@ -533,7 +533,7 @@ string HmacSha256Hex(string key, string message)
 //+------------------------------------------------------------------+
 //| SHA-256 (uses uint for 32-bit words — valid MQL5 type)            |
 //+------------------------------------------------------------------+
-string Sha256Hex(ushort input[], int inputLen)
+string Sha256Hex(ushort &inputBytes[], int inputLen)
 {
    uint H[8];
    H[0]=0x6a09e667; H[1]=0xbb67ae85; H[2]=0x3c6ef372; H[3]=0xa54ff53a;
@@ -553,7 +553,7 @@ string Sha256Hex(ushort input[], int inputLen)
    ushort bytes[];
    ArrayResize(bytes, inputLen + 72);
    for(int i = 0; i < inputLen; i++)
-      bytes[i] = input[i];
+      bytes[i] = inputBytes[i];
    bytes[inputLen] = 0x80;
 
    ulong bitLen = (ulong)inputLen * 8;
@@ -618,7 +618,7 @@ string Sha256Hex(ushort input[], int inputLen)
 //| Convert hex string to byte array (reference param — MQL5 cannot  |
 //| return arrays from functions)                                   |
 //+------------------------------------------------------------------+
-void HexToBytes(string hex, ushort bytes[])
+void HexToBytes(string hex, ushort &bytes[])
 {
    int len = StringLen(hex) / 2;
    ArrayResize(bytes, len);
@@ -662,9 +662,12 @@ double JsonNum(string json, string key)
    string num = "";
    while(pos < StringLen(json))
    {
-      char c = StringGetCharacter(json, pos);
+      ushort c = StringGetCharacter(json, pos);
       if((c >= '0' && c <= '9') || c == '.' || c == '-')
-         num += c, pos++;
+      {
+         num += StringSubstr(json, pos, 1);
+         pos++;
+      }
       else break;
    }
    return(StringToDouble(num));
