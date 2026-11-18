@@ -23,6 +23,7 @@ def _load_helper():
     Moved from import-time to runtime so the module can be imported
     for testing without the production file being present.
     """
+    sys.path.insert(0,str(RELEASE/'src'))
     spec = importlib.util.spec_from_file_location(
         'abutron_v9_causal_market_preentry_features', BRAINTRAIN)
     if spec is None or spec.loader is None:
@@ -81,8 +82,8 @@ def metrics(rows):
      (1-y)*math.log(max(1e-6,min(1-1e-6,1-p))) for p,y in rows)/len(rows),6))
 def run():
  parent=_load_parent()
- helper=_load_helper()
  load_unified,features_for_brain=_load_brain_modules()
+ helper=_load_helper()
  audit,fp=parent['sources']()
  owners,account=parent['events'](audit)
  index=parent['market_index']()
