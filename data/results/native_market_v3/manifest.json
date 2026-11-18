@@ -1,0 +1,35 @@
+{
+  "accounts_binary_installed_disk": [
+    "FP Markets DEMO 0512",
+    "FP Markets DEMO 1636"
+  ],
+  "binaries": {
+    "expert": {
+      "artifact_repo_path": "dist/mql5/ApexOrderFlowExportV3.ex5",
+      "binary_size_bytes": 24700,
+      "compiler_result": "0 errors, 0 warnings",
+      "ex5_sha256": "e80b07158963d13b388422607e894fe0e1e4bf30a15e82ed4d1b0a5d6f12335e",
+      "source": "mql5/ApexOrderFlowExportV3.mq5",
+      "source_sha256": "1654567de661f0d5e3c583c44bb6b3da17fc1b6f8e0a9b273dbd1ed282762330"
+    },
+    "indicator": {
+      "artifact_repo_path": "dist/mql5/ApexMarketFeedV3.ex5",
+      "binary_size_bytes": 25356,
+      "compiler_result": "0 errors, 0 warnings",
+      "ex5_sha256": "a4a5bdbec180f8b4f7d0945b1611a945ca36d1ed49e4e23137133b9e4d592f67",
+      "source": "mql5/ApexMarketFeedV3.mq5",
+      "source_sha256": "648f8605816918c9f22da485b256b555b6d256940e400b113798e6c2595cbd6d"
+    }
+  },
+  "broker_orders_submitted": 0,
+  "built_at_utc": "2026-11-17T10:11:00Z",
+  "chart_attachment_confirmed": false,
+  "production_execution_writer_attached": false,
+  "python_tests_failed": 0,
+  "python_tests_passed": 328,
+  "python_tests_skipped": 4,
+  "real_broker_market_tick_data_attested": false,
+  "risk_audit_cleared": false,
+  "schema": "abutron.v9.native_market_exporter.compile.v3",
+  "verification_date_utc": "2026-11-17T10:18:59.679954+00:00"
+}

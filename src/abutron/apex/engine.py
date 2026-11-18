@@ -658,20 +658,26 @@ class ApexEngine:
         self._history_store[(symbol, timeframe)] = candles
 
     def _owner_book(self, owner_id: str, connection_id: str) -> Dict[str, Any]:
+        """Owner-wide risk exposure using real contract specs.
+
+        Uses RiskEngine.aggregate_owner_risk() which reads actual
+        point/point_value from SYMBOL_REGISTRY (with conservative
+        fallback for unknown symbols) instead of a fixed * 10.0 proxy.
+        """
         from ..db import engine_db
-        aggregate = 0.0
+        from ..risk.risk_engine import RiskEngine
         balances = {}
-        risk_by_conn: Dict[str, float] = {}
         for acct in engine_db.list_accounts(owner_id=owner_id):
             cid = acct["connection_id"]
-            for pos in engine_db.recent_open_positions(cid):
-                risk_by_conn[cid] = risk_by_conn.get(cid, 0.0) + \
-                    float(pos.get("volume", 0.0) or 0.0) * 10.0  # proxy
             balances[cid] = float(acct.get("equity", 0.0) or 0.0)
-            if cid == connection_id:
-                aggregate = risk_by_conn.get(cid, 0.0)
+        # Use the RiskEngine for correct contract-based exposure calc
+        risk_engine = RiskEngine(self.log)
+        exposure = risk_engine.aggregate_owner_risk(owner_id)
         return {
-            "aggregate_stop_risk_usd": aggregate,
+            # NULL is not zero: unknown native stop risk must not create
+            # artificial headroom for APEX candidate reservations.
+            "aggregate_stop_risk_usd": exposure["aggregate_stop_risk_usd"],
+            "owner_risk_certified": exposure.get("owner_risk_certified") is True,
             "balance_by_conn": balances,
         }
 

@@ -129,9 +129,18 @@ class BacktestEngine:
                  trail_k: Optional[float] = None,
                  runtime_rules_path: Optional[str] = None,
                  use_gemma_signals: bool = False,
-                 persist_brain_changes: bool = False):
+                 persist_brain_changes: bool = False,
+                 tick_trades: Optional[Dict] = None,
+                 depth_signals: Optional[Dict] = None):
         self.brain = brain
         self.sniper = sniper or sniper_engine
+        # True broker tick/trade data — when provided, the signal pipeline
+        # uses OrderFlowEngine + VolumeFootprintBuilder on real trades
+        # instead of candle-derived proxies. This is the PROXY → VERIFIED
+        # path for order flow / imbalance / delta / absorption and
+        # volume footprint / POC.
+        self.tick_trades = tick_trades or {}
+        self.depth_signals = depth_signals or {}
         self.trailing = trailing or trailing_stop
         self.equity = equity
         self.risk_pct = risk_pct
@@ -319,7 +328,9 @@ class BacktestEngine:
         # One causal signal bundle for the full series. Row i uses only bars
         # 0..i, so using the full array here never leaks future information.
         self._signal_bundle = build_signal_bundle(
-            candles, symbol=run_symbol, use_gemma=self.use_gemma_signals)
+            candles, symbol=run_symbol, use_gemma=self.use_gemma_signals,
+            tick_trades=self.tick_trades or None,
+            depth=self.depth_signals or None)
         self._signal_index = {t: i for i, t in
                               enumerate(self._signal_bundle.bar_times)}
         # Apply optimized sniper/trailing rules when a rules file is present.

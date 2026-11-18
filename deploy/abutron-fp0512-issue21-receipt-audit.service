@@ -1,0 +1,28 @@
+[Unit]
+Description=ABUTRON Issue21 FP DEMO rotating native receipt auditor (read-only)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/abutron/fp-issue21-auditor.env
+ExecStart=/usr/bin/python3 -I /usr/local/lib/abutron-fp0512-issue21-scanner/audit.py
+StateDirectory=abutron-fp0512-issue21-scanner
+StateDirectoryMode=0700
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-fp0512-issue21-scanner
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=128M
+CPUQuota=25%
+TimeoutStartSec=20s
+UMask=0077

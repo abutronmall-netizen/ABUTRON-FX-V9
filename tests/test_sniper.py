@@ -309,7 +309,14 @@ class TestSniperExecutionPath:
             "invalidation": 1.2532, "entry_quality": 0.8,
             "sniper_plan": "{}", "execution_state": "RESERVED",
             "reason_code": "", "created_at": "", "updated_at": ""})
-        res = disp.dispatch_account("snip_disp")
+        # Unit-test native ACK receipt geometry with a mocked *certified*
+        # broker owner inventory. Production must never use mock evidence.
+        from unittest.mock import patch
+        native_owner = {"owner_risk_certified": True, "cap_exceeded": False,
+                        "aggregate_stop_risk_usd": 0.0}
+        with patch("abutron.risk.risk_engine.RiskEngine.aggregate_owner_risk",
+                   return_value=native_owner):
+            res = disp.dispatch_account("snip_disp")
         assert res["ack"] == 1
         receipts = dbmod.engine_db.list_receipts("snip_disp")
         receipt = next(r for r in receipts if r.get("candidate_id") == "cand_disp1")
