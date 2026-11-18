@@ -337,24 +337,33 @@ def main() -> int:
         from abutron.crm.controls import crm
         from abutron.crypto import make_nonce
         native_snapshot_nonce = make_nonce()
-        native_positions = []  # DEMO account is flat: zero open positions
-        cert_acct = crm.certify_exposure(
-            connection_id, equity=10000.0, account_currency="USD",
-            native_positions=native_positions, nonce=native_snapshot_nonce)
+        # DEMO account is flat: zero open positions. The snapshot is bound to
+        # the account (connection_id + login) and authenticated by the nonce.
+        native_snapshot = {
+            "nonce": native_snapshot_nonce,
+            "challenge": "cert-challenge",
+            "connection_id": connection_id,
+            "login": str(account["mt5_login"]),
+            "equity": "10000.00",
+            "balance": "10000.00",
+            "currency": "USD",
+            "positions": [],
+        }
+        cert_acct = crm.certify_exposure(connection_id, snapshot=native_snapshot)
         report.check(
             "broker_worker_certifies_exposure",
             cert_acct.get("equity") == 10000.0
             and cert_acct.get("native_positions_verified") == 1
             and cert_acct.get("exposure_nonce") == native_snapshot_nonce
             and cert_acct.get("exposure_snapshot_count") == 0,
-            "broker worker certified exposure from an authenticated broker "
-            "snapshot (equity + native_positions_verified + nonce stored "
-            "in DB)")
-        # Issue #36: a blind flag must no longer certify exposure.
+            "broker worker certified exposure from an authenticated, "
+            "account-bound broker snapshot (equity + native_positions_verified "
+            "+ nonce stored in DB)")
+        # Issue #36: a blind flag / forged nonce must not certify exposure.
+        forged = dict(native_snapshot)
+        forged["nonce"] = "not-a-valid-nonce"
         try:
-            crm.certify_exposure(
-                connection_id, equity=10000.0, account_currency="USD",
-                native_positions=native_positions, nonce="not-a-valid-nonce")
+            crm.certify_exposure(connection_id, snapshot=forged)
             blind_flag_blocked = False
         except Exception:
             blind_flag_blocked = True
@@ -362,6 +371,19 @@ def main() -> int:
             "blind_flag_certification_rejected",
             blind_flag_blocked,
             "an invalid nonce / manual-flag path no longer certifies exposure "
+            "(fail-closed)")
+        # Issue #36: a snapshot bound to a different account is rejected.
+        misbound = dict(native_snapshot)
+        misbound["connection_id"] = "other_account"
+        try:
+            crm.certify_exposure(connection_id, snapshot=misbound)
+            misbound_blocked = False
+        except Exception:
+            misbound_blocked = True
+        report.check(
+            "misbound_snapshot_rejected",
+            misbound_blocked,
+            "a snapshot not bound to this account cannot certify exposure "
             "(fail-closed)")
         # Confirm the exposure guard now certifies from the DB fields.
         exposure_cert = RiskEngine(runtime.log).aggregate_owner_risk(

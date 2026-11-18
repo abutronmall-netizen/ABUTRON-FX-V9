@@ -89,60 +89,158 @@ class CrmService:
         self.engine.upsert_account(acct)
         return self.engine.get_account(connection_id)
 
-    def certify_exposure(self, connection_id: str, *, equity: float,
-                         account_currency: str,
-                         native_positions: List[Dict],
-                         nonce: str) -> Dict:
+    def certify_exposure(self, connection_id: str, *, snapshot: Dict) -> Dict:
         """Certify owner exposure from AUTHENTICATED broker-native evidence.
 
         Replaces the previous blind-flag form (Issue #36): the caller no
         longer supplies ``native_positions_verified=True``. Certification is
         derived from an actual broker-native snapshot — the open-positions
-        list read from the MT5 terminal plus the native export nonce that
-        authenticates it. ``native_positions_verified`` is set to 1 ONLY when
-        the nonce verifies and a real positions snapshot is present; there is
-        no path to certify exposure from a manually supplied boolean.
+        list read from the MT5 terminal, bound to this account and
+        authenticated by the native export nonce. ``native_positions_verified``
+        is set to 1 ONLY when all of the following hold; there is no path to
+        certify exposure from a manually supplied boolean.
 
-        ``native_positions`` is the list of open positions read from the
-        broker terminal (each a dict with symbol/direction/volume/entry/
-        stop_loss/broker_native_stop_risk_usd/broker_native_ordercalcprofit_
-        verified). ``nonce`` is the ``ABUTRON_NATIVE_*`` export nonce that
-        proves the snapshot came from the account's own terminal.
+        ``snapshot`` is the parsed ``ABUTRON_NATIVE_EXPOSURE_V2`` export:
+        ``nonce``, ``challenge``, ``connection_id``, ``login``, ``equity``,
+        ``currency`` and ``positions`` (list of open positions, each with
+        ``ticket``/``symbol``/``direction``/``volume``/``entry``/``sl``/
+        ``stop_risk_usd``/``ordercalcprofit_verified``).
+
+        Certification requires:
+        - a valid ``ABUTRON_NATIVE_*`` nonce (authenticates the snapshot);
+        - ``snapshot["connection_id"]`` == ``connection_id`` (account-bound);
+        - ``snapshot["login"]`` == the account's registered ``mt5_login``
+          (the snapshot came from the account's own terminal);
+        - ``equity > 0`` and a USD currency;
+        - every native position reconciled into stop-risk: each snapshot
+          position must match an open receipt (by broker ticket) and carry a
+          verified ``OrderCalcProfit`` stop-risk. A broker position with no
+          matching receipt, or an open receipt with no matching broker
+          position, is a discrepancy -> certification fails (fail-closed).
 
         Until this is called with valid evidence, exposure is uncertified and
         the dispatcher blocks all RESERVED candidates (BLOCKED_INCOMPLETE_
         EXPOSURE) — fail-closed.
         """
+        if not isinstance(snapshot, dict):
+            raise CrmError(
+                f"certify_exposure for {connection_id} requires a broker "
+                "snapshot dict, not a manually supplied flag")
+        nonce = snapshot.get("nonce", "")
         if not verify_nonce(nonce):
             raise CrmError(
                 f"invalid native export nonce for {connection_id}: "
                 "exposure certification requires an authenticated broker "
                 "snapshot, not a manually supplied flag")
-        if not isinstance(native_positions, list):
+        # Account-binding: the snapshot must be for THIS account and from
+        # THIS account's terminal.
+        snap_cid = snapshot.get("connection_id", "")
+        if snap_cid != connection_id:
             raise CrmError(
-                f"native_positions for {connection_id} must be a broker "
-                "positions snapshot list, not a boolean")
+                f"snapshot connection_id {snap_cid!r} does not match account "
+                f"{connection_id!r}: broker evidence is not account-bound")
         acct = self.engine.get_account(connection_id)
         if acct is None:
             raise CrmError(f"account {connection_id} not found")
-        if float(equity) <= 0:
+        snap_login = snapshot.get("login", "")
+        if str(snap_login) != str(acct.get("mt5_login")):
+            raise CrmError(
+                f"snapshot login {snap_login!r} does not match account "
+                f"mt5_login {acct.get('mt5_login')!r}: broker evidence is "
+                "not bound to the registered account terminal")
+        equity = snapshot.get("equity")
+        # Equity may arrive as a JSON number or a quoted numeric string
+        # (MQL5 DoubleToString); accept both and parse to float.
+        if isinstance(equity, str):
+            try:
+                equity = float(equity)
+            except ValueError:
+                equity = None
+        if not isinstance(equity, (int, float)) or float(equity) <= 0:
             raise CrmError(
                 f"equity for {connection_id} must be > 0 to certify "
                 "broker-native exposure (fail-closed)")
+        currency = snapshot.get("currency", "")
+        positions = snapshot.get("positions")
+        if not isinstance(positions, list):
+            raise CrmError(
+                f"positions for {connection_id} must be a broker positions "
+                "snapshot list, not a boolean")
+
+        # Reconcile every native position into stop-risk (Issue #36).
+        self._reconcile_native_positions(connection_id, positions)
+
         acct["equity"] = float(equity)
-        acct["account_currency"] = account_currency
-        # native_positions_verified is derived from authenticated broker
-        # evidence (a real positions snapshot + a valid nonce), never from a
-        # caller-supplied boolean.
+        acct["account_currency"] = currency
+        # native_positions_verified is derived from authenticated,
+        # account-bound broker evidence — never from a caller-supplied flag.
         acct["native_positions_verified"] = 1
         acct["exposure_nonce"] = nonce
-        acct["exposure_snapshot_count"] = len(native_positions)
+        acct["exposure_snapshot_count"] = len(positions)
         acct["exposure_snapshot_digest"] = sha256_text(
             repr(sorted((p.get("symbol", ""), p.get("direction", ""),
-                         p.get("volume", 0)) for p in native_positions)))
+                         p.get("volume", 0), p.get("ticket", 0))
+                        for p in positions)))
         acct["exposure_certified_at"] = utc_now()
         self.engine.upsert_account(acct)
         return self.engine.get_account(connection_id)
+
+    def _reconcile_native_positions(self, connection_id: str,
+                                    positions: List[Dict]) -> None:
+        """Reconcile broker-native positions into stop-risk on receipts.
+
+        Every open position in the broker snapshot must match an open receipt
+        (by broker ticket) and carry a verified OrderCalcProfit stop-risk.
+        A broker position with no matching receipt, or an open receipt with
+        no matching broker position, is a discrepancy and raises (fail-closed)
+        so the account is NOT certified.
+        """
+        open_receipts = self.engine.recent_open_positions(connection_id)
+        by_ticket = {}
+        for r in open_receipts:
+            ticket = r.get("native_ticket", 0) or r.get("native_position_ticket", 0)
+            if ticket:
+                by_ticket[int(ticket)] = r
+
+        snapshot_tickets = set()
+        for p in positions:
+            ticket = p.get("ticket", 0)
+            if not ticket:
+                raise CrmError(
+                    f"native position for {connection_id} has no broker "
+                    "ticket; cannot reconcile into stop-risk (fail-closed)")
+            ticket = int(ticket)
+            snapshot_tickets.add(ticket)
+            receipt = by_ticket.get(ticket)
+            if receipt is None:
+                raise CrmError(
+                    f"broker position {ticket} for {connection_id} has no "
+                    "matching open receipt; untracked broker position "
+                    "(fail-closed)")
+            stop_risk = p.get("stop_risk_usd")
+            verified = p.get("ordercalcprofit_verified")
+            if not isinstance(stop_risk, (int, float)) or stop_risk < 0:
+                raise CrmError(
+                    f"broker position {ticket} for {connection_id} has no "
+                    "valid OrderCalcProfit stop-risk (fail-closed)")
+            if not verified:
+                raise CrmError(
+                    f"broker position {ticket} for {connection_id} is not "
+                    "OrderCalcProfit-verified (fail-closed)")
+            self.engine.update_receipt(
+                receipt["receipt_id"],
+                broker_native_stop_risk_usd=float(stop_risk),
+                broker_native_ordercalcprofit_verified=1,
+                native_position_ticket=ticket,
+            )
+
+        # Every open receipt must be accounted for by a broker position.
+        for ticket, receipt in by_ticket.items():
+            if ticket not in snapshot_tickets:
+                raise CrmError(
+                    f"open receipt {receipt.get('receipt_id')} for "
+                    f"{connection_id} (ticket {ticket}) has no matching "
+                    "broker position; stale receipt (fail-closed)")
 
     # ------------------------------------------------------------------
     # Broker connection lifecycle (blueprint C10–C16, seven statuses)

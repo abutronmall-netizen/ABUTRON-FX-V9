@@ -55,7 +55,15 @@ def publish_exposure(connection_id: str,
             "broker evidence is not authenticated")
 
     equity = snapshot.get("equity")
-    currency = snapshot.get("currency", "")
+    # Equity may arrive as a JSON number or a quoted numeric string (MQL5
+    # DoubleToString); accept both and parse to float.
+    if isinstance(equity, str):
+        try:
+            equity = float(equity)
+        except ValueError:
+            raise CrmError(
+                f"exposure snapshot for {connection_id} has non-numeric "
+                "equity")
     if not isinstance(equity, (int, float)):
         raise CrmError(
             f"exposure snapshot for {connection_id} has no numeric equity")
@@ -64,13 +72,9 @@ def publish_exposure(connection_id: str,
         raise CrmError(
             f"exposure snapshot for {connection_id} has malformed positions")
 
-    certified = crm.certify_exposure(
-        connection_id,
-        equity=float(equity),
-        account_currency=currency,
-        native_positions=positions,
-        nonce=nonce,
-    )
+    # certify_exposure verifies account-binding (connection_id + login),
+    # the nonce, equity, and reconciles every native position into stop-risk.
+    certified = crm.certify_exposure(connection_id, snapshot=snapshot)
 
     if log is not None:
         log.append(make_event(
@@ -78,7 +82,7 @@ def publish_exposure(connection_id: str,
             connection_id=connection_id,
             nonce=nonce,
             equity=float(equity),
-            account_currency=currency,
+            account_currency=snapshot.get("currency", ""),
             position_count=len(positions),
             exposure_snapshot_digest=certified.get(
                 "exposure_snapshot_digest", ""),

@@ -162,6 +162,14 @@ class OrderReceiptRow(Base):
     reconciled_state: Mapped[str] = mapped_column(String(32), default="PENDING")
     received_at: Mapped[str] = mapped_column(String(32), default="")
     reason_code: Mapped[str] = mapped_column(String(64), default="")
+    # Issue #36: broker-native stop-risk reconciliation. These fields are
+    # populated by the native exposure publisher from the broker snapshot's
+    # OrderCalcProfit and read by RiskEngine.aggregate_owner_risk. They MUST
+    # originate from a broker-reconciled native position, never from a
+    # registry estimate.
+    broker_native_stop_risk_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    broker_native_ordercalcprofit_verified: Mapped[int] = mapped_column(Integer, default=0)
+    native_position_ticket: Mapped[int] = mapped_column(Integer, default=0, index=True)
 
 
 class LedgerRow(Base):
@@ -332,6 +340,11 @@ class EngineDB:
                 "trail_k": "FLOAT DEFAULT 0",
                 "trail_stop": "FLOAT DEFAULT 0",
                 "trail_plan": "TEXT DEFAULT '{}'",
+            })
+            _migrate_columns(self._engine, "order_receipts", {
+                "broker_native_stop_risk_usd": "FLOAT DEFAULT 0",
+                "broker_native_ordercalcprofit_verified": "INTEGER DEFAULT 0",
+                "native_position_ticket": "INTEGER DEFAULT 0",
             })
 
     @property

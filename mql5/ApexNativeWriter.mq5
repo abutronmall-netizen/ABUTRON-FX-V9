@@ -130,16 +130,23 @@ void ExportNativeData()
 
    // --- Broker-native exposure snapshot (Issue #36) -----------------
    // Open positions + account equity/balance, authenticated by the same
-   // nonce/challenge as the identity export. The Python worker reads this
-   // and feeds crm.certify_exposure — certification is derived from this
-   // real broker evidence, never from a manually supplied flag.
-   string exposureJson = "{\\\"nonce\\\":\\\"" + Nonce() + "\\\"," +
-      "\\\"challenge\\\":\\\"" + Challenge() + "\\\"," +
-      "\\\"login\\\":\\\"" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\\\"," +
-      "\\\"equity\\\":\\\"" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\\\"," +
-      "\\\"balance\\\":\\\"" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\\\"," +
-      "\\\"currency\\\":\\\"" + AccountInfoString(ACCOUNT_CURRENCY) + "\\\"," +
-      "\\\"positions\\\":[";
+   // nonce/challenge as the identity export and bound to THIS account
+   // (connection_id + login). The Python worker reads this and feeds
+   // crm.certify_exposure — certification is derived from this real
+   // broker evidence, never from a manually supplied flag.
+   // JSON escaping: in MQL5 a string literal "\\" is a single backslash
+   // and "\"" is a quote; to emit valid JSON the quotes must be "\""
+   // (NOT "\\\\\\\"), otherwise json.loads on the Python side fails.
+   string expNonce = Nonce();
+   string expJson = StringFormat(
+      "{\"nonce\":\"%s\",\"challenge\":\"%s\",\"connection_id\":\"%s\","
+      "\"login\":\"%s\",\"equity\":%s,\"balance\":%s,"
+      "\"currency\":\"%s\",\"positions\":[",
+      expNonce, Challenge(), InpConnectionId,
+      IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
+      DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2),
+      DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
+      AccountInfoString(ACCOUNT_CURRENCY));
    string posJson = "";
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -151,19 +158,33 @@ void ExportNativeData()
       double tp   = PositionGetDouble(POSITION_TP);
       double vol  = PositionGetDouble(POSITION_VOLUME);
       int type    = (int)PositionGetInteger(POSITION_TYPE);
+      ENUM_ORDER_TYPE ordType = (type == POSITION_TYPE_BUY)
+                                ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
       string dir  = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
       double swap = PositionGetDouble(POSITION_SWAP);
+      // Actual broker-native stop-risk: OrderCalcProfit at the SL level.
+      // A position with no SL cannot be stop-risk certified (fail-closed).
+      bool ocVerified = (sl > 0.0);
+      double calcProfit = 0.0;
+      double stopRiskUsd = 0.0;
+      if(ocVerified)
+      {
+         calcProfit = OrderCalcProfit(ticket, ordType, vol, sym,
+                                       entry, sl, tp);
+         if(calcProfit < 0.0) stopRiskUsd = -calcProfit;
+      }
       posJson += StringFormat(
-         "{\\\"ticket\\\":%d,\\\"symbol\\\":\\\"%s\\\",\\\"direction\\\":\\\"%s\\\","
-         "\\\"volume\\\":%.2f,\\\"entry\\\":%.5f,\\\"sl\\\":%.5f,\\\"tp\\\":%.5f,"
-         "\\\"swap\\\":%.2f},\",
-         ticket, sym, dir, vol, entry, sl, tp, swap);
+         "{\"ticket\":%d,\"symbol\":\"%s\",\"direction\":\"%s\","
+         "\"volume\":%.2f,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
+         "\"swap\":%.2f,\"stop_risk_usd\":%.2f,\"ordercalcprofit_verified\":%s},",
+         ticket, sym, dir, vol, entry, sl, tp, swap, stopRiskUsd,
+         ocVerified ? "true" : "false");
    }
    int pComma = StringFindLast(posJson, ",");
    if(pComma >= 0) posJson = StringSubstr(posJson, 0, pComma);
-   exposureJson += posJson + "]}";
-   string exposureFile = dir + "ABUTRON_NATIVE_EXPOSURE_V2_" + Nonce() + ".txt";
-   WriteTextFile(exposureFile, exposureJson);
+   expJson += posJson + "]}";
+   string exposureFile = dir + "ABUTRON_NATIVE_EXPOSURE_V2_" + expNonce + ".txt";
+   WriteTextFile(exposureFile, expJson);
 }
 
 //+------------------------------------------------------------------+
