@@ -352,6 +352,8 @@ def summary(owner):
   baseline_direction_accuracy=accuracy(0),candidate_direction_accuracy=accuracy(1),
   candidate_brier_minus_baseline_brier=round(score(1)-score(0),6) if rows else None)
 def main():
+ global ACCOUNTS,SYMBOL_UNIVERSE,load_unified,build_signal_bundle,features_for_brain,validate_snapshot,utc_now
+ load_unified,build_signal_bundle,features_for_brain,validate_snapshot,utc_now=_load_production_modules()
  now=time.time()
  os.umask(0o077)
  need(ROOT.is_dir() and ROOT.stat().st_uid==0 and stat.S_IMODE(ROOT.stat().st_mode)==0o700,
@@ -360,7 +362,6 @@ def main():
  lease=OUT/"single-writer.lock"
  with open(lease,"a+") as f:
   fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
-  global ACCOUNTS,SYMBOL_UNIVERSE
   ACCOUNTS=roster()
   need(h((BASE/"nexus_brain.json").read_bytes())==PIN,
      "PRODUCTION_BASELINE_MODEL_SHA_CHANGED")
@@ -422,3 +423,4 @@ def main():
    missing_source_accounts={k:len(v) for k,v in bad.items()},
    live_switched_on=False,broker_orders=0,model_promoted=False)))
 if __name__=="__main__":main()
+
