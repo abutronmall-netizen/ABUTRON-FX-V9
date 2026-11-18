@@ -294,7 +294,7 @@ def main() -> int:
         account = {
             "connection_id": connection_id,
             "broker": "fp_markets",
-            "mt5_login": 60123456,
+            "mt5_login": 123456,
             "owner_id": "owner_cert",
             "display_name": "Cert DEMO",
             "environment": "demo",
@@ -327,22 +327,42 @@ def main() -> int:
         import abutron.main as _main
         _main.get_feed = _bf.get_feed
 
-        # Certify owner exposure via the REAL broker-worker path: the
-        # CRM stores equity + native_positions_verified from broker-native
-        # evidence, and RiskEngine.aggregate_owner_risk reads them from the
-        # DB (no patching). This is exactly what the broker worker does in
-        # production when a reconciled native positions snapshot + MT5
-        # balance are verified.
+        # Certify owner exposure via the REAL broker-worker path (Issue #36):
+        # the broker worker reads a broker-native exposure snapshot (open
+        # positions + equity, authenticated by a native export nonce) from
+        # the terminal and feeds it to crm.certify_exposure, which derives
+        # native_positions_verified from that evidence — NOT from a manually
+        # supplied flag. RiskEngine.aggregate_owner_risk reads the certified
+        # fields from the DB (no patching).
         from abutron.crm.controls import crm
+        from abutron.crypto import make_nonce
+        native_snapshot_nonce = make_nonce()
+        native_positions = []  # DEMO account is flat: zero open positions
         cert_acct = crm.certify_exposure(
             connection_id, equity=10000.0, account_currency="USD",
-            native_positions_verified=True)
+            native_positions=native_positions, nonce=native_snapshot_nonce)
         report.check(
             "broker_worker_certifies_exposure",
             cert_acct.get("equity") == 10000.0
-            and cert_acct.get("native_positions_verified") == 1,
-            "broker worker certified exposure (equity + native_positions_verified "
-            "stored in DB)")
+            and cert_acct.get("native_positions_verified") == 1
+            and cert_acct.get("exposure_nonce") == native_snapshot_nonce
+            and cert_acct.get("exposure_snapshot_count") == 0,
+            "broker worker certified exposure from an authenticated broker "
+            "snapshot (equity + native_positions_verified + nonce stored "
+            "in DB)")
+        # Issue #36: a blind flag must no longer certify exposure.
+        try:
+            crm.certify_exposure(
+                connection_id, equity=10000.0, account_currency="USD",
+                native_positions=native_positions, nonce="not-a-valid-nonce")
+            blind_flag_blocked = False
+        except Exception:
+            blind_flag_blocked = True
+        report.check(
+            "blind_flag_certification_rejected",
+            blind_flag_blocked,
+            "an invalid nonce / manual-flag path no longer certifies exposure "
+            "(fail-closed)")
         # Confirm the exposure guard now certifies from the DB fields.
         exposure_cert = RiskEngine(runtime.log).aggregate_owner_risk(
             "owner_cert")
@@ -484,7 +504,7 @@ def main() -> int:
         uncert_cid = "cert_uncert_" + "e" * 20
         engine_db.upsert_account({
             "connection_id": uncert_cid, "broker": "fp_markets",
-            "mt5_login": 70123456, "owner_id": "owner_uncert",
+            "mt5_login": 234567, "owner_id": "owner_uncert",
             "display_name": "Uncertified DEMO", "environment": "demo",
             "server": "synthetic-demo-server",
             "per_trade_risk_pct": DEFAULT_PER_TRADE_RISK_PCT,

@@ -15,6 +15,7 @@ from ..config import DATA_ROOT
 from ..events import EventLog
 from ..feeds.mt5_terminal import terminal_manager
 from ..db import engine_db
+from ..exposure.publisher import publish_exposure
 
 
 def connection_id() -> str:
@@ -43,6 +44,7 @@ def main() -> None:
         mt5_login=acct["mt5_login"], execution_state="CONNECTED"))
 
     try:
+        last_publish = 0.0
         while True:
             if not term.is_running:
                 term = terminal_manager.restart(cid)
@@ -51,6 +53,20 @@ def main() -> None:
                     "worker.restart", connection_id=cid,
                     execution_state="CONNECTED",
                     reason_code="PROCESS_EXITED"))
+            # Issue #36: publish broker-native exposure from the terminal's
+            # snapshot on each export cycle, so certification is derived
+            # from real broker evidence — never a manually supplied flag.
+            if time.time() - last_publish >= 30:
+                try:
+                    publish_exposure(cid, log=log)
+                    last_publish = time.time()
+                except Exception as exc:  # noqa: BLE001 - log, never crash the loop
+                    log.append(__import__("abutron.events",
+                                          fromlist=["make_event"]).make_event(
+                        "exposure.publish_error", connection_id=cid,
+                        execution_state="UNCERTIFIED",
+                        reason_code="BROKER_SNAPSHOT_UNAVAILABLE",
+                        error=str(exc)))
             time.sleep(10)
     except KeyboardInterrupt:
         terminal_manager.stop(cid)

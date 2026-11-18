@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 from ..config import (BROKERS, DERIV_SERVERS, FP_SYMBOL_SUFFIX_HINT,
                       DEFAULT_PER_TRADE_RISK_PCT, DEFAULT_PORTFOLIO_RISK_CAP_PCT,
                       LIVE_TRADING_ENABLED, utc_now)
-from ..crypto import make_activation_revision
+from ..crypto import make_activation_revision, sha256_text, verify_nonce
 from ..db import engine_db, portal_db
 
 
@@ -90,24 +90,57 @@ class CrmService:
         return self.engine.get_account(connection_id)
 
     def certify_exposure(self, connection_id: str, *, equity: float,
-                         account_currency: str = "USD",
-                         native_positions_verified: bool = True) -> Dict:
-        """Certify owner exposure from broker-native evidence.
+                         account_currency: str,
+                         native_positions: List[Dict],
+                         nonce: str) -> Dict:
+        """Certify owner exposure from AUTHENTICATED broker-native evidence.
 
-        Sets the fields RiskEngine.aggregate_owner_risk reads to decide
-        whether an owner's exposure is certified (equity > 0, USD
-        currency, native_positions_verified=True). Only a trusted broker
-        worker should call this after a reconciled native positions
-        snapshot + MT5 balance are verified. Until this is called,
-        exposure is uncertified and the dispatcher blocks all RESERVED
-        candidates (BLOCKED_INCOMPLETE_EXPOSURE) — fail-closed.
+        Replaces the previous blind-flag form (Issue #36): the caller no
+        longer supplies ``native_positions_verified=True``. Certification is
+        derived from an actual broker-native snapshot — the open-positions
+        list read from the MT5 terminal plus the native export nonce that
+        authenticates it. ``native_positions_verified`` is set to 1 ONLY when
+        the nonce verifies and a real positions snapshot is present; there is
+        no path to certify exposure from a manually supplied boolean.
+
+        ``native_positions`` is the list of open positions read from the
+        broker terminal (each a dict with symbol/direction/volume/entry/
+        stop_loss/broker_native_stop_risk_usd/broker_native_ordercalcprofit_
+        verified). ``nonce`` is the ``ABUTRON_NATIVE_*`` export nonce that
+        proves the snapshot came from the account's own terminal.
+
+        Until this is called with valid evidence, exposure is uncertified and
+        the dispatcher blocks all RESERVED candidates (BLOCKED_INCOMPLETE_
+        EXPOSURE) — fail-closed.
         """
+        if not verify_nonce(nonce):
+            raise CrmError(
+                f"invalid native export nonce for {connection_id}: "
+                "exposure certification requires an authenticated broker "
+                "snapshot, not a manually supplied flag")
+        if not isinstance(native_positions, list):
+            raise CrmError(
+                f"native_positions for {connection_id} must be a broker "
+                "positions snapshot list, not a boolean")
         acct = self.engine.get_account(connection_id)
         if acct is None:
             raise CrmError(f"account {connection_id} not found")
+        if float(equity) <= 0:
+            raise CrmError(
+                f"equity for {connection_id} must be > 0 to certify "
+                "broker-native exposure (fail-closed)")
         acct["equity"] = float(equity)
         acct["account_currency"] = account_currency
-        acct["native_positions_verified"] = 1 if native_positions_verified else 0
+        # native_positions_verified is derived from authenticated broker
+        # evidence (a real positions snapshot + a valid nonce), never from a
+        # caller-supplied boolean.
+        acct["native_positions_verified"] = 1
+        acct["exposure_nonce"] = nonce
+        acct["exposure_snapshot_count"] = len(native_positions)
+        acct["exposure_snapshot_digest"] = sha256_text(
+            repr(sorted((p.get("symbol", ""), p.get("direction", ""),
+                         p.get("volume", 0)) for p in native_positions)))
+        acct["exposure_certified_at"] = utc_now()
         self.engine.upsert_account(acct)
         return self.engine.get_account(connection_id)
 

@@ -127,6 +127,43 @@ void ExportNativeData()
    string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + Nonce() + ".txt";
    WriteTextFile(oflowFile, ofJson);
    WriteTextFile(lastFile, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
+
+   // --- Broker-native exposure snapshot (Issue #36) -----------------
+   // Open positions + account equity/balance, authenticated by the same
+   // nonce/challenge as the identity export. The Python worker reads this
+   // and feeds crm.certify_exposure — certification is derived from this
+   // real broker evidence, never from a manually supplied flag.
+   string exposureJson = "{\\\"nonce\\\":\\\"" + Nonce() + "\\\"," +
+      "\\\"challenge\\\":\\\"" + Challenge() + "\\\"," +
+      "\\\"login\\\":\\\"" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\\\"," +
+      "\\\"equity\\\":\\\"" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\\\"," +
+      "\\\"balance\\\":\\\"" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\\\"," +
+      "\\\"currency\\\":\\\"" + AccountInfoString(ACCOUNT_CURRENCY) + "\\\"," +
+      "\\\"positions\\\":[";
+   string posJson = "";
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      long ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      string sym = PositionGetString(POSITION_SYMBOL);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl   = PositionGetDouble(POSITION_SL);
+      double tp   = PositionGetDouble(POSITION_TP);
+      double vol  = PositionGetDouble(POSITION_VOLUME);
+      int type    = (int)PositionGetInteger(POSITION_TYPE);
+      string dir  = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+      double swap = PositionGetDouble(POSITION_SWAP);
+      posJson += StringFormat(
+         "{\\\"ticket\\\":%d,\\\"symbol\\\":\\\"%s\\\",\\\"direction\\\":\\\"%s\\\","
+         "\\\"volume\\\":%.2f,\\\"entry\\\":%.5f,\\\"sl\\\":%.5f,\\\"tp\\\":%.5f,"
+         "\\\"swap\\\":%.2f},\",
+         ticket, sym, dir, vol, entry, sl, tp, swap);
+   }
+   int pComma = StringFindLast(posJson, ",");
+   if(pComma >= 0) posJson = StringSubstr(posJson, 0, pComma);
+   exposureJson += posJson + "]}";
+   string exposureFile = dir + "ABUTRON_NATIVE_EXPOSURE_V2_" + Nonce() + ".txt";
+   WriteTextFile(exposureFile, exposureJson);
 }
 
 //+------------------------------------------------------------------+

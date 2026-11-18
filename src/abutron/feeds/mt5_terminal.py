@@ -180,6 +180,30 @@ class Mt5TerminalManager:
             "bars_file": bars,
         }
 
+    def read_native_exposure(self, connection_id: str) -> Optional[Dict]:
+        """Read the latest broker-native exposure snapshot (Issue #36).
+
+        Returns the parsed ABUTRON_NATIVE_EXPOSURE_V2 export — open
+        positions + equity/balance/currency authenticated by the native
+        export nonce. This is the broker-native evidence the worker feeds
+        to crm.certify_exposure so exposure certification is derived from
+        real broker data, not a manually supplied flag.
+        """
+        term = self._terminals.get(connection_id)
+        if term is None or not term.is_running:
+            return None
+        pattern = os.path.join(term.export_dir,
+                               "ABUTRON_NATIVE_EXPOSURE_V2_*.txt")
+        path = _latest_match(pattern)
+        if not path:
+            return None
+        try:
+            snapshot = json.loads(open(path).read())
+        except (ValueError, OSError):
+            return None
+        snapshot["exposure_file"] = path
+        return snapshot
+
     def health(self, connection_id: str) -> Dict:
         term = self._terminals.get(connection_id)
         if term is None:
