@@ -757,13 +757,20 @@ class ApexIntegration:
         (at-most-once). Returns the stored row, or None if the replay key
         was already consumed (CANDLE_ALREADY_CONSUMED).
         """
-        from .. import db
-        from ..db import engine_db
+        from . import db
+        from .db import engine_db
         cand = ready["candidate"]
         signal_id = cand["signal_id"]
         side = cand["side"]
         row = {
-            "candidate_id": f"cand_{signal_id[:12]}",
+            # Collision-safe candidate_id: derive from a SHA256 of the full
+            # replay_key. The previous ``signal_id[:12]`` truncation collided
+            # for same-symbol candidates sharing a date prefix (e.g. two
+            # READY candidates on the same symbol/day), crashing the second
+            # insert with a PRIMARY KEY violation. Hash -> deterministic and
+            # collision-free (same replay_key -> same candidate_id, preserving
+            # at-most-once idempotency via the replay_key unique constraint).
+            "candidate_id": f"cand_{_to_hex32(signal_id)}",
             "connection_id": connection_id,
             "owner_id": account.get("owner_id", ""),
             "broker": cand["broker"],
