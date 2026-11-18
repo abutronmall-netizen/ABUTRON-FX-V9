@@ -67,7 +67,7 @@ def publish_exposure(connection_id: str,
     if not isinstance(equity, (int, float)):
         raise CrmError(
             f"exposure snapshot for {connection_id} has no numeric equity")
-    positions: List[Dict] = snapshot.get("positions") or []
+    positions: List[Dict] = snapshot.get("positions")
     if not isinstance(positions, list):
         raise CrmError(
             f"exposure snapshot for {connection_id} has malformed positions")

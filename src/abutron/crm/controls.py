@@ -181,7 +181,7 @@ class CrmService:
                 f"login {snap_login!r}: broker evidence is not internally "
                 "consistent")
         import time as _time
-        if (_time.time() - nonce_ts) > EXPOSURE_SNAPSHOT_FRESH_SECONDS:
+        if not (0 <= _time.time() - nonce_ts <= EXPOSURE_SNAPSHOT_FRESH_SECONDS):
             raise CrmError(
                 f"exposure snapshot nonce for {connection_id} is stale "
                 f"(older than {EXPOSURE_SNAPSHOT_FRESH_SECONDS}s): replay "
@@ -192,13 +192,33 @@ class CrmService:
         # the activation secret. A fabricated snapshot without the secret
         # cannot produce a valid signature.
         sig = snapshot.get("sig", "")
-        canonical = build_exposure_canonical(
-            connection_id, snap_login, float(equity), nonce, positions)
-        if not hmac_verify(activation_secret(), canonical, sig):
+        if not isinstance(sig, str) or len(sig) != 64:
+            raise CrmError("native exposure HMAC signature missing or malformed")
+        server = snapshot.get("server", "")
+        challenge = snapshot.get("challenge", "")
+        if (not isinstance(server, str) or not server
+                or (acct.get("server") and server != acct["server"])
+                or not isinstance(challenge, str) or not challenge
+                or type(snapshot.get("position_count")) is not int
+                or snapshot.get("position_count") != len(positions)):
+            raise CrmError("incomplete or misbound native exposure identity")
+        try:
+            canonical = build_exposure_canonical(
+                connection_id, snap_login, float(equity), nonce, positions,
+                server=server, currency=currency,
+                balance=float(snapshot.get("balance", 0.0)),
+                challenge=challenge)
+            secret = activation_secret()
+        except (ValueError, KeyError, TypeError) as exc:
+            raise CrmError("native exposure authentication not configured or malformed") from exc
+        if not hmac_verify(secret, canonical, sig):
             raise CrmError(
                 f"exposure snapshot for {connection_id} has an invalid HMAC "
                 "signature: broker evidence is not authenticated (fail-closed)")
 
+        # Replaying the same snapshot cannot extend an expiring certificate.
+        if acct.get("exposure_nonce") == nonce:
+            raise CrmError("native exposure snapshot already certified: replay")
         # Reconcile every native position into stop-risk (Issue #36).
         self._reconcile_native_positions(connection_id, positions)
 
@@ -216,6 +236,15 @@ class CrmService:
         acct["exposure_certified_at"] = utc_now()
         self.engine.upsert_account(acct)
         return self.engine.get_account(connection_id)
+
+    def invalidate_exposure(self, connection_id: str) -> None:
+        """Fail closed immediately when the trusted worker loses native proof."""
+        acct = self.engine.get_account(connection_id)
+        if acct is None:
+            return
+        acct["native_positions_verified"] = 0
+        acct["exposure_certified_at"] = ""
+        self.engine.upsert_account(acct)
 
     def _reconcile_native_positions(self, connection_id: str,
                                     positions: List[Dict]) -> None:
@@ -251,11 +280,13 @@ class CrmService:
                     "(fail-closed)")
             stop_risk = p.get("stop_risk_usd")
             verified = p.get("ordercalcprofit_verified")
-            if not isinstance(stop_risk, (int, float)) or stop_risk < 0:
+            import math
+            if (type(stop_risk) not in (int, float)
+                    or not math.isfinite(stop_risk) or stop_risk < 0):
                 raise CrmError(
                     f"broker position {ticket} for {connection_id} has no "
                     "valid OrderCalcProfit stop-risk (fail-closed)")
-            if not verified:
+            if verified is not True:
                 raise CrmError(
                     f"broker position {ticket} for {connection_id} is not "
                     "OrderCalcProfit-verified (fail-closed)")

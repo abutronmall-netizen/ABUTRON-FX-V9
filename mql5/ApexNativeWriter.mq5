@@ -24,7 +24,6 @@
 //+------------------------------------------------------------------+
 #property copyright "ABUTRON FX V9"
 #property version   "1.1.0"
-#property strict_testing
 
 input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
@@ -39,8 +38,7 @@ string g_activation_secret = "";                // resolved at OnInit
 
 int OnInit()
 {
-   SetTradeAllowed(true);
-   SetTradeExecution(ORDER_TYPE_MARKET, 0, 0, 0); // allow market orders
+   // Terminal-level algorithmic trading permissions are managed by MT5.
    g_activation_secret = LoadActivationSecret();
    EventSetTimer(5);                                  // export + handoff loop
    return(INIT_SUCCEEDED);
@@ -62,7 +60,7 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void ExportNativeData()
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
 
    // --- Account identity -------------------------------------------
    string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + Nonce() + ".txt";
@@ -88,12 +86,15 @@ void ExportNativeData()
          TimeToString(r.time, TIME_DATE|TIME_SECONDS),
          TimeToString(r.time + PeriodSeconds(InpExportPeriod), TIME_DATE|TIME_SECONDS),
          r.open, r.high, r.low, r.close, r.tick_volume,
-         Bid, Ask, (int)(Ask - Bid), _Point, _Point);
+         SymbolInfoDouble(_Symbol, SYMBOL_BID),
+         SymbolInfoDouble(_Symbol, SYMBOL_ASK),
+         (int)((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
+                SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point),
+         _Point, _Point);
    }
    // Remove trailing comma manually (StringTrimRight only trims whitespace)
-   int lastComma = StringFindLast(barsJson, ",");
-   if(lastComma >= 0)
-      barsJson = StringSubstr(barsJson, 0, lastComma);
+   if(StringLen(barsJson) > 0 && StringSubstr(barsJson, StringLen(barsJson)-1, 1) == ",")
+      barsJson = StringSubstr(barsJson, 0, StringLen(barsJson)-1);
    barsJson += "]}";
    string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + Nonce() + ".txt";
    WriteTextFile(barsFile, barsJson);
@@ -120,9 +121,8 @@ void ExportNativeData()
          (r.close >= r.open) ? "buy" : "sell",
          TimeToString(r.time, TIME_DATE|TIME_SECONDS));
    }
-   int ofComma = StringFindLast(ofJson, ",");
-   if(ofComma >= 0)
-      ofJson = StringSubstr(ofJson, 0, ofComma);
+   if(StringLen(ofJson) > 0 && StringSubstr(ofJson, StringLen(ofJson)-1, 1) == ",")
+      ofJson = StringSubstr(ofJson, 0, StringLen(ofJson)-1);
    ofJson += "]}";
    string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + Nonce() + ".txt";
    WriteTextFile(oflowFile, ofJson);
@@ -143,7 +143,7 @@ void ExportNativeData()
    // Nonce: ABUTRON_NATIVE_<login>_<unix_ts> — Python parses login +
    // freshness from this; the HMAC sig provides real authentication.
    string expNonce = StringFormat("ABUTRON_NATIVE_%s_%d", loginStr,
-                                  (long)TimeCurrent());
+                                  (long)TimeGMT());
 
    // Collect ticket list and sort ascending for a deterministic canonical.
    long allTickets[];
@@ -156,7 +156,7 @@ void ExportNativeData()
       if(t != 0) allTickets[n++] = t;
    }
    ArrayResize(allTickets, n);
-   ArraySort(allTickets, 0, 0, ticket);
+   ArraySort(allTickets);
 
    string positionsCanon = "";
    string posJson = "";
@@ -174,21 +174,19 @@ void ExportNativeData()
                                 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
       string dir  = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
       double swap = PositionGetDouble(POSITION_SWAP);
-      // Actual broker-native stop-risk: MQL5 OrderCalcProfit(ticket, type,
-      // volume, symbol, price, sl, tp) — 7 args, profit is the return
-      // value (no output parameter). Loss to SL is the negative profit.
-      bool ocVerified = (sl > 0.0);
+      // MQL5: bool OrderCalcProfit(type, symbol, volume, open, close, profit).
+      // Reject missing SL, broker calculation failures, or non-loss geometry.
       double calcProfit = 0.0;
-      double stopRiskUsd = 0.0;
-      if(ocVerified)
-      {
-         calcProfit = OrderCalcProfit(ticket, ordType, vol, sym,
-                                       entry, sl, tp);
-         if(calcProfit < 0.0) stopRiskUsd = -calcProfit;
-      }
+      bool ocVerified = (sl > 0.0
+                         && OrderCalcProfit(ordType, sym, vol, entry, sl,
+                                            calcProfit)
+                         && MathIsValidNumber(calcProfit)
+                         && calcProfit < 0.0);
+      double stopRiskUsd = ocVerified ? -calcProfit : 0.0;
       if(k > 0) positionsCanon += ";";
-      positionsCanon += StringFormat("%d:%s:%s:%.2f:%.5f",
-                                     ticket, sym, dir, vol, sl);
+      positionsCanon += StringFormat("%I64d:%s:%s:%.2f:%.5f:%.5f:%.5f:%.2f:%s",
+                                     ticket, sym, dir, vol, entry, sl, tp,
+                                     stopRiskUsd, ocVerified ? "true" : "false");
       posJson += StringFormat(
          "{\"ticket\":%d,\"symbol\":\"%s\",\"direction\":\"%s\","
          "\"volume\":%.2f,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
@@ -196,24 +194,30 @@ void ExportNativeData()
          ticket, sym, dir, vol, entry, sl, tp, swap, stopRiskUsd,
          ocVerified ? "true" : "false");
    }
-   int pComma = StringFindLast(posJson, ",");
-   if(pComma >= 0) posJson = StringSubstr(posJson, 0, pComma);
+   if(StringLen(posJson) > 0 && StringSubstr(posJson, StringLen(posJson)-1, 1) == ",")
+      posJson = StringSubstr(posJson, 0, StringLen(posJson)-1);
 
-   // Canonical message bound by HMAC: connection_id | login | equity |
-   // nonce | position_count | positions_canonical. Positions are included
-   // so they cannot be swapped without breaking the signature.
-   string canonical = StringFormat("%s|%s|%s|%s|%d|%s", InpConnectionId,
-         loginStr, DoubleToString(equityD, 2), expNonce, n, positionsCanon);
+   // The signed wire format is mirrored in Python build_exposure_canonical.
+   // Include every broker-money field that CRM can use for certification.
+   string expServer = AccountInfoString(ACCOUNT_SERVER);
+   string expCurrency = AccountInfoString(ACCOUNT_CURRENCY);
+   double balanceD = AccountInfoDouble(ACCOUNT_BALANCE);
+   string expChallenge = Challenge();
+   string canonical = StringFormat("%s|%s|%s|%s|%s|%s|%s|%s|%d|%s",
+         InpConnectionId, loginStr, expServer, expCurrency,
+         DoubleToString(equityD, 2), DoubleToString(balanceD, 2),
+         expNonce, expChallenge, n, positionsCanon);
+   if(g_activation_secret == "")
+      return;  // Without provisioned key, never publish certifiable evidence.
    string sig = HmacSha256Hex(g_activation_secret, canonical);
-
    string expJson = StringFormat(
-      "{\"nonce\":\"%s\",\"challenge\":\"%s\",\"connection_id\":\"%s\","
-      "\"login\":\"%s\",\"equity\":%s,\"balance\":%s,"
-      "\"currency\":\"%s\",\"position_count\":%d,\"sig\":\"%s\","
-      "\"positions\":[",
-      expNonce, Challenge(), InpConnectionId, loginStr,
-      DoubleToString(equityD, 2), DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
-      AccountInfoString(ACCOUNT_CURRENCY), n, sig);
+      "{\\\"nonce\\\":\\\"%s\\\",\\\"challenge\\\":\\\"%s\\\",\\\"connection_id\\\":\\\"%s\\\","
+      "\\\"login\\\":\\\"%s\\\",\\\"server\\\":\\\"%s\\\",\\\"equity\\\":%s,\\\"balance\\\":%s,"
+      "\\\"currency\\\":\\\"%s\\\",\\\"position_count\\\":%d,\\\"sig\\\":\\\"%s\\\","
+      "\\\"positions\\\":[",
+      expNonce, expChallenge, InpConnectionId, loginStr, expServer,
+      DoubleToString(equityD, 2), DoubleToString(balanceD, 2),
+      expCurrency, n, sig);
    expJson += posJson + "]}";
    string exposureFile = dir + "ABUTRON_NATIVE_EXPOSURE_V2_" + expNonce + ".txt";
    WriteTextFile(exposureFile, expJson);
@@ -224,7 +228,7 @@ void ExportNativeData()
 //+------------------------------------------------------------------+
 void ProcessOrderRequests()
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
    string pending = dir + "ABUTRON_REQ_PENDING.json";
    if(!FileIsExist(pending)) return;
 
@@ -280,8 +284,8 @@ void ProcessOrderRequests()
    }
 
    double price = 0.0;
-   if(dirn == "BUY")  price = Ask;
-   else               price = Bid;
+   if(dirn == "BUY")  price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   else               price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
    // Floor volume to broker lot step — never round up.
    // If the floored lot is below the minimum, REJECT (not increase).
@@ -369,7 +373,7 @@ void WriteReceipt(string reqId, long ticket, string state, string reason,
                   double price, double volume, double sl, double tp,
                   string deal)
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
    string file = dir + "ABUTRON_NATIVE_RECEIPTS_V2_" + Nonce() + ".txt";
    string json = StringFormat(
       "{\"request_id\":\"%s\",\"ticket\":%d,\"state\":\"%s\",\"reason\":\"%s\",\"login\":%d,\"price\":%.5f,\"volume\":%.2f,\"sl\":%.5f,\"tp\":%.5f,\"deal\":\"%s\",\"ts\":\"%s\"}",
@@ -378,6 +382,11 @@ void WriteReceipt(string reqId, long ticket, string state, string reason,
       price, volume, sl, tp,
       deal, TimeStampToStr(TimeCurrent()));
    WriteTextFile(file, json);
+}
+
+string TimeStampToStr(datetime ts)
+{
+   return(TimeToString(ts, TIME_DATE|TIME_SECONDS));
 }
 
 string Nonce()
@@ -394,8 +403,11 @@ string Challenge()
 
 string ActivationRevision()
 {
-   return(CryptHash(StringFormat("%s|%d", InpConnectionId,
-                                 InpActivationSeed)));
+   if(g_activation_secret == "")
+      return("");
+   return(HmacSha256Hex(g_activation_secret,
+                        StringFormat("%s|%I64d", InpConnectionId,
+                                     InpActivationSeed)));
 }
 
 //+------------------------------------------------------------------+
@@ -410,7 +422,7 @@ string LoadActivationSecret()
 {
    if(InpActivationSecret != "")
       return(InpActivationSecret);
-   string file = "MQL5\\Files\\ABUTRON_ACTIVATION_SECRET.txt";
+   string file = "ABUTRON_ACTIVATION_SECRET.txt";
    if(FileIsExist(file))
    {
       int h = FileOpen(file, FILE_READ | FILE_TXT);
@@ -419,7 +431,9 @@ string LoadActivationSecret()
          string s = FileReadString(h);
          FileClose(h);
          if(StringLen(s) > 0)
-            return(StringTrim(s));
+            StringTrimLeft(s);
+            StringTrimRight(s);
+            return(s);
       }
    }
    return("");

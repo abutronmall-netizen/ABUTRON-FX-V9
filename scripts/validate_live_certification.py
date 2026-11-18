@@ -351,13 +351,17 @@ def main() -> int:
             "equity": "10000.00",
             "balance": "10000.00",
             "currency": "USD",
+            "server": account["server"],
             "position_count": 0,
             "positions": [],
         }
         native_snapshot["sig"] = hmac_sign(
             activation_secret(),
-            build_exposure_canonical(connection_id, login_str, 10000.0,
-                                     native_snapshot_nonce, []))
+            build_exposure_canonical(
+                connection_id, login_str, 10000.0,
+                native_snapshot_nonce, [],
+                server=native_snapshot["server"], currency="USD",
+                balance=10000.0, challenge=native_snapshot["challenge"]))
         cert_acct = crm.certify_exposure(connection_id, snapshot=native_snapshot)
         report.check(
             "broker_worker_certifies_exposure",
@@ -412,8 +416,10 @@ def main() -> int:
         stale["nonce"] = f"ABUTRON_NATIVE_{login_str}_{int(_cert_time.time()) - 3600}"
         stale["sig"] = hmac_sign(
             activation_secret(),
-            build_exposure_canonical(connection_id, login_str, 10000.0,
-                                     stale["nonce"], []))
+            build_exposure_canonical(
+                connection_id, login_str, 10000.0, stale["nonce"], [],
+                server=stale["server"], currency="USD",
+                balance=10000.0, challenge=stale["challenge"]))
         try:
             crm.certify_exposure(connection_id, snapshot=stale)
             stale_blocked = False

@@ -61,6 +61,10 @@ def main() -> None:
                     publish_exposure(cid, log=log)
                     last_publish = time.time()
                 except Exception as exc:  # noqa: BLE001 - log, never crash the loop
+                    # Revoke prior proof immediately; an old success is not
+                    # authorization after the native feed has failed.
+                    from ..crm.controls import crm
+                    crm.invalidate_exposure(cid)
                     log.append(__import__("abutron.events",
                                           fromlist=["make_event"]).make_event(
                         "exposure.publish_error", connection_id=cid,

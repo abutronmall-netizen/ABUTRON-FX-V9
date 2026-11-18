@@ -60,19 +60,23 @@ def _signed_snapshot(connection_id="fp1", login="123456", equity="10000.00",
         "nonce": nonce, "challenge": "chal",
         "connection_id": connection_id, "login": login,
         "equity": equity, "balance": "10000.00", "currency": currency,
+        "server": "synthetic-demo-server",
         "position_count": len(positions or []),
         "positions": positions if positions is not None else [],
     }
     snap["sig"] = hmac_sign(
         secret,
-        build_exposure_canonical(connection_id, login, 10000.0, nonce,
-                                 snap["positions"]))
+        build_exposure_canonical(
+            connection_id, login, 10000.0, nonce, snap["positions"],
+            server=snap["server"], currency=snap["currency"],
+            balance=float(snap["balance"]), challenge=snap["challenge"]))
     return snap
 
 
 def _account(login=123456):
     return {
         "connection_id": "fp1", "mt5_login": login,
+        "server": "synthetic-demo-server",
         "equity": 0.0, "account_currency": "", "native_positions_verified": 0,
         "exposure_certified_at": "",
     }

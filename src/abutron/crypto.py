@@ -41,7 +41,7 @@ def pin_binary(path: str) -> str:
 def make_activation_revision(connection_id: str, ea_sha256: str,
                              env: str) -> str:
     """Deterministic activation revision binding account + binary + env."""
-    return hmac_sign(os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation"),
+    return hmac_sign(activation_secret(),
                      f"{connection_id}|{ea_sha256}|{env}")
 
 
@@ -72,30 +72,38 @@ def parse_native_nonce(nonce: str) -> Optional[Tuple[str, int]]:
 
 
 def build_exposure_canonical(connection_id: str, login: str, equity: float,
-                             nonce: str, positions: list) -> str:
-    """Build the canonical message the EA HMAC-signs for an exposure snapshot.
+                             nonce: str, positions: list, *,
+                             server: str = "", currency: str = "",
+                             balance: float = 0.0, challenge: str = "") -> str:
+    """Canonical signed broker evidence, identical to ApexNativeWriter.mq5.
 
-    Must match the MQL5 canonical exactly:
-    ``connection_id|login|equity(2dp)|nonce|position_count|positions_canonical``
-    where positions_canonical is positions sorted by ticket, each
-    ``ticket:symbol:direction:volume(2dp):sl(5dp)``, joined by ``;``.
+    Bind all fields that affect the exposure decision, including entry, SL,
+    TP, native loss and the *actual* OrderCalcProfit verification bit.
+    Financial values use the same fixed precision as the EA export.
     """
-    equity_str = f"{float(equity):.2f}"
-    sorted_pos = sorted(positions, key=lambda p: int(p.get("ticket", 0)))
+    sorted_pos = sorted(positions, key=lambda p: int(p["ticket"]))
     parts = []
     for p in sorted_pos:
-        parts.append(f"{int(p.get('ticket', 0))}:{p.get('symbol', '')}:"
-                     f"{p.get('direction', '')}:"
-                     f"{float(p.get('volume', 0)):.2f}:"
-                     f"{float(p.get('sl', 0)):.5f}")
-    positions_canonical = ";".join(parts)
-    return (f"{connection_id}|{login}|{equity_str}|{nonce}|"
-            f"{len(positions)}|{positions_canonical}")
+        verified = "true" if p.get("ordercalcprofit_verified") is True else "false"
+        parts.append(
+            f"{int(p['ticket'])}:{p['symbol']}:{p['direction']}:"
+            f"{float(p['volume']):.2f}:{float(p['entry']):.5f}:"
+            f"{float(p['sl']):.5f}:{float(p.get('tp', 0.0)):.5f}:"
+            f"{float(p['stop_risk_usd']):.2f}:{verified}"
+        )
+    return (
+        f"{connection_id}|{login}|{server}|{currency}|"
+        f"{float(equity):.2f}|{float(balance):.2f}|{nonce}|{challenge}|"
+        f"{len(positions)}|{';'.join(parts)}"
+    )
 
 
 def activation_secret() -> str:
-    """The shared HMAC secret used to authenticate EA/worker messages."""
-    return os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation")
+    """Return a provisioned secret only; never authenticate with a default."""
+    secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "")
+    if not secret or secret.strip() in ("", "apex-activation"):
+        raise ValueError("ABUTRON_ACTIVATION_SECRET must be provisioned")
+    return secret
 
 
 def verify_file_pin(path: str, expected_sha256: Optional[str]) -> Tuple[bool, str]:
