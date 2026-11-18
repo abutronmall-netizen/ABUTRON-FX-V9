@@ -184,3 +184,7 @@ def test_mql5_uses_documented_profit_api_and_matching_signature_fields():
     assert '(long)TimeGMT()' in source
     assert 'string dir = "MQL5\\Files' not in source
     assert 'string file = "ABUTRON_ACTIVATION_SECRET.txt"' in source
+    assert "CopyRates(_Symbol, InpExportPeriod, 1, 120, rates)" in source
+    assert "if(n != posCount)" in source
+    assert "if(!PositionSelectByTicket(ticket))" in source
+    assert "TerminalInfoInteger(TERMINAL_CONNECTED)" in source

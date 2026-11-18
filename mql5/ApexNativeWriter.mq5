@@ -32,7 +32,7 @@ input string  InpActivationSecret = "";         // HMAC key (or file-provisioned
 input int     InpManagedCharts  = 0;            // 0 = all charts with EA
 input double  InpRiskFraction   = 0.15;         // per-trade risk fraction (display)
 input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
-input int     InpExportPeriod   = PERIOD_M5;    // export timeframe
+input ENUM_TIMEFRAMES InpExportPeriod = PERIOD_M5;  // native export timeframe
 
 string g_activation_secret = "";                // resolved at OnInit
 
@@ -71,10 +71,11 @@ void ExportNativeData()
    WriteTextFile(identity, idJson);
 
    // --- Closed M5 bars (last 120) -----------------------------------
-   ulong from = TimeCurrent() - 120 * PeriodSeconds();
+   // Closed bars only. The previous datetime range had stop_time=0,
+   // which is earlier than start_time and could return zero bars.
    MqlRates rates[];
-   int count = CopyRates(_Symbol, InpExportPeriod, from, 0, rates);
-   if(count > 0) ArrayResize(rates, count);
+   int count = CopyRates(_Symbol, InpExportPeriod, 1, 120, rates);
+   if(count < 0) ArrayResize(rates, 0);
 
    string barsJson = "{\"bars\":[";
    for(int i = 0; i < ArraySize(rates); i++)
@@ -129,6 +130,9 @@ void ExportNativeData()
    WriteTextFile(lastFile, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
 
    // --- Broker-native exposure snapshot (Issue #36) -----------------
+   // Never attest flat positions from a disconnected terminal.
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED))
+      return;
    // Open positions + account equity/balance, HMAC-authenticated by the
    // activation secret and bound to THIS account (connection_id + login).
    // The Python worker verifies the HMAC sig, the nonce freshness and
@@ -155,6 +159,9 @@ void ExportNativeData()
       long t = PositionGetTicket(i);
       if(t != 0) allTickets[n++] = t;
    }
+   // A failed ticket read is an incomplete inventory, NOT broker-flat.
+   if(n != posCount)
+      return;
    ArrayResize(allTickets, n);
    ArraySort(allTickets);
 
@@ -163,7 +170,8 @@ void ExportNativeData()
    for(int k = 0; k < ArraySize(allTickets); k++)
    {
       long ticket = allTickets[k];
-      PositionSelectByTicket(ticket);
+      if(!PositionSelectByTicket(ticket))
+         return;  // session/position changed: do not publish partial proof.
       string sym = PositionGetString(POSITION_SYMBOL);
       double entry = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl   = PositionGetDouble(POSITION_SL);
