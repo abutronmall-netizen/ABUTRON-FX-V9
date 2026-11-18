@@ -1,0 +1,12 @@
+[Unit]
+Description=Append newly verified native broker trades from all eight accounts to V9 per-owner learning archive every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+AccuracySec=10s
+Persistent=false
+Unit=abutron-v9-eight-account-learning-archive-ro.service
+
+[Install]
+WantedBy=timers.target

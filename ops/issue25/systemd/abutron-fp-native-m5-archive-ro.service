@@ -1,0 +1,22 @@
+[Unit]
+Description=ABUTRON authenticated FP DEMO broker closed-M5 immutable archive (NO ORDERS)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-fp-authenticated-m5-archive-ro.py
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-fp-native-m5-archive
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=200M
+TasksMax=16
+TimeoutStartSec=25s

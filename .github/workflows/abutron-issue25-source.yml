@@ -1,0 +1,26 @@
+name: ABUTRON Issue25 review-only broker learning source
+
+on:
+  pull_request:
+    paths:
+      - 'ops/issue25/**'
+      - '.github/workflows/abutron-issue25-source.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ops/issue25/**'
+
+permissions:
+  contents: read
+
+jobs:
+  source-integrity-and-identity-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile reviewed source
+        run: python3 -m compileall -q ops/issue25/scripts
+      - name: Test broker account discovery and native ticket identity
+        run: python3 -B -m unittest discover -s ops/issue25 -p test_issue25_review.py -v
+      - name: Verify tracked files contain no private evidence bundles
+        run: python3 tools/ci/verify_public_repo_artifacts.py
