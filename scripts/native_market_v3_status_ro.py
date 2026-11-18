@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 
@@ -18,34 +19,67 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
 from abutron.feeds.native_market_v3 import read_v3, trusted_fp_demo_clock_offset
 
 SHA="a4a5bdbec180f8b4f7d0945b1611a945ca36d1ed49e4e23137133b9e4d592f67"
-# Connection profile IDs and broker logins are resolved from the environment
-# or an authorized read-only CRM lookup at runtime. Hard-coded host profile
-# IDs and logins are never committed to the public repository.
-# Format: ACCOUNT_SUFFIX -> (connection_profile_id, broker_login)
-# Sources: ABUTRON_FP_ACCOUNT_PROFILES env var (JSON) or CRM discovery.
-def _resolve_accounts():
-    """Resolve FP DEMO account profiles without hard-coding host identifiers.
+# Account profiles are resolved from explicit JSON, otherwise authorized
+# read-only CRM. Only the two FP Markets DEMO monitor accounts are eligible.
+SUPPORTED_FP_DEMO = frozenset(("0512", "1636"))
+CRM_DB = Path("/var/lib/apex-signup/accounts.sqlite3")
 
-    Reads from ABUTRON_FP_ACCOUNT_PROFILES (JSON) or falls back to an
-    authorized read-only CRM lookup. Returns empty dict if unavailable,
-    which causes the monitor to report NO_CONFIGURED_ACCOUNTS.
+def _validate_accounts(profiles):
+    """Reject malformed, duplicated, or incorrectly scoped profile mappings."""
+    if not isinstance(profiles, dict):
+        return {}
+    valid = {}
+    seen_ids = set()
+    for suffix, entry in profiles.items():
+        if (suffix not in SUPPORTED_FP_DEMO or
+                not isinstance(entry, (list, tuple)) or len(entry) != 2):
+            return {}
+        cid, login = entry
+        if (not isinstance(cid, str) or not isinstance(login, str) or
+                not re.fullmatch(r"[a-f0-9]{32}", cid) or
+                not re.fullmatch(r"\d{5,12}", login) or
+                not login.endswith(suffix) or cid in seen_ids):
+            return {}
+        valid[suffix] = (cid, login)
+        seen_ids.add(cid)
+    return valid
+
+def _resolve_accounts(crm_path=CRM_DB):
+    """Use valid explicit config, or query the FP DEMO CRM read-only.
+
+    A malformed explicit environment value fails closed rather than silently
+    reverting to another account source. Absent configuration may fall back
+    to approved CRM account identities. No CRM state is modified.
     """
     raw = os.environ.get("ABUTRON_FP_ACCOUNT_PROFILES", "")
-    if raw:
+    if raw.strip():
         try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                result = {}
-                for suffix, entry in parsed.items():
-                    if isinstance(entry, (list, tuple)) and len(entry) == 2:
-                        cid, login = str(entry[0]), str(entry[1])
-                        if re.fullmatch(r"[a-f0-9]{32}", cid) and re.fullmatch(r"\d{5,12}", login):
-                            result[str(suffix)] = (cid, login)
-                return result
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-    # No hard-coded fallback: require explicit configuration.
-    return {}
+            return _validate_accounts(json.loads(raw))
+        except (ValueError, TypeError):
+            return {}
+    try:
+        path = Path(crm_path)
+        if path.is_symlink() or not path.is_file():
+            return {}
+        with sqlite3.connect("file:" + str(path) + "?mode=ro",
+                             uri=True, timeout=5) as db:
+            db.execute("PRAGMA query_only=ON")
+            rows = db.execute(
+                "SELECT id,account_reference,broker,environment "
+                "FROM apex_mt5_connections"
+            ).fetchall()
+        candidates = {}
+        for cid, login, broker, environment in rows:
+            suffix = str(login)[-4:]
+            if suffix not in SUPPORTED_FP_DEMO:
+                continue
+            if (broker != "FP Markets" or environment != "DEMO" or
+                    suffix in candidates):
+                return {}
+            candidates[suffix] = (cid, str(login))
+        return _validate_accounts(candidates)
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return {}
 
 CID = _resolve_accounts()
 REPORT=Path("/var/lib/abutron-v9-native-market-v3/latest.json")
