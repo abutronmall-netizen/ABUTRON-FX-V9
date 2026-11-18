@@ -14,16 +14,26 @@ RELEASE=Path('/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90
 PINNED=RELEASE/'data/brains/unified_m5'
 VALID=ROOT/'validation'/'forward-oos'
 UTC=dt.timezone.utc
-sys.path.insert(0,str(RELEASE/'src'))
-from abutron.brain.unified import load_unified
-from abutron.brain.signals import features_for_brain
-module=runpy.run_path('/usr/local/sbin/abutron-v9-all-owner-causal-candidate-trainer',
-                      run_name='forward_shadow_validation_import')
-trainer_path='/usr/local/lib/abutron-v9-realtrade-feedback/train_from_trades_causal.py'
-sp=importlib.util.spec_from_file_location('abutron_v9_causal_market_preentry_features',trainer_path)
-trainhelper=importlib.util.module_from_spec(sp)
-sys.modules[sp.name]=trainhelper
-sp.loader.exec_module(trainhelper)
+def _load_production_modules():
+    """Lazy-load production modules at runtime.
+
+    Moved from import-time to runtime so the module can be imported
+    for testing without the production abutron package or trainer
+    script being present.
+    """
+    sys.path.insert(0,str(RELEASE/'src'))
+    from abutron.brain.unified import load_unified
+    from abutron.brain.signals import features_for_brain
+    return load_unified, features_for_brain
+
+def _load_trainhelper():
+    """Lazy-load the production trainer helper script at runtime."""
+    trainer_path='/usr/local/lib/abutron-v9-realtrade-feedback/train_from_trades_causal.py'
+    sp=importlib.util.spec_from_file_location('abutron_v9_causal_market_preentry_features',trainer_path)
+    trainhelper=importlib.util.module_from_spec(sp)
+    sys.modules[sp.name]=trainhelper
+    sp.loader.exec_module(trainhelper)
+    return trainhelper
 def chk(cond,reason):
  if not cond:raise ValueError(reason)
 def sha(b):return hashlib.sha256(b).hexdigest()

@@ -20,11 +20,18 @@ FPFILE=Path("/usr/local/sbin/abutron-v9-fp-demo-native-inference-ro")
 FPFEED=Path("/var/lib/abutron-fpmarkets-feed/partial")
 DERIV=Path("/var/lib/apex/operator-live/native-market.json")
 UTC=dt.timezone.utc
-sys.path.insert(0,str(RELEASE/"src"))
-sys.path.insert(0,"/opt/apex/runtime")
-from abutron.brain.unified import load_unified
-from abutron.brain.signals import build_signal_bundle,features_for_brain
-from apex_fast_scanner import validate_snapshot,utc_now
+def _load_production_modules():
+    """Lazy-load production modules at runtime.
+
+    Moved from import-time to runtime so the module can be imported
+    for testing without the production abutron/apex packages being present.
+    """
+    sys.path.insert(0,str(RELEASE/"src"))
+    sys.path.insert(0,"/opt/apex/runtime")
+    from abutron.brain.unified import load_unified
+    from abutron.brain.signals import build_signal_bundle,features_for_brain
+    from apex_fast_scanner import validate_snapshot,utc_now
+    return load_unified, build_signal_bundle, features_for_brain, validate_snapshot, utc_now
 def need(ok,code):
  if not ok:raise ValueError(code)
 def h(b):return hashlib.sha256(b).hexdigest()

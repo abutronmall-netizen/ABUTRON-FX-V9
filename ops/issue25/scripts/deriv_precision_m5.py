@@ -17,8 +17,15 @@ LIVE=Path('/var/lib/apex/operator-live/native-market.json')
 COLS=['symbol','timeframe','start_time_utc','open','high','low','close']
 SYMS=[f'Volatility {v} Index.0' for v in (10,25,50,75,100)]
 UTC=dt.timezone.utc
-sys.path.insert(0,'/opt/apex/runtime')
-from apex_fast_scanner import validate_snapshot,utc_now
+def _load_scanner():
+    """Lazy-load apex_fast_scanner at runtime.
+
+    Moved from import-time to runtime so the module can be imported
+    for testing without the production apex package being present.
+    """
+    sys.path.insert(0,'/opt/apex/runtime')
+    from apex_fast_scanner import validate_snapshot,utc_now
+    return validate_snapshot,utc_now
 
 def check(ok,reason):
  if not ok:raise ValueError(reason)

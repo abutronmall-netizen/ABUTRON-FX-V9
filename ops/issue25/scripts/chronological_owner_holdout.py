@@ -14,15 +14,36 @@ RELEASE=Path('/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90
 PINNED=RELEASE/'data/brains/unified_m5'
 SRC='/usr/local/sbin/abutron-v9-all-owner-causal-candidate-trainer'
 BRAINTRAIN='/usr/local/lib/abutron-v9-realtrade-feedback/train_from_trades_causal.py'
+
 USD=dt.timezone.utc
-sys.path.insert(0,str(RELEASE/'src'))
-from abutron.brain.unified import load_unified
-from abutron.brain.signals import features_for_brain
-mod=importlib.util.spec_from_file_location('abutron_v9_offline_training_helpers',BRAINTRAIN)
-helper=importlib.util.module_from_spec(mod)
-sys.modules[mod.name]=helper
-mod.loader.exec_module(helper)
-parent=runpy.run_path(SRC,run_name='abutron_candidate_qa_non_main')
+
+def _load_helper():
+    """Lazy-load the production trainer script at runtime.
+
+    Moved from import-time to runtime so the module can be imported
+    for testing without the production file being present.
+    """
+    import importlib.util as _ilu
+    sys.path.insert(0,str(RELEASE/'src'))
+    mod = _ilu.module_from_spec(_ilu.spec_from_loader(
+        'causal_trainer', _ilu.SourceFileLoader('causal_trainer', SRC)))
+    mod.loader.exec_module(mod)
+    return mod
+
+def _load_brain_modules():
+    """Lazy-load abutron brain modules at runtime.
+
+    Moved from import-time to runtime so the module can be imported
+    for testing without the production abutron package being present.
+    """
+    sys.path.insert(0,str(RELEASE/'src'))
+    from abutron.brain.unified import load_unified
+    from abutron.brain.signals import features_for_brain
+    return load_unified, features_for_brain
+
+def _load_parent():
+    """Lazy-load the production trainer script via runpy at runtime."""
+    return runpy.run_path(SRC,run_name='abutron_candidate_qa_non_main')
 
 def insist(ok,code):
  if not ok:raise ValueError(code)
