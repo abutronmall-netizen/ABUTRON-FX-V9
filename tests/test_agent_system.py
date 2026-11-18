@@ -482,5 +482,50 @@ class RealBrainSubstrateTests(unittest.TestCase):
                 self.assertEqual(c.reason_code, "all_invariants_passed")
 
 
+# ---------------------------------------------------------------------- #
+class LLMReasoningBackendTests(unittest.TestCase):
+    """Validates the LLM reasoning backend config wiring (Phase 2).
+
+    The key invariant: ``_load_advisors`` constructs the Gemma/Debate
+    advisors with THIS backend's config (base_url, model, enabled), not
+    the module-level singletons built from ``GEMMA_ENABLED=false``.
+    This is what makes the backend's enablement actually reach the
+    LLM gateway.
+    """
+
+    def _backend(self, base_url, debate=False):
+        return LLMReasoningBackend(
+            base_url=base_url, model="gemma2:9b",
+            enabled=True, debate_enabled=debate)
+
+    def test_load_advisors_uses_backend_config(self):
+        """Advisors are constructed with the backend's enabled flag."""
+        backend = self._backend("http://127.0.0.1:1/v1")
+        advisor, debate = backend._load_advisors()
+        # The advisors must be configured (enabled=True from backend).
+        self.assertTrue(advisor.is_configured())
+        self.assertTrue(debate.is_configured())
+        # base_url must match the backend's, not the module default.
+        self.assertEqual(advisor.base_url, "http://127.0.0.1:1/v1")
+        self.assertEqual(debate.base_url, "http://127.0.0.1:1/v1")
+
+    def test_disabled_backend_not_configured(self):
+        backend = LLMReasoningBackend(
+            base_url="", model="gemma2:9b",
+            enabled=False, debate_enabled=False)
+        self.assertFalse(backend.is_configured())
+
+    def test_or_fallback_returns_self_when_configured(self):
+        backend = self._backend("http://127.0.0.1:1/v1")
+        self.assertIs(backend.or_fallback(), backend)
+
+    def test_or_fallback_returns_rule_when_not_configured(self):
+        backend = LLMReasoningBackend(
+            base_url="", model="gemma2:9b",
+            enabled=False, debate_enabled=False)
+        fb = backend.or_fallback()
+        self.assertEqual(fb.name, "rule")
+
+
 if __name__ == "__main__":
     unittest.main()

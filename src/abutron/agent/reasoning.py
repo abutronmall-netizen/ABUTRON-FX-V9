@@ -214,12 +214,24 @@ class LLMReasoningBackend(ReasoningBackend):
         return self.enabled
 
     def _load_advisors(self):
-        """Lazily import the V9 LLM advisors (avoid hard import cost)."""
+        """Lazily construct the V9 LLM advisors with THIS backend's config.
+
+        Constructs ``GemmaAdvisor`` / ``DebateAdvisor`` with the backend's
+        own ``base_url``, ``model`` and ``enabled`` flags — NOT the
+        module-level singletons, which are built from the default
+        ``GEMMA_ENABLED=false`` config and would ignore this backend's
+        enablement. This is what makes the backend's configuration
+        actually reach the LLM gateway.
+        """
         if self._advisor is None or self._debate is None:
-            from ..apex.gemma import gemma_advisor
-            from ..apex.debate import debate_advisor
-            self._advisor = gemma_advisor
-            self._debate = debate_advisor
+            from ..apex.gemma import GemmaAdvisor
+            from ..apex.debate import DebateAdvisor
+            self._advisor = GemmaAdvisor(
+                base_url=self.base_url, model=self.model,
+                enabled=self.enabled)
+            self._debate = DebateAdvisor(
+                base_url=self.base_url, model=self.model,
+                enabled=self.enabled)
         return self._advisor, self._debate
 
     def reason(self, context: AgentContext,
