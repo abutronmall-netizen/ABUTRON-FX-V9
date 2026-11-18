@@ -64,6 +64,22 @@ class AgenticDecisionEngine:
         self.substrate = self.orchestrator.signal_agent.substrate
         self.gate = self.orchestrator.risk_agent.gate
         self.ledger = self.orchestrator.ledger
+        # Trailing bar history for the brain's feature builder (warm-up).
+        # Mirrors the apex engine's ``_history_store``: keyed by
+        # (symbol, timeframe) -> list of closed candles (most-recent-last).
+        # In production this is populated from the native history export.
+        self._history_store: Dict[tuple, List[Candle]] = {}
+
+    # ------------------------------------------------------------------ #
+    def set_history(self, symbol: str, timeframe: str,
+                    candles: List[Candle]) -> None:
+        """Register trailing bar history for the brain's warm-up."""
+        self._history_store[(symbol, timeframe)] = list(candles)
+
+    def _history(self, candle: Candle) -> List[Candle]:
+        """Return the trailing history for indicator/brain warm-up."""
+        return self._history_store.get(
+            (candle.symbol, candle.timeframe), [candle])
 
     # ------------------------------------------------------------------ #
     def run_decision_pass(
@@ -128,6 +144,13 @@ class AgenticDecisionEngine:
             "owner_id": owner_id,
             "broker": broker,
         }
+        # Build the OHLC series for the brain's feature builder. The
+        # unified brain needs a series (not a single bar) to compute
+        # returns/ATR and build the full feature vector.
+        hist = self._history(c)
+        closes = [float(x.close) for x in hist if x.closed]
+        highs = [float(x.high) for x in hist if x.closed]
+        lows = [float(x.low) for x in hist if x.closed]
         context = AgentContext(
             symbol=c.symbol,
             timeframe=c.timeframe,
@@ -141,6 +164,7 @@ class AgenticDecisionEngine:
             footprint={},
             portfolio=portfolio,
             extras={"account": account, "quote": _quote_dict(quote)},
+            closes=closes, highs=highs, lows=lows,
         )
 
         decision = self.orchestrator.decide(context)

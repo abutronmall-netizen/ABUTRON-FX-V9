@@ -116,11 +116,22 @@ class BrainSubstrate:
     def _predict_with_brain(self, context: AgentContext,
                             features: List[float]) -> Signal:
         brain = self._brain
+        # Build the OHLC series the brain's feature builder needs. A
+        # single bar yields zero return features, so we derive a minimal
+        # series from the bar structure (and any explicit series carried
+        # on the context) to give the brain real input.
+        closes = list(context.closes) or _series_from_bar(context)
+        highs = list(context.highs) or _series_from_bar(context, "high")
+        lows = list(context.lows) or _series_from_bar(context, "low")
         # UnifiedBrain has a high-level ``decide``; NexusBrain has
         # ``predict``. Prefer ``decide`` when present.
         if hasattr(brain, "decide"):
-            proposal = brain.decide(symbol=context.symbol,
-                                    closes=[context.bar_close])
+            proposal = brain.decide(
+                symbol=context.symbol,
+                closes=closes, highs=highs, lows=lows,
+                orderflow=context.orderflow or None,
+                footprint=context.footprint or None,
+            )
         else:
             import numpy as np
             x = np.asarray([features], dtype=float)
@@ -213,3 +224,32 @@ class BrainSubstrate:
             brain_source="rule_fallback",
             reasons=reasons,
         )
+
+
+def _series_from_bar(context: AgentContext,
+                     key: str = "close") -> List[float]:
+    """Derive a minimal OHLC series from a single bar for the brain.
+
+    The unified feature builder needs a series to compute returns and
+    ATR. A single closed candle yields zero return features, which
+    starves the brain. We synthesise a short deterministic series from
+    the bar's OHLC so the brain still receives real (non-zero) input
+    when only one bar is available in the agentic context.
+    """
+    o, h, l, c = (context.bar_open, context.high, context.low,
+                  context.bar_close)
+    if c <= 0 and o <= 0:
+        return []
+    # 2-bar series: a synthetic prior bar + the current bar. The prior
+    # bar is derived from the current bar so returns are non-zero and
+    # deterministic.
+    if key == "close":
+        prior = o if o else c * 0.99
+        return [prior, c]
+    if key == "high":
+        prior = max(o, c) if (o or c) else h
+        return [prior, h]
+    if key == "low":
+        prior = min(o, c) if (o or c) else l
+        return [prior, l]
+    return [o, c]

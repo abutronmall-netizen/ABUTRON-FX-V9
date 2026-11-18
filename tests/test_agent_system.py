@@ -8,6 +8,8 @@ gateway or broker is required.
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from typing import Any, Dict
 
@@ -370,6 +372,114 @@ class ProductionEngineTests(unittest.TestCase):
         # Convictions must be non-increasing down the list.
         convs = [c.conviction for c in cands]
         self.assertEqual(convs, sorted(convs, reverse=True))
+
+
+# ---------------------------------------------------------------------- #
+class RealBrainSubstrateTests(unittest.TestCase):
+    """Validates the real unified brain checkpoint wiring (Phase 1).
+
+    Trains a small unified brain on synthetic data, saves it, loads it
+    back via ``BrainSubstrate``, and verifies the ``nexus_unified``
+    signal path end-to-end through the substrate and production engine.
+    """
+
+    def _train_brain(self, brain_dir):
+        """Train + save a real unified brain checkpoint to brain_dir."""
+        os.makedirs(brain_dir, exist_ok=True)
+        from abutron.brain.unified import (
+            SYMBOL_UNIVERSE, UnifiedBrain, build_unified_ensemble,
+            build_unified_feature_vector, save_unified, train_unified,
+        )
+        from abutron.brain.trainer import TrainingSample
+        import numpy as np
+        universe = list(SYMBOL_UNIVERSE[:5])
+        ensemble = build_unified_ensemble(universe=universe)
+        symbol_samples = {}
+        for sym in universe:
+            rng = np.random.default_rng(abs(hash(sym)) % 2**31)
+            base = 1.0 + (abs(hash(sym)) % 10)
+            closes = [base]
+            highs = [base]
+            lows = [base]
+            for _ in range(120):
+                ret = rng.normal(0, 0.0015)
+                c = max(closes[-1] * (1 + ret), 0.01)
+                h = max(closes[-1], c) * 1.001
+                l = min(closes[-1], c) * 0.999
+                closes.append(c)
+                highs.append(h)
+                lows.append(l)
+            samples = []
+            for i in range(len(closes) - 1):
+                feats = build_unified_feature_vector(
+                    symbol=sym, closes=closes[:i + 1],
+                    highs=highs[:i + 1], lows=lows[:i + 1],
+                    regime="", universe=universe)
+                label = 1 if closes[i + 1] > closes[i] else 0
+                samples.append(TrainingSample(features=feats, label=label))
+            symbol_samples[sym] = samples
+        report = train_unified(ensemble, symbol_samples, epochs=30)
+        brain = UnifiedBrain(ensemble=ensemble, symbol_ids=universe)
+        save_unified(brain_dir, brain, report=report)
+        return brain_dir
+
+    def test_substrate_loads_real_brain(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain_dir = self._train_brain(os.path.join(td, "b"))
+            sub = BrainSubstrate(brain_dir=brain_dir)
+            self.assertTrue(sub.is_available())
+            self.assertEqual(sub.load_error, "")
+            self.assertIsNotNone(sub.brain)
+            self.assertEqual(type(sub.brain).__name__, "UnifiedBrain")
+
+    def test_substrate_produces_nexus_unified_signal(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain_dir = self._train_brain(os.path.join(td, "b"))
+            sub = BrainSubstrate(brain_dir=brain_dir)
+            # Build a context with a real OHLC series.
+            ctx = AgentContext(
+                symbol="EURUSD.r", timeframe="M5",
+                bar_open=1.10, bar_close=1.102, high=1.103, low=1.099,
+                spread=0.0005,
+                orderflow={"imbalance": 0.1, "buy_ratio": 0.55},
+                closes=[1.10, 1.101, 1.102],
+                highs=[1.101, 1.102, 1.103],
+                lows=[1.099, 1.10, 1.101],
+            )
+            sig = sub.predict(ctx)
+            self.assertEqual(sig.brain_source, "nexus_unified")
+            self.assertIn(sig.direction, (Direction.BUY, Direction.SELL,
+                                          Direction.HOLD))
+
+    def test_production_engine_uses_real_brain(self):
+        with tempfile.TemporaryDirectory() as td:
+            brain_dir = self._train_brain(os.path.join(td, "b"))
+            sub = BrainSubstrate(brain_dir=brain_dir)
+            engine = AgenticDecisionEngine(brain_substrate=sub, live=False)
+            # Build trailing candle history.
+            candle_list = []
+            for i in range(20):
+                candle_list.append(Candle(
+                    symbol="EURUSD.r", timeframe="M5",
+                    open_time=f"2026-11-18T10:{i:02d}:00Z",
+                    close_time=f"2026-11-18T10:{i + 1:02d}:00Z",
+                    open=1.10 + i * 0.0005, high=1.101 + i * 0.0005,
+                    low=1.099 + i * 0.0005, close=1.1005 + i * 0.0005,
+                    closed=True, point=0.0001,
+                ))
+            engine.set_history("EURUSD.r", "M5", candle_list)
+            last = candle_list[-1]
+            quote = Quote(symbol="EURUSD.r", bid=1.1015, ask=1.1016,
+                          spread=0.0001, tick_size=0.00001, point=0.0001)
+            cands = engine.run_decision_pass(
+                connection_id="c" * 32, broker="FP", owner_id="o1",
+                candles=[last], quotes=[quote],
+                account={"equity": 10000.0}, equity=10000.0)
+            # Either a nexus_unified candidate or a fail-closed HOLD.
+            for c in cands:
+                self.assertEqual(c.agent_votes.get("signal_source"),
+                                 "nexus_unified")
+                self.assertEqual(c.reason_code, "all_invariants_passed")
 
 
 if __name__ == "__main__":

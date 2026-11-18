@@ -98,6 +98,14 @@ class AgentContext:
     portfolio: Dict[str, Any] = field(default_factory=dict)
     prior_decisions: List["AgentDecision"] = field(default_factory=list)
     extras: Dict[str, Any] = field(default_factory=dict)
+    # OHLC series (most-recent-last) for the real-brain feature builder.
+    # The brain's ``decide`` needs a *series* to compute returns/ATR and
+    # build the full unified feature vector; a single bar gives zero
+    # return features. When empty the substrate derives a minimal series
+    # from the bar structure as a fallback.
+    closes: List[float] = field(default_factory=list)
+    highs: List[float] = field(default_factory=list)
+    lows: List[float] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
