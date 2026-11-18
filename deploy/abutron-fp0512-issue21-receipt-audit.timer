@@ -1,0 +1,11 @@
+[Unit]
+Description=ABUTRON Issue21 rotating receipt scan every 15 seconds
+
+[Timer]
+OnActiveSec=2s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=abutron-fp0512-issue21-receipt-audit.service
+
+[Install]
+WantedBy=timers.target
