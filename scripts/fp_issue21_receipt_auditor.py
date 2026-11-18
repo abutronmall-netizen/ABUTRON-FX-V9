@@ -18,12 +18,6 @@ ACCOUNT_ID = os.environ.get("ABUTRON_ISSUE21_CONNECTION_ID", "")
 EXPECTED_LOGIN = os.environ.get("ABUTRON_ISSUE21_ACCOUNT_LOGIN", "")
 EXPECTED_SERVER = os.environ.get("ABUTRON_ISSUE21_BROKER_SERVER", "FPMarketsSC-Demo")
 EXPECTED_MODE = "DEMO"
-if not re.fullmatch(r"[a-f0-9]{32}", ACCOUNT_ID):
-    raise RuntimeError("ACCOUNT_BOUND_CONNECTION_ID_MISSING")
-if not re.fullmatch(r"[0-9]{5,12}", EXPECTED_LOGIN):
-    raise RuntimeError("ACCOUNT_BOUND_LOGIN_MISSING")
-if EXPECTED_SERVER != "FPMarketsSC-Demo":
-    raise RuntimeError("BROKER_SERVER_NOT_FP_DEMO")
 BASE = Path("/var/lib/private") / ("abutron-client-mt5-" + ACCOUNT_ID)
 NATIVE = BASE / "terminal/MQL5/Files/ABUTRON_FP"
 HEALTH = BASE / "worker-health.json"
@@ -253,7 +247,23 @@ def execute(base=BASE, state=STATE, recon=RECON, history=HISTORY, now=None):
     return result
 
 
+def _validate_account_binding():
+    """Validate account-bound environment at runtime, not import time.
+
+    Moving this out of module-level code allows the module to be imported
+    for testing without requiring environment variables. The checks still
+    enforce fail-closed behavior when the script is actually executed.
+    """
+    if not re.fullmatch(r"[a-f0-9]{32}", ACCOUNT_ID):
+        raise RuntimeError("ACCOUNT_BOUND_CONNECTION_ID_MISSING")
+    if not re.fullmatch(r"[0-9]{5,12}", EXPECTED_LOGIN):
+        raise RuntimeError("ACCOUNT_BOUND_LOGIN_MISSING")
+    if EXPECTED_SERVER != "FPMarketsSC-Demo":
+        raise RuntimeError("BROKER_SERVER_NOT_FP_DEMO")
+
+
 def main():
+    _validate_account_binding()
     parser = argparse.ArgumentParser()
     parser.add_argument("--state",type=Path,default=STATE)
     a = parser.parse_args()
