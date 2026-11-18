@@ -129,29 +129,41 @@ void ExportNativeData()
    WriteTextFile(lastFile, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
 
    // --- Broker-native exposure snapshot (Issue #36) -----------------
-   // Open positions + account equity/balance, authenticated by the same
-   // nonce/challenge as the identity export and bound to THIS account
-   // (connection_id + login). The Python worker reads this and feeds
-   // crm.certify_exposure — certification is derived from this real
-   // broker evidence, never from a manually supplied flag.
+   // Open positions + account equity/balance, HMAC-authenticated by the
+   // activation secret and bound to THIS account (connection_id + login).
+   // The Python worker verifies the HMAC sig, the nonce freshness and
+   // account-binding before certifying exposure — a fabricated snapshot
+   // without the activation secret cannot certify.
+   //
    // JSON escaping: in MQL5 a string literal "\\" is a single backslash
    // and "\"" is a quote; to emit valid JSON the quotes must be "\""
    // (NOT "\\\\\\\"), otherwise json.loads on the Python side fails.
-   string expNonce = Nonce();
-   string expJson = StringFormat(
-      "{\"nonce\":\"%s\",\"challenge\":\"%s\",\"connection_id\":\"%s\","
-      "\"login\":\"%s\",\"equity\":%s,\"balance\":%s,"
-      "\"currency\":\"%s\",\"positions\":[",
-      expNonce, Challenge(), InpConnectionId,
-      IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
-      DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2),
-      DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
-      AccountInfoString(ACCOUNT_CURRENCY));
-   string posJson = "";
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   string loginStr = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
+   double equityD  = AccountInfoDouble(ACCOUNT_EQUITY);
+   // Nonce: ABUTRON_NATIVE_<login>_<unix_ts> — Python parses login +
+   // freshness from this; the HMAC sig provides real authentication.
+   string expNonce = StringFormat("ABUTRON_NATIVE_%s_%d", loginStr,
+                                  (long)TimeCurrent());
+
+   // Collect ticket list and sort ascending for a deterministic canonical.
+   long allTickets[];
+   int posCount = PositionsTotal();
+   ArrayResize(allTickets, posCount);
+   int n = 0;
+   for(int i = 0; i < PositionsTotal(); i++)
    {
-      long ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
+      long t = PositionGetTicket(i);
+      if(t != 0) allTickets[n++] = t;
+   }
+   ArrayResize(allTickets, n);
+   ArraySort(allTickets, 0, 0, ticket);
+
+   string positionsCanon = "";
+   string posJson = "";
+   for(int k = 0; k < ArraySize(allTickets); k++)
+   {
+      long ticket = allTickets[k];
+      PositionSelectByTicket(ticket);
       string sym = PositionGetString(POSITION_SYMBOL);
       double entry = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl   = PositionGetDouble(POSITION_SL);
@@ -162,8 +174,9 @@ void ExportNativeData()
                                 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
       string dir  = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
       double swap = PositionGetDouble(POSITION_SWAP);
-      // Actual broker-native stop-risk: OrderCalcProfit at the SL level.
-      // A position with no SL cannot be stop-risk certified (fail-closed).
+      // Actual broker-native stop-risk: MQL5 OrderCalcProfit(ticket, type,
+      // volume, symbol, price, sl, tp) — 7 args, profit is the return
+      // value (no output parameter). Loss to SL is the negative profit.
       bool ocVerified = (sl > 0.0);
       double calcProfit = 0.0;
       double stopRiskUsd = 0.0;
@@ -173,6 +186,9 @@ void ExportNativeData()
                                        entry, sl, tp);
          if(calcProfit < 0.0) stopRiskUsd = -calcProfit;
       }
+      if(k > 0) positionsCanon += ";";
+      positionsCanon += StringFormat("%d:%s:%s:%.2f:%.5f",
+                                     ticket, sym, dir, vol, sl);
       posJson += StringFormat(
          "{\"ticket\":%d,\"symbol\":\"%s\",\"direction\":\"%s\","
          "\"volume\":%.2f,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
@@ -182,6 +198,22 @@ void ExportNativeData()
    }
    int pComma = StringFindLast(posJson, ",");
    if(pComma >= 0) posJson = StringSubstr(posJson, 0, pComma);
+
+   // Canonical message bound by HMAC: connection_id | login | equity |
+   // nonce | position_count | positions_canonical. Positions are included
+   // so they cannot be swapped without breaking the signature.
+   string canonical = StringFormat("%s|%s|%s|%s|%d|%s", InpConnectionId,
+         loginStr, DoubleToString(equityD, 2), expNonce, n, positionsCanon);
+   string sig = HmacSha256Hex(g_activation_secret, canonical);
+
+   string expJson = StringFormat(
+      "{\"nonce\":\"%s\",\"challenge\":\"%s\",\"connection_id\":\"%s\","
+      "\"login\":\"%s\",\"equity\":%s,\"balance\":%s,"
+      "\"currency\":\"%s\",\"position_count\":%d,\"sig\":\"%s\","
+      "\"positions\":[",
+      expNonce, Challenge(), InpConnectionId, loginStr,
+      DoubleToString(equityD, 2), DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
+      AccountInfoString(ACCOUNT_CURRENCY), n, sig);
    expJson += posJson + "]}";
    string exposureFile = dir + "ABUTRON_NATIVE_EXPOSURE_V2_" + expNonce + ".txt";
    WriteTextFile(exposureFile, expJson);

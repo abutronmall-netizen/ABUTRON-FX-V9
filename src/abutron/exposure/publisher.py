@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from ..config import DATA_ROOT, utc_now
-from ..crypto import verify_nonce
+from ..crypto import parse_native_nonce
 from ..crm.controls import CrmError, crm
 from ..events import EventLog, make_event
 from ..feeds.mt5_terminal import Mt5TerminalManager, terminal_manager
@@ -49,7 +49,7 @@ def publish_exposure(connection_id: str,
             "cannot certify exposure without authenticated broker evidence")
 
     nonce = snapshot.get("nonce", "")
-    if not verify_nonce(nonce):
+    if parse_native_nonce(nonce) is None:
         raise CrmError(
             f"invalid exposure snapshot nonce for {connection_id}: "
             "broker evidence is not authenticated")

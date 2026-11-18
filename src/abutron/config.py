@@ -90,6 +90,11 @@ HEARTBEAT_STALE_SECONDS = int(os.getenv("ABUTRON_HEARTBEAT_STALE", "90"))
 # publishes a fresh authenticated broker snapshot.
 EXPOSURE_CERT_TTL_SECONDS = int(os.getenv("ABUTRON_EXPOSURE_CERT_TTL", "300"))
 
+# Issue #36: a broker exposure snapshot must be fresh. The nonce embeds a
+# unix timestamp; a snapshot older than this window is rejected (replay
+# protection), so a captured old snapshot cannot certify exposure.
+EXPOSURE_SNAPSHOT_FRESH_SECONDS = int(os.getenv("ABUTRON_SNAPSHOT_FRESH", "60"))
+
 # ---------------------------------------------------------------------------
 # Wine / MT5 terminal runtime (Ubuntu host)
 # ---------------------------------------------------------------------------

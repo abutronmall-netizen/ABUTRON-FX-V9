@@ -13,8 +13,11 @@ from typing import Dict, List, Optional
 
 from ..config import (BROKERS, DERIV_SERVERS, FP_SYMBOL_SUFFIX_HINT,
                       DEFAULT_PER_TRADE_RISK_PCT, DEFAULT_PORTFOLIO_RISK_CAP_PCT,
-                      LIVE_TRADING_ENABLED, utc_now)
-from ..crypto import make_activation_revision, sha256_text, verify_nonce
+                      EXPOSURE_SNAPSHOT_FRESH_SECONDS, LIVE_TRADING_ENABLED,
+                      utc_now)
+from ..crypto import (activation_secret, build_exposure_canonical,
+                      hmac_verify, make_activation_revision, parse_native_nonce,
+                      sha256_text)
 from ..db import engine_db, portal_db
 
 
@@ -127,27 +130,13 @@ class CrmService:
                 f"certify_exposure for {connection_id} requires a broker "
                 "snapshot dict, not a manually supplied flag")
         nonce = snapshot.get("nonce", "")
-        if not verify_nonce(nonce):
-            raise CrmError(
-                f"invalid native export nonce for {connection_id}: "
-                "exposure certification requires an authenticated broker "
-                "snapshot, not a manually supplied flag")
-        # Account-binding: the snapshot must be for THIS account and from
-        # THIS account's terminal.
         snap_cid = snapshot.get("connection_id", "")
-        if snap_cid != connection_id:
+        snap_login = str(snapshot.get("login", ""))
+        positions = snapshot.get("positions")
+        if not isinstance(positions, list):
             raise CrmError(
-                f"snapshot connection_id {snap_cid!r} does not match account "
-                f"{connection_id!r}: broker evidence is not account-bound")
-        acct = self.engine.get_account(connection_id)
-        if acct is None:
-            raise CrmError(f"account {connection_id} not found")
-        snap_login = snapshot.get("login", "")
-        if str(snap_login) != str(acct.get("mt5_login")):
-            raise CrmError(
-                f"snapshot login {snap_login!r} does not match account "
-                f"mt5_login {acct.get('mt5_login')!r}: broker evidence is "
-                "not bound to the registered account terminal")
+                f"positions for {connection_id} must be a broker positions "
+                "snapshot list, not a boolean")
         equity = snapshot.get("equity")
         # Equity may arrive as a JSON number or a quoted numeric string
         # (MQL5 DoubleToString); accept both and parse to float.
@@ -161,11 +150,54 @@ class CrmService:
                 f"equity for {connection_id} must be > 0 to certify "
                 "broker-native exposure (fail-closed)")
         currency = snapshot.get("currency", "")
-        positions = snapshot.get("positions")
-        if not isinstance(positions, list):
+
+        # Account-binding: the snapshot must be for THIS account and from
+        # THIS account's terminal.
+        if snap_cid != connection_id:
             raise CrmError(
-                f"positions for {connection_id} must be a broker positions "
-                "snapshot list, not a boolean")
+                f"snapshot connection_id {snap_cid!r} does not match account "
+                f"{connection_id!r}: broker evidence is not account-bound")
+        acct = self.engine.get_account(connection_id)
+        if acct is None:
+            raise CrmError(f"account {connection_id} not found")
+        if snap_login != str(acct.get("mt5_login")):
+            raise CrmError(
+                f"snapshot login {snap_login!r} does not match account "
+                f"mt5_login {acct.get('mt5_login')!r}: broker evidence is "
+                "not bound to the registered account terminal")
+
+        # Nonce: must be the EA's ABUTRON_NATIVE_<login>_<ts> form, with a
+        # timestamp fresh enough to defeat replay of captured snapshots.
+        parsed = parse_native_nonce(nonce)
+        if parsed is None:
+            raise CrmError(
+                f"invalid native export nonce for {connection_id}: "
+                "exposure certification requires an authenticated broker "
+                "snapshot, not a manually supplied flag")
+        nonce_login, nonce_ts = parsed
+        if nonce_login != snap_login:
+            raise CrmError(
+                f"nonce login {nonce_login!r} does not match snapshot "
+                f"login {snap_login!r}: broker evidence is not internally "
+                "consistent")
+        import time as _time
+        if (_time.time() - nonce_ts) > EXPOSURE_SNAPSHOT_FRESH_SECONDS:
+            raise CrmError(
+                f"exposure snapshot nonce for {connection_id} is stale "
+                f"(older than {EXPOSURE_SNAPSHOT_FRESH_SECONDS}s): replay "
+                "protection (fail-closed)")
+
+        # HMAC signature: the EA signs a canonical message (connection_id |
+        # login | equity | nonce | position_count | positions_canonical) with
+        # the activation secret. A fabricated snapshot without the secret
+        # cannot produce a valid signature.
+        sig = snapshot.get("sig", "")
+        canonical = build_exposure_canonical(
+            connection_id, snap_login, float(equity), nonce, positions)
+        if not hmac_verify(activation_secret(), canonical, sig):
+            raise CrmError(
+                f"exposure snapshot for {connection_id} has an invalid HMAC "
+                "signature: broker evidence is not authenticated (fail-closed)")
 
         # Reconcile every native position into stop-risk (Issue #36).
         self._reconcile_native_positions(connection_id, positions)

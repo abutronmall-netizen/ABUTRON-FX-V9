@@ -335,20 +335,29 @@ def main() -> int:
         # supplied flag. RiskEngine.aggregate_owner_risk reads the certified
         # fields from the DB (no patching).
         from abutron.crm.controls import crm
-        from abutron.crypto import make_nonce
-        native_snapshot_nonce = make_nonce()
+        from abutron.crypto import (activation_secret, build_exposure_canonical,
+                                    hmac_sign)
+        import time as _cert_time
+        login_str = str(account["mt5_login"])
+        native_snapshot_nonce = f"ABUTRON_NATIVE_{login_str}_{int(_cert_time.time())}"
         # DEMO account is flat: zero open positions. The snapshot is bound to
-        # the account (connection_id + login) and authenticated by the nonce.
+        # the account (connection_id + login), carries a fresh nonce, and is
+        # HMAC-signed by the activation secret — exactly what the EA emits.
         native_snapshot = {
             "nonce": native_snapshot_nonce,
             "challenge": "cert-challenge",
             "connection_id": connection_id,
-            "login": str(account["mt5_login"]),
+            "login": login_str,
             "equity": "10000.00",
             "balance": "10000.00",
             "currency": "USD",
+            "position_count": 0,
             "positions": [],
         }
+        native_snapshot["sig"] = hmac_sign(
+            activation_secret(),
+            build_exposure_canonical(connection_id, login_str, 10000.0,
+                                     native_snapshot_nonce, []))
         cert_acct = crm.certify_exposure(connection_id, snapshot=native_snapshot)
         report.check(
             "broker_worker_certifies_exposure",
@@ -357,8 +366,8 @@ def main() -> int:
             and cert_acct.get("exposure_nonce") == native_snapshot_nonce
             and cert_acct.get("exposure_snapshot_count") == 0,
             "broker worker certified exposure from an authenticated, "
-            "account-bound broker snapshot (equity + native_positions_verified "
-            "+ nonce stored in DB)")
+            "account-bound, HMAC-signed broker snapshot (equity + "
+            "native_positions_verified + nonce stored in DB)")
         # Issue #36: a blind flag / forged nonce must not certify exposure.
         forged = dict(native_snapshot)
         forged["nonce"] = "not-a-valid-nonce"
@@ -384,6 +393,36 @@ def main() -> int:
             "misbound_snapshot_rejected",
             misbound_blocked,
             "a snapshot not bound to this account cannot certify exposure "
+            "(fail-closed)")
+        # Issue #36: a snapshot with a forged (unsigned) signature is rejected.
+        unsigned = dict(native_snapshot)
+        unsigned["sig"] = "0" * 64
+        try:
+            crm.certify_exposure(connection_id, snapshot=unsigned)
+            forged_sig_blocked = False
+        except Exception:
+            forged_sig_blocked = True
+        report.check(
+            "forged_signature_rejected",
+            forged_sig_blocked,
+            "a snapshot without a valid HMAC signature cannot certify "
+            "exposure (fail-closed)")
+        # Issue #36: a stale (replayed) nonce is rejected.
+        stale = dict(native_snapshot)
+        stale["nonce"] = f"ABUTRON_NATIVE_{login_str}_{int(_cert_time.time()) - 3600}"
+        stale["sig"] = hmac_sign(
+            activation_secret(),
+            build_exposure_canonical(connection_id, login_str, 10000.0,
+                                     stale["nonce"], []))
+        try:
+            crm.certify_exposure(connection_id, snapshot=stale)
+            stale_blocked = False
+        except Exception:
+            stale_blocked = True
+        report.check(
+            "stale_nonce_rejected",
+            stale_blocked,
+            "a replayed/stale snapshot nonce cannot certify exposure "
             "(fail-closed)")
         # Confirm the exposure guard now certifies from the DB fields.
         exposure_cert = RiskEngine(runtime.log).aggregate_owner_risk(
