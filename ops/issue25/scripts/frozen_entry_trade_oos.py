@@ -52,8 +52,8 @@ def atomic(path,x):
   os.replace(tmp,path)
  finally:
   if os.path.lexists(tmp):os.unlink(tmp)
-def probability(brain,market,symbol):
- features=features_for_brain(brain,market,symbol=symbol)
+def probability(brain,market,symbol,feature_extractor):
+ features=feature_extractor(brain,market,symbol=symbol)
  x=np.asarray([features],dtype=float)
  chk(x.shape==(1,49),'FORWARD_49_FEATURE_VECTOR_INVALID')
  weights=[];scores=[]
@@ -74,13 +74,13 @@ def summary(arr):
   brier=round(sum((p-y)**2 for p,y in arr)/n,6),
   logloss=round(-sum(y*math.log(max(1e-6,min(1-1e-6,p)))+
    (1-y)*math.log(max(1e-6,min(1-1e-6,1-p))) for p,y in arr)/n,6))
-def events():
+def events(module):
  archived,fp=module['sources']()
  owners,rows=module['events'](archived)
  index=module['market_index']()
  aligned,counts,missing=module['eligible'](owners,index)
  return aligned,index
-def checkpoints(owner):
+def checkpoints(owner,module):
  root=ROOT/'candidates'/owner
  verified=[]
  for p in sorted(root.glob('runs/*/candidate-manifest.json')):
@@ -102,10 +102,15 @@ def checkpoints(owner):
    continue
  return sorted(verified,key=lambda x:x[0])
 def run():
+ module=runpy.run_path(
+  '/usr/local/sbin/abutron-v9-all-owner-causal-candidate-trainer',
+  run_name='forward_shadow_validation_import')
+ load_unified,features_for_brain=_load_production_modules()
+ trainhelper=_load_trainhelper()
  chk(ROOT.is_dir() and stat.S_IMODE(ROOT.stat().st_mode)==0o700,
     'PRIVATE_LEARNING_ARCHIVE_OWNER_INVALID')
  VALID.mkdir(parents=True,mode=0o700,exist_ok=True)
- aligned,idx=events()
+ aligned,idx=events(module)
  baseline=load_unified(str(PINNED),mc_samples=1)
  chk(baseline is not None and sha((PINNED/'nexus_brain.json').read_bytes())==module['BASESHA'],
    'PINNED_BASELINE_CHANGED')
@@ -113,7 +118,7 @@ def run():
  totals=dict(eligible_after_prior_model_checkpoint=0,
              verified_post_checkpoint_closed_trades_scored=0)
  for owner,rows in sorted(aligned.items()):
-  frozen=checkpoints(owner)
+  frozen=checkpoints(owner,module)
   to_score=[]
   for r in rows:
    entry=ts(r['entry_time'])
@@ -147,8 +152,8 @@ def run():
    chk(win is not None,'POST_ENTRY_MARKET_FEATURE_SOURCE_MISSING')
    feat=win['market_features']
    y=int(float(r['exit_price'])>float(r['entry_price']))
-   b=probability(baseline,feat,r['symbol'])
-   c=probability(cache[mid],feat,r['symbol'])
+   b=probability(baseline,feat,r['symbol'],features_for_brain)
+   c=probability(cache[mid],feat,r['symbol'],features_for_brain)
    per[mid]['b'].append((b,y));per[mid]['c'].append((c,y));per[mid]['count']+=1
    proof.append(dict(event_id_sha256=sha(r['event_id'].encode()),
       owner_hash=owner,source_account_masked='••••'+r['account'],
@@ -185,3 +190,4 @@ def run():
    baseline_brier=v.get('baseline',{}).get('brier'))
    for k,v in report.items()}),sort_keys=True))
 if __name__=='__main__':run()
+
