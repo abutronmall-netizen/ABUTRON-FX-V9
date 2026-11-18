@@ -1,0 +1,19 @@
+name: ABUTRON public source privacy boundary
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  reject-private-host-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tracked private broker and host evidence
+        run: python3 tools/ci/verify_public_repo_artifacts.py
+      - name: Offline guard regression tests
+        run: python3 -m unittest discover -s tests -p test_public_artifact_guard.py -v
