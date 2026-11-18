@@ -1,0 +1,294 @@
+#!/usr/bin/python3
+"""V9 read-only recovery of broker-native M5 candles from independently agreeing MT5 HCC M1.
+Source evidence remains on original terminals. Only candidate-only market files mutate.
+No broker orders, client records, model promotion, or approximate/synthetic OHLC.
+"""
+from __future__ import annotations
+import csv,datetime as dt,gzip,hashlib,io,json,math,os,stat,struct,tempfile
+from collections import defaultdict,Counter
+from pathlib import Path
+
+ROOT=Path('/var/lib/abutron-v9-eight-account-learning')
+UTC=dt.timezone.utc
+FP_SOURCE=Path('/var/lib/abutron-fpmarkets-feed/partial')
+PRIVATE=Path('/var/lib/private')
+CRM = Path('/var/lib/apex-signup/accounts.sqlite3')
+REQUIRED_PROFILES = {
+ '0512': ('FP Markets','DEMO'),
+ '1636': ('FP Markets','DEMO'),
+ '6207': ('Deriv','DEMO'),
+ '7593': ('Deriv','DEMO'),
+}
+
+def two_broker_demo_profiles(db_path=CRM):
+ """Resolve account profile IDs at runtime from read-only CRM; reject mismatches."""
+ require(db_path.is_file() and not db_path.is_symlink(), 'CRM_READONLY_DB_UNAVAILABLE')
+ import sqlite3
+ with sqlite3.connect('file:'+str(db_path)+'?mode=ro',uri=True,timeout=10) as db:
+  db.execute('PRAGMA query_only=ON')
+  rows=db.execute('SELECT id,account_reference,broker,environment FROM apex_mt5_connections').fetchall()
+ found={}
+ for cid,login,broker,mode in rows:
+  suffix=str(login)[-4:]
+  if suffix not in REQUIRED_PROFILES:continue
+  require(suffix not in found and (broker,mode)==REQUIRED_PROFILES[suffix]
+    and isinstance(cid,str) and len(cid)==32
+    and all(c in '0123456789abcdef' for c in cid),
+    'CRM_BROKER_NATIVE_HCC_PROFILE_UNVERIFIED')
+  found[suffix]=cid
+ require(set(found)==set(REQUIRED_PROFILES), 'CRM_BROKER_HCC_FOUR_DEMO_PROFILES_MISSING')
+ return [found['0512'],found['1636']],[found['6207'],found['7593']]
+DAYS=['2026-11-05','2026-11-06','2026-11-10','2026-11-11','2026-11-12','2026-11-13','2026-11-14','2026-11-15','2026-11-16','2026-11-17','2026-11-18']
+FMT='<qddddqii'
+COLS={'Deriv':['symbol','timeframe','start_time_utc','open','high','low','close'],
+      'FP-Markets':['symbol','broker_symbol','timeframe','start_time_utc','open','high','low','close','broker_time_raw']}
+def require(test,reason):
+ if not test:raise ValueError(reason)
+def sh(b):return hashlib.sha256(b).hexdigest()
+def root_json(path):
+ p=Path(path);s=p.stat()
+ require(s.st_uid==0 and s.st_mode&0o022==0 and not p.is_symlink(),'HCC_SOURCE_ATTESTATION_UNTRUSTED')
+ return json.loads(p.read_text())
+def verified_fp_mapping(fp_ids):
+ m={}
+ for cid in fp_ids:
+  p=FP_SOURCE/(cid+'.json');x=root_json(p)
+  require(x.get('schema')=='abutron.fpmarkets.native.partial.readonly.v1'
+    and x.get('connection_id')==cid and x.get('account_mode')=='DEMO'
+    and x.get('broker_server')=='FPMarketsSC-Demo'
+    and x.get('execution_enabled') is False and x.get('orders_submitted')==0
+    and x.get('parallel_forex_status')=='SIX_FOREX_R_VERIFIED_V305',
+    'FP_HCC_ACCOUNT_IDENTITY_UNVERIFIED')
+  m[cid]={k:v['actual'] for k,v in x['mapping'].items()}
+ require(m[fp_ids[0]]==m[fp_ids[1]] and len(m[fp_ids[0]])==13,'FP_HCC_NATIVE_SYMBOL_MAP_DISAGREES')
+ return m[fp_ids[0]]
+def hcc_candidates(blob,when):
+ # Search for a genuine 60-byte M1 row with known daily anchor. All rows
+ # are decoded only inside a contiguous, time-monotone HCC region.
+ target=struct.pack('<q',when)
+ offset=0;regions={};out=defaultdict(set);n=0
+ while True:
+  j=blob.find(target,offset)
+  if j<0:break
+  offset=j+1
+  if j<562 or j+120>=len(blob):continue
+  if (struct.unpack_from('<q',blob,j-60)[0]!=when-60 or
+      struct.unpack_from('<q',blob,j+60)[0]!=when+60):continue
+  a=z=j
+  while a-60>=502 and struct.unpack_from('<q',blob,a-60)[0]==struct.unpack_from('<q',blob,a)[0]-60:a-=60
+  while z+120<=len(blob) and struct.unpack_from('<q',blob,z+60)[0]==struct.unpack_from('<q',blob,z)[0]+60:z+=60
+  key=a,z
+  if key in regions:continue
+  regions[key]=True;n+=1
+  require(n<=60,'UNBOUNDED_HCC_DAILY_REVISION_COUNT')
+  first=struct.unpack_from('<q',blob,a)[0]
+  require(z>=a and ((z-a)%60)==0,'BROKEN_NATIVE_HCC_BLOCK_STRIDE')
+  for at in range(a,z+60,60):
+   t,o,h,l,c,volume,spread,flags=struct.unpack_from(FMT,blob,at)
+   require(t==first+at-a and t%60==0 and volume>=0 and spread>=0
+     and all(math.isfinite(v) and v>0 for v in (o,h,l,c))
+     and l<=min(o,c)<=max(o,c)<=h,'NATIVE_HCC_MINUTE_UNTRUSTED')
+   out[t].add((o,h,l,c))
+ return out,n
+def read_hcc(path,shift):
+ p=Path(path);s=p.lstat()
+ require(stat.S_ISREG(s.st_mode) and not p.is_symlink() and s.st_nlink==1
+  and stat.S_IMODE(s.st_mode)==0o600 and 1_000_000<s.st_size<100_000_000,
+  'UNTRUSTED_BROKER_HCC_SOURCE')
+ require(s.st_uid==p.parents[4].stat().st_uid,'HCC_SOURCE_NOT_TERMINAL_OWNER')
+ b=p.read_bytes()
+ require(len(b)==s.st_size and struct.unpack_from('<I',b,0)[0]==502,
+   'HCC_NATIVE_FILE_VERSION_UNVERIFIED')
+ result=defaultdict(set);candidate=0
+ for day in (DAYS if shift==7200 else DAYS[-5:]):
+  # Active market sessions vary; try two independent per-day anchors.
+  for hour in (8,15):
+   at=int(dt.datetime.fromisoformat(day+f'T{hour:02d}:00:00+00:00').timestamp())+shift
+   found,n=hcc_candidates(b,at)
+   candidate+=n
+   for t,vals in found.items():
+    if day==dt.datetime.fromtimestamp(t-shift,UTC).date().isoformat():
+     result[t-shift].update(vals)
+ return result,candidate,sh(b)
+def approved_shared_candles(source_a,source_b):
+ bybucket=defaultdict(list);conflicts=0
+ for t,pa in source_a.items():
+  pb=source_b.get(t)
+  if not pb:continue
+  if len(pa)!=1 or len(pb)!=1 or pa!=pb:
+   conflicts+=1;continue
+  bybucket[(t//300)*300].append((t,next(iter(pa))))
+ rows={}
+ for stamp,bars in bybucket.items():
+  bars.sort()
+  if len(bars)!=5 or any(t!=stamp+i*60 for i,(t,_) in enumerate(bars)):continue
+  px=(bars[0][1][0],max(x[1][1] for x in bars),min(x[1][2] for x in bars),
+      bars[-1][1][3])
+  require(px[2]<=min(px[0],px[3])<=max(px[0],px[3])<=px[1],
+     'NATIVE_HCC_M5_AGGREGATE_GEOMETRY_INVALID')
+  rows[stamp]=px
+ return rows,conflicts
+def load_archive(broker):
+ p=ROOT/'market'/broker/'candles.csv.gz';original=p.read_bytes()
+ result={}
+ with gzip.GzipFile(fileobj=io.BytesIO(original),mode='rb') as z:
+  with io.TextIOWrapper(z,encoding='utf-8',newline='') as f:
+   rd=csv.DictReader(f)
+   require(rd.fieldnames==COLS[broker],'CANDIDATE_ONLY_BROKER_MARKET_SCHEMA_CHANGED')
+   for row in rd:
+    require(row['timeframe']=='M5','NON_M5_MARKET_DATA_PRESENT')
+    key=(row.get('broker_symbol') if broker=='FP-Markets' else row['symbol'],int(row['start_time_utc']))
+    require(key not in result,'DUPLICATED_BROKER_CANDIDATE_M5')
+    result[key]=row
+ return result
+def build():
+ root=ROOT/'market'
+ fp_ids,deriv_ids=two_broker_demo_profiles()
+ fpmap=verified_fp_mapping(fp_ids)
+ report={'FP-Markets':{},'Deriv':{}}
+ additions={}
+ for broker in ('FP-Markets','Deriv'):
+  prior=load_archive(broker)
+  if broker=='Deriv':
+   for cid in deriv_ids:
+    profile=PRIVATE/('abutron-client-mt5-'+cid)
+    hp=profile/'worker-health.json';hs=hp.lstat()
+    require(not hp.is_symlink() and hs.st_uid==profile.stat().st_uid
+       and hs.st_mode&0o077==0 and 0<=__import__('time').time()-hs.st_mtime<=45,
+       'DERIV_NATIVE_CURRENT_WORKER_HEALTH_UNTRUSTED')
+    h=json.loads(hp.read_text())
+    require(h.get('id')==cid and h.get('broker')=='Deriv'
+      and h.get('mode')=='DEMO' and h.get('server')=='Deriv-Demo'
+      and h.get('status')=='CONNECTED' and h.get('heartbeat_fresh') is True,
+      'DERIV_NATIVE_HCC_INDEPENDENT_CONNECTED_ACCOUNT_UNVERIFIED')
+  accepted={};evidence=[];overlap=0;overlap_mismatch=0;new=0;skipped=0;conflicts=0
+  symbols=sorted(fpmap.items()) if broker=='FP-Markets' else [
+   (f'Volatility {vol} Index.0',f'Volatility {vol} Index.0') for vol in (10,25,50,75,100)]
+  for sym,actual in symbols:
+   pairs=([PRIVATE/('abutron-client-mt5-'+cid)/'terminal'/'bases'/'FPMarketsSC-Demo'/'history'/actual/'2026.hcc' for cid in fp_ids]
+     if broker=='FP-Markets' else
+     [PRIVATE/('abutron-client-mt5-'+cid)/'terminal'/'bases'/'Deriv-Demo'/'history'/actual/'2026.hcc' for cid in deriv_ids])
+   try:
+    outs=[read_hcc(p,7200 if broker=='FP-Markets' else 0) for p in pairs]
+    rows,bad=approved_shared_candles(outs[0][0],outs[1][0])
+    require(rows,'NO_TWO_TERMINAL_HCC_AGREEMENT')
+    # Account-native HCC may contain revised observations; accept only
+    # those identical across independent current DEMO terminals.
+    conflicts+=bad
+    overlap_sym=0;new_sym=0;diff_sym=0
+    for t,(o,h,l,c) in rows.items():
+     key=actual,t;old=prior.get(key)
+     if old is not None:
+      sampled=tuple(float(old[k]) for k in ('open','high','low','close'))
+      if not all(abs(u-v)<=1e-8*max(1,abs(v)) for u,v in zip((o,h,l,c),sampled)):
+       diff_sym+=1
+      else:overlap_sym+=1
+    # Require >=30 identical, source-manifest-verified M5 candle
+    # comparisons for the same symbol and broker before adding newer bars.
+    if overlap_sym<30 or diff_sym:
+     report[broker][sym]=dict(status='HCC_PRICE_OVERLAP_NOT_VERIFIED',
+        exact_native_candidate_overlap=overlap_sym,conflicting_market_overlap=diff_sym,
+        source_two_account_M5=len(rows));skipped+=1
+     overlap_mismatch+=diff_sym
+     continue
+    for t,(o,h,l,c) in rows.items():
+     key=actual,t
+     if key in prior:continue
+     if key in accepted:
+      require(accepted[key]==(o,h,l,c,sym),'CONFLICTING_NEW_HCC_M5')
+      continue
+     accepted[key]=(o,h,l,c,sym);new_sym+=1
+    new+=new_sym;overlap+=overlap_sym
+    evidence.append(dict(symbol=sym,source_hcc_sha256_per_terminal=[v[2] for v in outs],
+         independent_source_terminal_count=2,verified_M5_overlap=overlap_sym,
+         source_revisions_considered=[v[1] for v in outs],new_M5=new_sym))
+    report[broker][sym]=dict(status='TWO_BROKER_NATIVE_HCC_SOURCES_VERIFIED',
+         exact_native_candidate_overlap=overlap_sym,added_M5=new_sym,
+         ambiguous_or_conflicting_m1_discarded=bad)
+   except (OSError,ValueError,struct.error) as exc:
+    err=str(exc)
+    report[broker][sym]=dict(status='HCC_SOURCE_UNVERIFIED',
+      reason_code=err if err.isupper() and len(err)<100 else type(exc).__name__);skipped+=1
+  additions[broker]=(accepted,prior,evidence)
+  report[broker+'__summary']={'M5_added':new,'verified_same_symbol_overlap':overlap,
+    'market_overlap_conflicts':overlap_mismatch,
+    'ambiguous_minutes_skipped':conflicts,'symbols_not_accepted':skipped}
+ # Do NOT write market file if any price is in conflict with approved
+ # existing independently checked market archive.
+ require(report['FP-Markets__summary']['market_overlap_conflicts']==0 and
+         report['Deriv__summary']['market_overlap_conflicts']==0,
+         'CURRENT_HCC_DISAGREES_WITH_EXISTING_MARKET_CANDLES')
+ # Emit new candidate-only market data, atomic output. No source files modified.
+ results={}
+ for broker in ('FP-Markets','Deriv'):
+  candidate,prior,evidence=additions[broker]
+  merged=dict(prior)
+  for (sym,t),(o,h,l,c,canon) in candidate.items():
+   if broker=='FP-Markets':
+    merged[sym,t]=dict(symbol=canon,broker_symbol=sym,timeframe='M5',
+     start_time_utc=str(t),open=str(o),high=str(h),low=str(l),close=str(c),
+     broker_time_raw=str(t+7200))
+   else:
+    merged[sym,t]=dict(symbol=sym,timeframe='M5',start_time_utc=str(t),
+     open=str(o),high=str(h),low=str(l),close=str(c))
+  p=root/broker/'candles.csv.gz'
+  fd,temp=tempfile.mkstemp(prefix='.native-hcc-candidate-',suffix='.gz',dir=p.parent)
+  try:
+   with os.fdopen(fd,'wb') as target:
+    os.fchmod(target.fileno(),0o600)
+    with gzip.GzipFile(filename='',fileobj=target,mode='wb',mtime=0,compresslevel=6) as gz:
+     with io.TextIOWrapper(gz,encoding='utf-8',newline='',write_through=True) as txt:
+      cw=csv.DictWriter(txt,fieldnames=COLS[broker],lineterminator='\n')
+      cw.writeheader()
+      for (_,t),row in sorted(merged.items(),key=lambda a:(a[0][0],a[0][1])):
+       cw.writerow(row)
+   os.replace(temp,p)
+  finally:
+   if os.path.lexists(temp):os.unlink(temp)
+  results[broker]=dict(source_evidence=evidence,
+    candidate_market_m5_sha256=sh(p.read_bytes()),total_candidate_M5=len(merged),
+    new_HCC_verified_M5=len(candidate))
+ # Bump existing provenance-manifest sha on account-bound candidate-only
+ # files while retain original immutable public manifest digests as separate fields.
+ manifest=root/'latest.json';old=root_json(manifest)
+ require(old['schema']=='abutron.v9.manifest_verified_market_m5_candidate_input.v1',
+  'V9_MARKET_AUDIT_SCHEMA_CHANGED')
+ old['brokers']['Deriv']['market_input_sha256']=results['Deriv']['candidate_market_m5_sha256']
+ old['brokers']['Deriv']['native_hcc_extension_sha256']=results['Deriv']['candidate_market_m5_sha256']
+ old['brokers']['FP-Markets']['market_input_sha256']=results['FP-Markets']['candidate_market_m5_sha256']
+ tmp=root/'fp-native-four-account-m5-evidence.json';fpold=root_json(tmp)
+ require(fpold['schema']=='abutron.v9.fp_fouraccount_authenticated_m5_candidate_source.v1',
+   'FP_NATIVE_4_ACCOUNT_AUDIT_SCHEMA_CHANGED')
+ fpold['combined_candidate_market_sha256']=results['FP-Markets']['candidate_market_m5_sha256']
+ fpold['hcc_native_verified_extension']=True
+ # Atomic manifests; SHA is verified by candidate trainer. If interrupted,
+ # candidate trainer fails closed rather than accepting unhashed market data.
+ for path,doc in [(manifest,old),(tmp,fpold)]:
+  fd,temp=tempfile.mkstemp(prefix='.native-hcc-provenance-',dir=path.parent)
+  try:
+   with os.fdopen(fd,'w') as f:
+    os.fchmod(f.fileno(),0o600)
+    json.dump(doc,f,sort_keys=True,indent=2);f.write('\n')
+    f.flush();os.fsync(f.fileno())
+   os.replace(temp,path)
+  finally:
+   if os.path.lexists(temp):os.unlink(temp)
+ out=dict(schema='abutron.v9.broker_native_hcc_m1_independent_two_terminal_m5.v1',
+  checked_at_utc=dt.datetime.now(UTC).isoformat(),
+  source_scope='CANDIDATE_ONLY_VERIFIED_HISTORICAL_M5',
+  broker_source_summary=report,output_markets=results,
+  broker_orders_sent=0,live_switched_on=False,source_market_archives_modified=False,
+  private_trade_records_published=False,production_model_promoted=False,
+  true_historical_equity_highs_claimed=False)
+ p=root/'hcc-cross-account-recovery.json'
+ fd,t=tempfile.mkstemp(prefix='.hcc-recovery-report-',dir=root)
+ try:
+  with os.fdopen(fd,'w') as f:
+   os.fchmod(f.fileno(),0o600);json.dump(out,f,sort_keys=True,indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
+  os.replace(t,p)
+ finally:
+  if os.path.lexists(t):os.unlink(t)
+ print(json.dumps({k:{'added':v['new_HCC_verified_M5'],'total_M5':v['total_candidate_M5'],
+    'verified_symbols':len(v['source_evidence'])} for k,v in results.items()}))
+ print('COUNTS',json.dumps({key:val for key,val in report.items() if key.endswith('__summary')}))
+if __name__=='__main__':build()

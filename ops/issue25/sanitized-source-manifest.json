@@ -1,0 +1,155 @@
+{
+  "contains_account_connection_ids": false,
+  "contains_full_broker_login_in_python_files": false,
+  "production_service_mutated": false,
+  "runtime_private_source_excluded": true,
+  "sanitization_changes_only_in_public_copies": true,
+  "schema": "abutron.issue25.public_software_source_review.v1",
+  "source_files": {
+    "ops/issue25/scripts/causal_owner_candidate_trainer.py": {
+      "bytes": 23920,
+      "changed_in_sanitization": false,
+      "published_sha256": "fab547b8ac0451a37cbafb60a3d0d1bb8205df5f34254525d5cf620d7a640e98",
+      "source_sha256": "fab547b8ac0451a37cbafb60a3d0d1bb8205df5f34254525d5cf620d7a640e98"
+    },
+    "ops/issue25/scripts/chronological_owner_holdout.py": {
+      "bytes": 7732,
+      "changed_in_sanitization": true,
+      "published_sha256": "38319fc6ac043f4d9193bb353c422b7dbc3c74c583bc0327ae925808adbf8fd4",
+      "source_sha256": "38319fc6ac043f4d9193bb353c422b7dbc3c74c583bc0327ae925808adbf8fd4"
+    },
+    "ops/issue25/scripts/correlation_confidence.py": {
+      "bytes": 19792,
+      "changed_in_sanitization": false,
+      "published_sha256": "ffcb2ba40b29488c5cfe7d4980d715aa38d1c87ea3c75735ba894259e6c63732",
+      "source_sha256": "ffcb2ba40b29488c5cfe7d4980d715aa38d1c87ea3c75735ba894259e6c63732"
+    },
+    "ops/issue25/scripts/deriv_precision_m5.py": {
+      "bytes": 6506,
+      "changed_in_sanitization": true,
+      "published_sha256": "09fded4ce04a2eb8e2944a39b0639142384b9b0bffc2a1cf605a3b95f8d4eaaf",
+      "source_sha256": "cda7157c7a7e8a01b3d2fa73fa508c6441583b010271170910d1294f55621c93"
+    },
+    "ops/issue25/scripts/fp_m5_candidate_prepare.py": {
+      "bytes": 6007,
+      "changed_in_sanitization": false,
+      "published_sha256": "be767adcb5774a5be59850d5f2275d6e71d1122c5c8f38dbbaf11b77a39755ff",
+      "source_sha256": "be767adcb5774a5be59850d5f2275d6e71d1122c5c8f38dbbaf11b77a39755ff"
+    },
+    "ops/issue25/scripts/fp_native_m5_collector.py": {
+      "bytes": 7657,
+      "changed_in_sanitization": true,
+      "published_sha256": "4aa4500968e9a1f5c6d77420f3d9c9b59c863dcaab13dbf949de7f2fb8d9ef58",
+      "source_sha256": "fb10443a0ee19fdd0b917676b32939415b8e2102f6f5767bf98bcd6f1ed45d89"
+    },
+    "ops/issue25/scripts/frozen_entry_trade_oos.py": {
+      "bytes": 8420,
+      "changed_in_sanitization": true,
+      "published_sha256": "3dea997b6450258c70d9e365228a2097169487990093fac48c2ae435f7eeaee3",
+      "source_sha256": "894a9e3132cbb91431d90e2362b7e7e795e262130c45d09fb5efb432e9179959"
+    },
+    "ops/issue25/scripts/native_trade_archive.py": {
+      "bytes": 23897,
+      "changed_in_sanitization": true,
+      "published_sha256": "ed057fcdc75641c6da5b0e2ba1d7a5716a5f4bba3cb7a508510a903a88ebb3a8",
+      "source_sha256": "8a5bf8064f05edefae720b1acc689a0bba021c3d8bedba7fc3df52b9e0fde2c7"
+    },
+    "ops/issue25/scripts/prospective_m5_shadow.py": {
+      "bytes": 21691,
+      "changed_in_sanitization": true,
+      "published_sha256": "97c34611c73cc72c7c2a7c75c341b56349535e96e6c922a692d81735bdc0deed",
+      "source_sha256": "97c34611c73cc72c7c2a7c75c341b56349535e96e6c922a692d81735bdc0deed"
+    },
+    "ops/issue25/scripts/verified_native_hcc_m5.py": {
+      "bytes": 14669,
+      "changed_in_sanitization": true,
+      "published_sha256": "403f143cec103f13387f84c7470dfda60e454eacac69e4b3cb5910a1c466bd90",
+      "source_sha256": "737e1d476387b93714b3b07db2688857a08bea5e80666677d22b35dfe7ccfe50"
+    },
+    "ops/issue25/systemd/abutron-fp-native-m5-archive-ro.service": {
+      "bytes": 547,
+      "changed_in_sanitization": false,
+      "published_sha256": "0c5fe733591b8f50f681ff97b46ead9cdb478113b9c531730a3ebbe0a65cf81a",
+      "source_sha256": "0c5fe733591b8f50f681ff97b46ead9cdb478113b9c531730a3ebbe0a65cf81a"
+    },
+    "ops/issue25/systemd/abutron-fp-native-m5-archive-ro.timer": {
+      "bytes": 227,
+      "changed_in_sanitization": false,
+      "published_sha256": "9f21a9c9cd43cef57e08a2b9f0101065bdf08b74e66053a66f51455b8ebf1d8c",
+      "source_sha256": "9f21a9c9cd43cef57e08a2b9f0101065bdf08b74e66053a66f51455b8ebf1d8c"
+    },
+    "ops/issue25/systemd/abutron-v9-all-owner-causal-candidate-trainer.service": {
+      "bytes": 1219,
+      "changed_in_sanitization": false,
+      "published_sha256": "08516eecc0086d75149cb178b9e9bd3abe1761a4f74ce4445f4126422b52c6f1",
+      "source_sha256": "08516eecc0086d75149cb178b9e9bd3abe1761a4f74ce4445f4126422b52c6f1"
+    },
+    "ops/issue25/systemd/abutron-v9-all-owner-causal-candidate-trainer.timer": {
+      "bytes": 300,
+      "changed_in_sanitization": false,
+      "published_sha256": "2f1067d0ea2f76285a4d5e4f189db1c267178cce235207adf7772bf4e0b328a9",
+      "source_sha256": "2f1067d0ea2f76285a4d5e4f189db1c267178cce235207adf7772bf4e0b328a9"
+    },
+    "ops/issue25/systemd/abutron-v9-eight-account-learning-archive-ro.service": {
+      "bytes": 593,
+      "changed_in_sanitization": false,
+      "published_sha256": "8cfe7605db342ab1f99892902df2bb8a0dbf6506d94d22b3af617c459ad0a084",
+      "source_sha256": "8cfe7605db342ab1f99892902df2bb8a0dbf6506d94d22b3af617c459ad0a084"
+    },
+    "ops/issue25/systemd/abutron-v9-eight-account-learning-archive-ro.timer": {
+      "bytes": 307,
+      "changed_in_sanitization": false,
+      "published_sha256": "d111295be930952b84ca151d527f2cec18712a72a2abc0c3de3ed41971f03985",
+      "source_sha256": "d111295be930952b84ca151d527f2cec18712a72a2abc0c3de3ed41971f03985"
+    },
+    "ops/issue25/systemd/abutron-v9-forward-frozen-owner-oos-ro.service": {
+      "bytes": 864,
+      "changed_in_sanitization": false,
+      "published_sha256": "2154d130383c0f75f9b0258d921a1c3522d03cbe3b24f6cd20a044cf30bccffa",
+      "source_sha256": "2154d130383c0f75f9b0258d921a1c3522d03cbe3b24f6cd20a044cf30bccffa"
+    },
+    "ops/issue25/systemd/abutron-v9-forward-frozen-owner-oos-ro.timer": {
+      "bytes": 275,
+      "changed_in_sanitization": false,
+      "published_sha256": "b0284656dcf55a0c5e657b0f673fc21f361c40faec919b835282ae350fc89847",
+      "source_sha256": "b0284656dcf55a0c5e657b0f673fc21f361c40faec919b835282ae350fc89847"
+    },
+    "ops/issue25/systemd/abutron-v9-four-owner-chronological-holdout-ro.service": {
+      "bytes": 858,
+      "changed_in_sanitization": false,
+      "published_sha256": "201276bbabf455cdf131e6e8aa697c99e394ea35209d581a261553e014529b0a",
+      "source_sha256": "201276bbabf455cdf131e6e8aa697c99e394ea35209d581a261553e014529b0a"
+    },
+    "ops/issue25/systemd/abutron-v9-four-owner-chronological-holdout-ro.timer": {
+      "bytes": 279,
+      "changed_in_sanitization": false,
+      "published_sha256": "249db5197818be9eb6bfdce1041318092bdab8d84f545e19cc80e15ed24608d2",
+      "source_sha256": "249db5197818be9eb6bfdce1041318092bdab8d84f545e19cc80e15ed24608d2"
+    },
+    "ops/issue25/systemd/abutron-v9-prospective-broker-m5-shadow-ro.service": {
+      "bytes": 908,
+      "changed_in_sanitization": false,
+      "published_sha256": "a968749b6075257203af64842c06643aae83405cae98893d52ebdb9c6730d471",
+      "source_sha256": "a968749b6075257203af64842c06643aae83405cae98893d52ebdb9c6730d471"
+    },
+    "ops/issue25/systemd/abutron-v9-prospective-broker-m5-shadow-ro.timer": {
+      "bytes": 296,
+      "changed_in_sanitization": false,
+      "published_sha256": "2ca5b4d395bb685d8a9945d7bf22d2698a2f017cc41f20645db46caa2969fe63",
+      "source_sha256": "2ca5b4d395bb685d8a9945d7bf22d2698a2f017cc41f20645db46caa2969fe63"
+    },
+    "ops/issue25/systemd/abutron-v9-shadow-correlation-confidence-ro.service": {
+      "bytes": 638,
+      "changed_in_sanitization": false,
+      "published_sha256": "c8bc912077908521e4bca605721d0acff447d6533d884e8eee79c56126c5409d",
+      "source_sha256": "c8bc912077908521e4bca605721d0acff447d6533d884e8eee79c56126c5409d"
+    },
+    "ops/issue25/systemd/abutron-v9-shadow-correlation-confidence-ro.timer": {
+      "bytes": 284,
+      "changed_in_sanitization": false,
+      "published_sha256": "4149c9e4a4c0f2496ca42ae9526ef4bd41f1e594748327c0d7b639c6b4f3a626",
+      "source_sha256": "4149c9e4a4c0f2496ca42ae9526ef4bd41f1e594748327c0d7b639c6b4f3a626"
+    }
+  },
+  "source_install_requires_separate_validation": true
+}
