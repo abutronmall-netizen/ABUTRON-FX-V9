@@ -171,17 +171,19 @@ class LazyRuntimeExecutionTests(unittest.TestCase):
             src=release/"src"
             src.mkdir(parents=True)
             (src/"issue25_fake_broker_runtime.py").write_text(
-                "PROOF='FAKE_BROKER_IMPORT_IN_ISOLATED_RELEASE'\\n",encoding="utf-8")
+                "PROOF='FAKE_BROKER_IMPORT_IN_ISOLATED_RELEASE'" + chr(10),
+                encoding="utf-8")
             helper=Path(td)/"train_from_trades_causal.py"
             helper.write_text(
-                "from issue25_fake_broker_runtime import PROOF\\n",encoding="utf-8")
+                "from issue25_fake_broker_runtime import PROOF" + chr(10),
+                encoding="utf-8")
             original_paths=list(sys.path)
             try:
-                with mock.patch.object(mod,"RELEASE",release), \\
-                     mock.patch.object(mod,"BRAINTRAIN",str(helper)):
-                    loaded=mod._load_helper()
-                    self.assertEqual(loaded.PROOF,
-                        "FAKE_BROKER_IMPORT_IN_ISOLATED_RELEASE")
+                with mock.patch.object(mod,"RELEASE",release):
+                    with mock.patch.object(mod,"BRAINTRAIN",str(helper)):
+                        loaded=mod._load_helper()
+                        self.assertEqual(loaded.PROOF,
+                            "FAKE_BROKER_IMPORT_IN_ISOLATED_RELEASE")
             finally:
                 sys.path[:]=original_paths
                 sys.modules.pop("issue25_fake_broker_runtime",None)
