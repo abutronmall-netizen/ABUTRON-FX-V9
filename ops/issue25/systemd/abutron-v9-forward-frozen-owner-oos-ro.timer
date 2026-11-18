@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly V9 genuine forward-entry broker-closed trade validation against frozen owner models
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=1h
+AccuracySec=2min
+Persistent=false
+Unit=abutron-v9-forward-frozen-owner-oos-ro.service
+
+[Install]
+WantedBy=timers.target

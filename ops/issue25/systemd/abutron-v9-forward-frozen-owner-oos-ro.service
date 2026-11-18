@@ -1,0 +1,27 @@
+[Unit]
+Description=ABUTRON V9 pre-entry-frozen owner model versus baseline broker-closed-trade OOS shadow (READ ONLY)
+After=abutron-v9-eight-account-learning-archive-ro.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/abutron-v9-brain/.venv-a88f373/bin/python -B /usr/local/sbin/abutron-v9-forward-frozen-owner-oos-ro
+Environment=ABUTRON_ENV=demo
+Environment=ABUTRON_LIVE_TRADING_ENABLED=false
+Environment=ABUTRON_GEMMA_ENABLED=false
+Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-v9-eight-account-learning/validation/shadow-runtime
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ReadWritePaths=/var/lib/abutron-v9-eight-account-learning/validation
+MemoryMax=2G
+TasksMax=30
+TimeoutStartSec=240s
+StandardOutput=journal
+StandardError=journal

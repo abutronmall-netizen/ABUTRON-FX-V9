@@ -1,0 +1,23 @@
+[Unit]
+Description=ABUTRON V9 verified all-eight-account owner-isolated broker history and closed-trade learning archive (READ ONLY)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-v9-eight-account-learning-archive-ro
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ReadWritePaths=/var/lib/abutron-v9-eight-account-learning
+MemoryMax=256M
+TasksMax=20
+TimeoutStartSec=60s
+StandardOutput=journal
+StandardError=journal

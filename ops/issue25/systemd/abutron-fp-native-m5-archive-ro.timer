@@ -1,0 +1,12 @@
+[Unit]
+Description=Store authenticated closed FP M5 bars every minute
+
+[Timer]
+OnBootSec=120s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Persistent=false
+Unit=abutron-fp-native-m5-archive-ro.service
+
+[Install]
+WantedBy=timers.target
