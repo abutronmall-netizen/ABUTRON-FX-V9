@@ -148,6 +148,92 @@ class FullStagedTransferContractTests(unittest.TestCase):
             file.read_text(encoding="utf-8")
             self.assertNotIn(file.suffix,(".tgz",".sqlite3",".hcc",".xlsx"))
 
+class LazyRuntimeExecutionTests(unittest.TestCase):
+    """Exercise the formerly undefined runtime bindings without broker writes."""
+
+    @staticmethod
+    def module(name):
+        import sys
+        import types
+        from unittest import mock
+        # CI tests entrypoint wiring, not ndarray math; no optional native
+        # numeric/trading package is needed to import these source modules.
+        if "numpy" not in sys.modules:
+            sys.modules["numpy"] = types.ModuleType("numpy")
+        return load(name + ".py")
+
+    def test_chronological_replay_resolves_all_deps_before_events(self):
+        from unittest import mock
+        mod = self.module("chronological_owner_holdout")
+        class ReachedSource(Exception): pass
+        with mock.patch.object(mod,"_load_parent",
+              return_value={"sources": lambda: (_ for _ in ()).throw(ReachedSource())}), \
+             mock.patch.object(mod,"_load_helper",return_value=object()) as helper, \
+             mock.patch.object(mod,"_load_brain_modules",
+                               return_value=(object(),object())) as brain:
+            with self.assertRaises(ReachedSource):mod.run()
+            helper.assert_called_once_with()
+            brain.assert_called_once_with()
+
+    def test_chronological_loader_targets_causal_trade_helpers(self):
+        from unittest import mock
+        mod = self.module("chronological_owner_holdout")
+        with tempfile.TemporaryDirectory() as td:
+            helper=Path(td)/"train_from_trades_causal.py"
+            helper.write_text("TEST_CAUSAL_HELPER='OK'\n",encoding="utf-8")
+            with mock.patch.object(mod,"BRAINTRAIN",str(helper)):
+                self.assertEqual(mod._load_helper().TEST_CAUSAL_HELPER,"OK")
+
+    def test_deriv_native_scanner_initialized_before_source_io(self):
+        from unittest import mock
+        mod=self.module("deriv_precision_m5")
+        class ReachedIO(Exception):pass
+        with mock.patch.object(mod,"_load_scanner",
+              return_value=(object(),object())) as scanner, \
+             mock.patch.object(mod,"safe_file",side_effect=ReachedIO):
+            with self.assertRaises(ReachedIO):mod.main()
+            scanner.assert_called_once_with()
+
+    def test_frozen_entry_oos_initializes_before_archive_read(self):
+        from unittest import mock
+        mod=self.module("frozen_entry_trade_oos")
+        class ReachedSource(Exception):pass
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/"private"
+            root.mkdir(mode=0o700)
+            parent={"sources":lambda: (_ for _ in ()).throw(ReachedSource())}
+            with mock.patch.object(mod,"ROOT",root), \
+                 mock.patch.object(mod,"VALID",root/"validation"), \
+                 mock.patch.object(mod.runpy,"run_path",return_value=parent), \
+                 mock.patch.object(mod,"_load_production_modules",
+                                  return_value=(object(),object())) as brain, \
+                 mock.patch.object(mod,"_load_trainhelper",
+                                   return_value=object()) as helper:
+                with self.assertRaises(ReachedSource):mod.run()
+                brain.assert_called_once_with()
+                helper.assert_called_once_with()
+
+    def test_prospective_m5_shadow_binds_brain_before_roster_io(self):
+        from unittest import mock
+        import stat
+        import types
+        mod=self.module("prospective_m5_shadow")
+        class ReachedRoster(Exception):pass
+        with tempfile.TemporaryDirectory() as td:
+            root=types.SimpleNamespace(is_dir=lambda:True,
+                stat=lambda:types.SimpleNamespace(
+                    st_uid=0,st_mode=stat.S_IFDIR|0o700))
+            with mock.patch.object(mod,"ROOT",root), \
+                 mock.patch.object(mod,"OUT",Path(td)/"shadow"), \
+                 mock.patch.object(mod,"roster",side_effect=ReachedRoster), \
+                 mock.patch.object(mod,"_load_production_modules",
+                                  return_value=tuple(object() for _ in range(5))) as brain:
+                with self.assertRaises(ReachedRoster):mod.main()
+                brain.assert_called_once_with()
+                for name in ("load_unified","build_signal_bundle",
+                             "features_for_brain","validate_snapshot","utc_now"):
+                    self.assertIn(name,vars(mod))
+
 if __name__=="__main__":
     unittest.main()
 
