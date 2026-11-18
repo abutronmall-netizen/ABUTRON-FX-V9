@@ -152,11 +152,11 @@ def main() -> int:
         return 0
     if not args.report:
         parser.error("Specify --report or --selftest")
-    if args.report.is_symlink() or not args.report.is_file():
-        raise SystemExit("Evidence report missing or symlinked")
-    if args.report.stat().st_size > 2_000_000:
-        raise SystemExit("Evidence report too large")
     try:
+        if args.report.is_symlink() or not args.report.is_file():
+            raise ContractError("EVIDENCE_REPORT_NOT_REGULAR_FILE")
+        if args.report.stat().st_size > 2_000_000:
+            raise ContractError("EVIDENCE_REPORT_TOO_LARGE")
         report = json.loads(args.report.read_text(encoding="utf-8"))
         result = evaluate_evidence(report)
     except (ValueError, OSError, TypeError) as exc:
