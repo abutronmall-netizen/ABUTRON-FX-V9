@@ -25,3 +25,7 @@ vendor/abutron-apex/apex11/state/
 vendor/abutron-apex/state/
 # Vendored APEX default log/decision journal dir (relative to CWD)
 /state/
+
+# Private host evidence bundles (never commit broker/ops data)
+issue25-*.tgz
+host_evidence/
