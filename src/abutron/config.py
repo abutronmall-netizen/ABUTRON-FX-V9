@@ -121,6 +121,17 @@ DEBATE_ENABLED = os.getenv("ABUTRON_DEBATE_ENABLED", "false").lower() in (
 DEBATE_ROUNDS = int(os.getenv("ABUTRON_DEBATE_ROUNDS", "1"))
 DEBATE_MAX_CALLS = int(os.getenv("ABUTRON_DEBATE_MAX_CALLS", "8"))
 
+# Agentic decision engine: when enabled, the agentic multi-agent system
+# (sense -> think -> gate -> act -> monitor -> recover) replaces the
+# vendored apex engine as the authoritative production decision path in
+# ApexIntegration.process_candle. Default OFF (shadow/staging) — the
+# platform keeps using the apex path until the agentic system is
+# certified. When ON, the RiskGate (which delegates to the existing
+# RiskGuard) enforces the hard invariants before any candidate is
+# produced. The fail-closed posture is preserved through all phases.
+AGENTIC_ENGINE_ENABLED = os.getenv("ABUTRON_AGENTIC_ENGINE", "false").lower() in (
+    "1", "true", "yes")
+
 # Hardened pre-trade RiskGuard (kweinmeister pattern; fail-closed, opt-in)
 # When enabled, an independent hard-limit gate runs on every READY candidate
 # before it is stored for the single-writer dispatcher.
