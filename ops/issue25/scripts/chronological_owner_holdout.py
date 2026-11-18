@@ -96,6 +96,14 @@ def run():
   work=root/'replays'/owner/label
   work.mkdir(parents=True,mode=0o700,exist_ok=True)
   rows=sorted(trades,key=lambda r:(event_time(r,'entry_time'),r['event_id']))
+  # An owner present with zero eligible native M5 trades would make
+  # rows[int(len(rows)*0.7)] raise IndexError. Record INSUFFICIENT_PURGED_HISTORY
+  # for that owner and continue to the remaining owners instead of aborting
+  # the whole run.
+  if not rows:
+   output[owner[:12]]=dict(status='INSUFFICIENT_PURGED_HISTORY',
+       train=0,holdout=0,first_holdout_entry_utc=None)
+   continue
   cutoff=event_time(rows[int(len(rows)*0.7)],'entry_time')
   baseline_cutoff=dt.datetime(2026,11,16,tzinfo=USD).timestamp()
   strict_cutoff=max(cutoff,baseline_cutoff)
