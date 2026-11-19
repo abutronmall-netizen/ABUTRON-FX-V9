@@ -88,3 +88,10 @@ def test_native_evidence_remains_not_authoritative_certification():
     assert "OPEN_PROTECTED" in EA and "OPEN_UNPROTECTED" in EA
     assert "BROKER_SLTP_READBACK_CONFIRMED" in RISK
     assert "originalStop<=oldStop" in RISK and "originalStop>=oldStop" in RISK
+
+def test_native_qa_readiness_exposes_real_chandelier_input_separately():
+    assert "ABUTRON_FP_TRAILING_READY_V1_" in EA
+    assert "APEX_FP_NATIVE_TRAILING_READY_V1" in EA
+    assert "IntegerToString((long)EnableNativeChandelierTrailing)" in EA
+    assert '(VerifiedDemoAccount()?"DEMO_VERIFIED":"UNVERIFIED")' in EA
+    assert "FP_NATIVE_BRIDGE_READY_V2" in EA
