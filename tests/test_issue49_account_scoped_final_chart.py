@@ -86,12 +86,13 @@ class Issue49(unittest.TestCase):
      patched(target_connection_id=value)
 
  def test_ambiguous_finalizer_rejected(self):
-  s=BASE.replace('  slot=("0512"', '  slot=("0512"',1)
-  s=s.replace('  slot=("0512"', '  slot=("0512"',1)
-  s=s.replace('  source=Path("/usr/local/lib/abutron-fp-demo-on-chart-v1")/slot/"chart01.chr"',
-              '  source=Path("/usr/local/lib/abutron-fp-demo-on-chart-v1")/slot/"chart01.chr"\n  source=Path("/usr/local/lib/abutron-fp-demo-on-chart-v1")/slot/"chart01.chr"')
+  anchor=('  slot=("0512" if cid=="'+CID+'" else "1636")\n'
+          '  expected="'+OLD+'"\n'
+          '  source=Path("/usr/local/lib/abutron-fp-demo-on-chart-v1")/slot/"chart01.chr"')
+  self.assertEqual(BASE.count(anchor),1)
+  doubled=BASE.replace(anchor,anchor+"\n"+anchor)
   with self.assertRaises(m.ChartOverrideError):
-   patched(s,expected_original_worker_sha256=m.sha(s))
+   patched(doubled,expected_original_worker_sha256=m.sha(doubled))
 
  def test_missing_single_writer_restager_rejected(self):
   s=BASE.replace("stage_fp0512_single_writer_release(", "broken_restager(")
