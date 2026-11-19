@@ -22,6 +22,8 @@ string gNonce="",gLogin="",gServer="",gReady="";
 int gConsecutiveFeedFailures=0;
 int gEvidenceScanOffset=0; // persisted rotating receipt cursor
 int gEvidenceEventSequence=0; // unique immutable evidence generation sequence
+// FP-only strict immutable trailing provenance; all other Option C EA uses unchanged.
+#define ABUTRON_FP_NATIVE_TRAILING_COMPAT
 #include "AdaptiveRiskProofV2.mqh"
 
 bool IsHex64(string s)
@@ -324,7 +326,7 @@ bool PortfolioCanAdd(string next_symbol)
    bool buy=side==POSITION_TYPE_BUY;
    double loss=0.0,gain=0.0;
    if(vol<=0||entry<=0||sl<=0||tp<=0 ||
-      !((buy&&sl<entry&&entry<tp)||(!buy&&tp<entry&&entry<sl)) ||
+      !((buy&&sl<tp&&entry<tp)||(!buy&&tp<sl&&tp<entry)) ||
       !OrderCalcProfit(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL,sym,vol,entry,sl,loss) ||
       !OrderCalcProfit(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL,sym,vol,entry,tp,gain) ||
       !((MathAbs(-loss-50.0)<=2.0 && MathAbs(gain-100.0)<=2.0)||
@@ -515,7 +517,7 @@ void UpdateEvidenceFor(string key,long order,long deal)
       OrderCalcProfit(side=="BUY"?ORDER_TYPE_BUY:ORDER_TYPE_SELL,sym,volume,entry,tp,gain))
    {
       loss=-loss;
-      bool geometry=((side=="BUY")?(sl<entry&&entry<tp):(tp<entry&&entry<sl));
+      bool geometry=((side=="BUY")?(sl<tp&&entry<tp):(tp<sl&&tp<entry));
       if(geometry&&((MathAbs(loss-50.0)<=2.0&&MathAbs(gain-100.0)<=2.0)||
                      OptionCVerifyOpenPosition(key,sym,side,volume,entry,sl,tp,loss,gain)))
          state="OPEN_PROTECTED";
