@@ -213,3 +213,56 @@ def test_shadow_decision_pass_preserves_hold_decision():
         owner_id="owner1", account={"equity": 10000.0})
     assert result["candidates"] == []
     assert result["candidates_generated"] == 0
+
+
+def test_shadow_uses_latest_closed_candle_not_first_warmup_bar():
+    engine = _StubEngine()
+    payload = _bars_payload(n=3)
+    # The real decision engine deduplicates symbols and evaluates the
+    # FIRST candle it receives. Make input deliberately reverse-ordered.
+    payload["bars"] = list(reversed(payload["bars"]))
+    result = run_shadow_decision_pass(
+        engine, _adapter(_FakeMgr(bars=payload)),
+        connection_id=CID, broker=BROKER, owner_id="owner1",
+        account={"equity": 10000.0})
+    latest = max(b["open_time"] for b in payload["bars"])
+    assert len(engine.evaluated) == 1
+    assert engine.evaluated[0].open_time == latest
+    assert len(engine.history[("EURUSD.r", "M5")]) == 3
+    assert result["candidates_generated"] == 0
+    assert result["broker_native_signal_certified"] is False
+
+
+def test_wrong_server_rejected_even_with_matching_connection():
+    ident = {**_identity(), "server": "FPMarketsSC-Live"}
+    with pytest.raises(MarketDataError, match="server"):
+        _adapter(_FakeMgr(identity=ident)).read()
+
+
+def test_future_identity_timestamp_rejected():
+    future = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                           time.gmtime(time.time() + 3600))
+    ident = {**_identity(), "worker_health_ts": future}
+    with pytest.raises(MarketDataError, match="future"):
+        _adapter(_FakeMgr(identity=ident)).read()
+
+
+def test_shadow_candidate_does_not_imply_broker_fill_certification():
+    class _Candidate:
+        symbol = "EURUSD.r"
+        direction = "BUY"
+        conviction = 0.8
+        reason_code = "synthetic-positive-qa-only"
+
+    class _PositiveStub(_StubEngine):
+        def run_decision_pass(self, **kwargs):
+            self.evaluated = kwargs["candles"]
+            return [_Candidate()]
+
+    result = run_shadow_decision_pass(
+        _PositiveStub(), _adapter(),
+        connection_id=CID, broker=BROKER, owner_id="owner1",
+        account={"equity": 10000.0})
+    assert result["candidates_generated"] == 1
+    assert result["broker_native_signal_certified"] is False
+    assert result["shadow_decision_evaluated"] is True
