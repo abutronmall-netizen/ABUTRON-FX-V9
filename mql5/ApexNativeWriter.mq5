@@ -40,17 +40,35 @@ string g_activation_secret = "";                // resolved at OnInit
 int OnInit()
 {
    // Terminal-level algorithmic trading permissions are managed by MT5.
-   // Verify our bundled SHA256/HMAC implementation before issuing any
-   // account-bound evidence. A compile-only pass cannot validate hash math.
-   if(HmacSha256Hex("key", "The quick brown fox jumps over the lazy dog")
-      != "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+   // Verify SHA256/HMAC against a public, non-secret known-answer vector.
+   string kat = HmacSha256Hex("key", "The quick brown fox jumps over the lazy dog");
+   if(kat != "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+   {
+      Print("ISSUE38_INIT_BLOCK_HMAC_KAT result=", kat);
       return(INIT_FAILED);
+   }
    g_activation_secret = LoadActivationSecret();
-   if(g_activation_secret == "" || InpConnectionId == "" ||
-      InpBrokerServer == "" ||
-      AccountInfoString(ACCOUNT_SERVER) != InpBrokerServer ||
-      AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO)
-      return(INIT_FAILED); // no unsigned or account-misbound exposure
+   if(g_activation_secret == "")
+   {
+      Print("ISSUE38_INIT_BLOCK_SECRET_NOT_PROVISIONED");
+      return(INIT_FAILED);
+   }
+   if(InpConnectionId == "" || InpBrokerServer == "")
+   {
+      Print("ISSUE38_INIT_BLOCK_MISSING_EA_ACCOUNT_PARAMETERS");
+      return(INIT_FAILED);
+   }
+   if(AccountInfoString(ACCOUNT_SERVER) != InpBrokerServer)
+   {
+      Print("ISSUE38_INIT_BLOCK_BROKER_SERVER_MISMATCH");
+      return(INIT_FAILED);
+   }
+   if(AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO)
+   {
+      Print("ISSUE38_INIT_BLOCK_NON_DEMO_ACCOUNT");
+      return(INIT_FAILED);
+   }
+   Print("ISSUE38_INIT_EXPOSURE_QA_READY_NO_ORDERS");
    EventSetTimer(5);                                  // export + handoff loop
    return(INIT_SUCCEEDED);
 }
@@ -576,6 +594,10 @@ string Sha256Hex(ushort &inputBytes[], int inputLen)
    if(padLen == 64) padLen = 0;
    int totalLen = inputLen + 1 + padLen + 8;
    ArrayResize(bytes, totalLen);
+   // MQL5 ArrayResize does not promise zeroed new storage. SHA-256 needs
+   // explicit 0x00 padding or the same input may hash incorrectly.
+   for(int i = inputLen + 1; i < totalLen - 8; i++)
+      bytes[i] = 0;
 
    // Length bytes MUST be masked to 8 bits each
    bytes[totalLen - 8] = (ushort)((bitLen >> 56) & 0xFF);

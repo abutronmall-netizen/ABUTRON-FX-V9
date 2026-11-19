@@ -293,3 +293,12 @@ def test_generated_probe_has_no_order_authority():
     assert "void ExportNativeData()" in generated
     assert "FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8" in generated
     assert "ACCOUNT_TRADE_MODE_DEMO" in generated
+
+def test_native_hmac_padding_explicit_zeroes():
+    source = (Path(__file__).resolve().parents[1] /
+              "mql5" / "ApexNativeWriter.mq5").read_text()
+    assert "for(int i = inputLen + 1; i < totalLen - 8; i++)" in source
+    assert "bytes[i] = 0;" in source
+    assert "ISSUE38_INIT_BLOCK_HMAC_KAT" in source
+    assert "ISSUE38_INIT_BLOCK_SECRET_NOT_PROVISIONED" in source
+    assert "ISSUE38_INIT_EXPOSURE_QA_READY_NO_ORDERS" in source
