@@ -7,6 +7,8 @@
 input bool EnableNativeDemoOrders = false;
 input bool EnableAdaptiveEquityV2 = true; // Only for versioned native requests
 input bool AdaptiveV2ReconcilerApproved = false; // OFF until native V2 lifecycle is verified
+// Separate native protective stop amendment; default OFF, DEMO-only, never an entry.
+input bool EnableNativeChandelierTrailing = false;
 
 #define DIR_BASE "ABUTRON_FP\\"
 #define DIR_RECEIPTS "ABUTRON_FP\\receipts\\"
@@ -20,6 +22,8 @@ string gNonce="",gLogin="",gServer="",gReady="";
 int gConsecutiveFeedFailures=0;
 int gEvidenceScanOffset=0; // persisted rotating receipt cursor
 int gEvidenceEventSequence=0; // unique immutable evidence generation sequence
+// FP-only strict immutable trailing provenance; all other Option C EA uses unchanged.
+#define ABUTRON_FP_NATIVE_TRAILING_COMPAT
 #include "AdaptiveRiskProofV2.mqh"
 
 bool IsHex64(string s)
@@ -105,6 +109,21 @@ void WriteReadiness()
   FileWriteString(mh,"FP_NATIVE_BRIDGE_READY_V3\r\n"+base+
     IntegerToString((long)EnableNativeDemoOrders)+"\r\n");
   FileFlush(mh);FileClose(mh);
+ }
+ // Separate native status for Issue44 stop trailing. This file does not
+ // grant permission; it exposes the exact input actually loaded by MT5.
+ // The original V2/V3 broker-entry readiness formats remain unchanged.
+ string trailReady="ABUTRON_FP_TRAILING_READY_V1_"+gNonce+".txt";
+ int th=FileOpen(trailReady,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
+ if(th!=INVALID_HANDLE)
+ {
+  string trailBody="APEX_FP_NATIVE_TRAILING_READY_V1\r\n"+
+     gNonce+"\r\n"+gLogin+"\r\n"+gServer+"\r\n"+
+     (VerifiedDemoAccount()?"DEMO_VERIFIED":"UNVERIFIED")+"\r\n"+
+     IntegerToString((long)TimeGMT())+"\r\n"+
+     IntegerToString((long)EnableNativeChandelierTrailing)+"\r\n"+
+     IntegerToString((long)EnableNativeDemoOrders)+"\r\n";
+  FileWriteString(th,trailBody);FileFlush(th);FileClose(th);
  }
  // Exact new policy marker; only the $50/$100 build emits this proof.
  // Used by the Python new-order gate; old V2 does not write this file.
@@ -322,7 +341,7 @@ bool PortfolioCanAdd(string next_symbol)
    bool buy=side==POSITION_TYPE_BUY;
    double loss=0.0,gain=0.0;
    if(vol<=0||entry<=0||sl<=0||tp<=0 ||
-      !((buy&&sl<entry&&entry<tp)||(!buy&&tp<entry&&entry<sl)) ||
+      !((buy&&sl<tp&&entry<tp)||(!buy&&tp<sl&&tp<entry)) ||
       !OrderCalcProfit(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL,sym,vol,entry,sl,loss) ||
       !OrderCalcProfit(buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL,sym,vol,entry,tp,gain) ||
       !((MathAbs(-loss-50.0)<=2.0 && MathAbs(gain-100.0)<=2.0)||
@@ -513,7 +532,7 @@ void UpdateEvidenceFor(string key,long order,long deal)
       OrderCalcProfit(side=="BUY"?ORDER_TYPE_BUY:ORDER_TYPE_SELL,sym,volume,entry,tp,gain))
    {
       loss=-loss;
-      bool geometry=((side=="BUY")?(sl<entry&&entry<tp):(tp<entry&&entry<sl));
+      bool geometry=((side=="BUY")?(sl<tp&&entry<tp):(tp<sl&&tp<entry));
       if(geometry&&((MathAbs(loss-50.0)<=2.0&&MathAbs(gain-100.0)<=2.0)||
                      OptionCVerifyOpenPosition(key,sym,side,volume,entry,sl,tp,loss,gain)))
          state="OPEN_PROTECTED";
@@ -620,6 +639,8 @@ void UpdateEvidence()
  SaveEvidenceScanOffset();
 }
 
+#include "NativeChandelierTrailingV1.mqh"
+
 int OnInit()
 {
  // V117 cold-start fix: do NOT return INIT_FAILED if the native heartbeat
@@ -678,5 +699,8 @@ void OnTimer()
  if(gConsecutiveFeedFailures>0)
     Print("APEX_V2_BROKER_FEED_RECOVERED_AFTER_",gConsecutiveFeedFailures,"_CHECKS");
  gConsecutiveFeedFailures=0;
- WriteReadiness();UpdateEvidence();HandleRequest();
+ WriteReadiness();UpdateEvidence();
+ // No trailing before independent account/nonce/heartbeat verification.
+ NativeChandelierTrailing();
+ HandleRequest();
 }

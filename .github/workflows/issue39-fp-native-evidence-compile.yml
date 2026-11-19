@@ -2,10 +2,11 @@ name: ABUTRON FP DEMO Issue39 Native Evidence Compile QA
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, fix/issue39-fp0512-native-evidence-generations]
     paths:
       - 'mql5/AbutronFPNativeOrderBridgeV101.mq5'
       - 'mql5/AdaptiveRiskProofV2.mqh'
+      - 'mql5/NativeChandelierTrailingV1.mqh'
       - '.github/workflows/issue39-fp-native-evidence-compile.yml'
   workflow_dispatch:
 
