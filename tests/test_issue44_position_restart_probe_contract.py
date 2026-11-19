@@ -111,6 +111,37 @@ class RestartNativeSnapshotContracts(unittest.TestCase):
         with self.assertRaisesRegex(m.NativeRestartEvidenceError,"DUPLICATED_BROKER_POSITION"):
             m.parse_native(b"\n".join(base)+b"\n")
 
+    def test_reconnect_zero_deals_rejected_if_before_had_history(self):
+        original="D\\t301\\t401\\t10001\\t1794990000\\t1\\t0\\t0\\tGER40\\t0.360000\\t25700.000000\\t0\\t0\\t0\\t0"
+        before=m.parse_native(export(deals=[original]))
+        after=m.parse_native(export(utc=1795000060,deals=[]))
+        with self.assertRaisesRegex(m.NativeRestartEvidenceError,"BROKER_HISTORY_NOT_REHYDRATED"):
+            m.compare(before,after)
+
+    def test_same_count_with_substituted_history_ticket_rejected(self):
+        a="D\\t301\\t401\\t10001\\t1794990000\\t1\\t0\\t0\\tGER40\\t0.360000\\t25700.000000\\t0\\t0\\t0\\t0"
+        b=a.replace("D\\t301\\t","D\\t302\\t")
+        with self.assertRaisesRegex(m.NativeRestartEvidenceError,"BROKER_HISTORY_NOT_REHYDRATED"):
+            m.compare(m.parse_native(export(deals=[a])),
+                      m.parse_native(export(utc=1795000060,deals=[b])))
+
+    def test_historical_deal_ids_preserved_after_restart(self):
+        a="D\\t301\\t401\\t10001\\t1794990000\\t1\\t0\\t0\\tGER40\\t0.360000\\t25700.000000\\t0\\t0\\t0\\t0"
+        b=a.replace("D\\t301\\t","D\\t302\\t")
+        r=m.compare(m.parse_native(export(deals=[a])),
+                    m.parse_native(export(utc=1795000060,deals=[a,b])))
+        self.assertEqual(r["historical_deals_verified_before"],1)
+        self.assertEqual(r["historical_deals_verified_after"],2)
+        self.assertIs(r["observed_history_deal_ids_preserved_after_restart"],True)
+
+    def test_native_mql_hydration_threshold_is_not_trading_authority(self):
+        source=(FILE.parents[1]/"mql5/AbutronFPPositionRestartSnapshotRO.mq5").read_text()
+        self.assertIn("MinBrokerDealsToPublish=0",source)
+        self.assertIn("dcount<MinBrokerDealsToPublish",source)
+        self.assertIn("FP_RESTART_HISTORY_HYDRATION_PENDING",source)
+        for forbidden in ("OrderSend(","OrderCheck(","TRADE_ACTION_SLTP","CTrade"):
+            self.assertNotIn(forbidden,source)
+
     def test_no_broker_mutation_capability(self):
         source=FILE.read_text()
         for forbidden in ("OrderSend(", "OrderCheck(", "TRADE_ACTION_SLTP",
