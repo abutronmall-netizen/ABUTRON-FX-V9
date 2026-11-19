@@ -1,5 +1,5 @@
 #property strict
-#property version "1.17"
+#property version "1.18"
 #property description "ABUTRON APEX account-bound FP Markets DEMO one-shot native order bridge"
 
 // Attach to an FP Markets DEMO MT5 chart in each isolated customer terminal.
@@ -11,6 +11,7 @@ input bool AdaptiveV2ReconcilerApproved = false; // OFF until native V2 lifecycl
 #define DIR_BASE "ABUTRON_FP\\"
 #define DIR_RECEIPTS "ABUTRON_FP\\receipts\\"
 #define DIR_EVIDENCE "ABUTRON_FP\\evidence\\"
+#define DIR_EVIDENCE_EVENTS "ABUTRON_FP\\evidence_events\\"
 #define REQ "ABUTRON_FP\\APEX_FP_NATIVE_ORDER_V1.req"
 #define CONSUMED "ABUTRON_FP\\APEX_FP_NATIVE_ORDER_V1.consumed"
 #define MAGIC 73113051
@@ -18,6 +19,7 @@ input bool AdaptiveV2ReconcilerApproved = false; // OFF until native V2 lifecycl
 string gNonce="",gLogin="",gServer="",gReady="";
 int gConsecutiveFeedFailures=0;
 int gEvidenceScanOffset=0; // persisted rotating receipt cursor
+int gEvidenceEventSequence=0; // unique immutable evidence generation sequence
 #include "AdaptiveRiskProofV2.mqh"
 
 bool IsHex64(string s)
@@ -419,6 +421,69 @@ void HandleRequest()
  Receipt(key,"ACK","BROKER_ORDER_ACK_POSITION_STILL_UNVERIFIED",(long)res.order,(long)res.deal);
 }
 
+// Issue #39: evidence/<key>.txt remains a MUTABLE compatibility view.
+// Before replacing it, seal old and new 19-line broker native generations
+// into unique evidence_events/<key>.<utc>.<uptime>.<counter>.txt.
+// This preserves business-state transitions for independent archival.
+string ReadExistingEvidence(string file,bool &ok)
+{
+ ok=true;
+ if(!FileIsExist(file))return "";
+ int h=FileOpen(file,FILE_READ|FILE_TXT|FILE_ANSI|FILE_SHARE_READ,0,CP_UTF8);
+ if(h==INVALID_HANDLE){ok=false;return "";}
+ string out="";
+ int count=0;
+ while(!FileIsEnding(h) && count<24)
+ {
+   out+=FileReadString(h)+"\r\n";
+   count++;
+ }
+ if(!FileIsEnding(h))ok=false;
+ FileClose(h);
+ return out;
+}
+
+// Ignore ONLY line 18 (sampling timestamp); any changed broker position,
+// stop geometry, native deal/exit, or P&L creates a new generation.
+bool SameEvidenceExceptObservedTime(string previous,string proposed)
+{
+ string a[],b[];
+ int na=StringSplit(previous,10,a),nb=StringSplit(proposed,10,b);
+ if(na!=nb||na<19||na>21)return false;
+ for(int i=0;i<na;i++)
+ {
+   StringTrimRight(a[i]);
+   StringTrimRight(b[i]);
+   if(i==17)continue;
+   if(a[i]!=b[i])return false;
+ }
+ return true;
+}
+
+bool SealEvidenceGeneration(string key,string text)
+{
+ if(!IsHex64(key)||StringLen(text)<100||StringLen(text)>4000)return false;
+ FolderCreate("ABUTRON_FP");
+ FolderCreate("ABUTRON_FP\\evidence_events");
+ for(int attempt=0;attempt<6;attempt++)
+ {
+   gEvidenceEventSequence++;
+   string name=DIR_EVIDENCE_EVENTS+key+"."+
+      IntegerToString((long)TimeGMT())+"."+
+      IntegerToString((long)GetTickCount64())+"."+
+      IntegerToString(gEvidenceEventSequence)+".txt";
+   if(FileIsExist(name))continue; // Never knowingly overwrite an event ID.
+   int h=FileOpen(name,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
+   if(h==INVALID_HANDLE)return false;
+   int written=(int)FileWriteString(h,text);
+   FileFlush(h);
+   FileClose(h);
+   if(written==StringLen(text))return true;
+   return false; // Partial write: fail closed, never claim provenance.
+ }
+ return false;
+}
+
 // Verify broker position and actual native SL/TP after accepted OrderSend.
 // The immutable receipt is not mistaken for a position or verified closure.
 void UpdateEvidenceFor(string key,long order,long deal)
@@ -472,8 +537,6 @@ void UpdateEvidenceFor(string key,long order,long deal)
  }
  string filename=DIR_EVIDENCE+key+".txt";
  if(state=="NOT_YET_VISIBLE"&&FileIsExist(filename))return;
- int f=FileOpen(filename,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
- if(f==INVALID_HANDLE)return;
  string text="APEX_FP_BROKER_POSITION_V1\r\n"+key+"\r\n"+gNonce+"\r\n"+gLogin+"\r\n"+gServer+"\r\n"+
     sym+"\r\n"+side+"\r\n"+IntegerToString(order)+"\r\n"+IntegerToString(deal)+"\r\n"+
     IntegerToString(position_id)+"\r\n"+DoubleToString(volume,8)+"\r\n"+
@@ -481,6 +544,17 @@ void UpdateEvidenceFor(string key,long order,long deal)
     DoubleToString(tp,10)+"\r\n"+DoubleToString(loss,3)+"\r\n"+
     DoubleToString(gain,3)+"\r\n"+state+"\r\n"+IntegerToString((long)TimeGMT())+"\r\n"+
     IntegerToString(exit_deal)+"\r\n";
+ bool readable=true;
+ string previous=ReadExistingEvidence(filename,readable);
+ if(!readable)return;
+ if(previous!=""&&SameEvidenceExceptObservedTime(previous,text))
+    return; // Timestamp-only heartbeat: not a new broker event.
+ if(previous!=""&&!SealEvidenceGeneration(key,previous))return;
+ if(!SealEvidenceGeneration(key,text))return;
+ // Existing consumers still read the latest state; the separate immutable
+ // event history is authoritative for evidence provenance.
+ int f=FileOpen(filename,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
+ if(f==INVALID_HANDLE)return;
  FileWriteString(f,text);FileFlush(f);FileClose(f);
 }
 
