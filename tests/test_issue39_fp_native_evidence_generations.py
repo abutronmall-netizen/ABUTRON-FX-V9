@@ -109,4 +109,4 @@ def test_append_only_generation_folder_and_bounded_original_reader():
     assert 'FolderCreate("ABUTRON_FP\\\\evidence_events")' in text
     assert "count<24" in text
     assert "if(!FileIsEnding(h))ok=false;" in text
-    assert "written==(uint)StringLen(text)" in text
+    assert "written==StringLen(text)" in text
