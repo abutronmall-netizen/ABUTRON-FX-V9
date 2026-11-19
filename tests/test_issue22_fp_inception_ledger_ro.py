@@ -37,6 +37,7 @@ def raw(balance="1030.000000",pending="0"):
 def broker():
     return {
         "schema":"synthetic.fp_history.v101","history_verified_from_mt5":True,
+        "account_masked":"••••9999",
         "broker":"FP Markets","environment":"DEMO","account_currency":"USD",
         "history_complete_within_selected_window":True,
         "orders_submitted_by_exporter":0,"pending_orders_count":0,
@@ -125,6 +126,21 @@ class InceptionLedger(unittest.TestCase):
         b["history_from_broker_time"]=FIRST+OFFSET+3600
         with self.assertRaisesRegex(m.LedgerEvidenceError,"SELECTED_WINDOW_DOES_NOT_COVER"):
             self.check(history=b)
+
+    def test_cross_account_native_history_mix_rejected(self):
+        b=broker();b["account_masked"]="••••8888"
+        with self.assertRaisesRegex(m.LedgerEvidenceError,"INDEPENDENT_BROKER_ACCOUNT_IDENTITY_MISMATCH"):
+            self.check(history=b)
+
+    def test_untrusted_broker_source_checksum_rejected(self):
+        b=broker();b["native_file_sha256"]="unknown"
+        with self.assertRaisesRegex(m.LedgerEvidenceError,"INDEPENDENT_BROKER_SOURCE_DIGEST_INVALID"):
+            self.check(history=b)
+
+    def test_last_four_mask_is_necessary_not_full_login_exposure(self):
+        result=self.check()
+        self.assertNotIn("9999999",str(result))
+        self.assertNotIn("account_suffix",result)
 
     def test_empty_account_history_not_authenticated(self):
         b=broker();b["history_verified_from_mt5"]=False
