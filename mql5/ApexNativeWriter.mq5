@@ -29,6 +29,7 @@ input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
 input long    InpActivationSeed = 0;            // activation seed (per arm)
 input string  InpActivationSecret = "";         // HMAC key (or file-provisioned)
+input bool    InpExposureOnly   = true;         // QA default: export only, NO OrderSend
 input int     InpManagedCharts  = 0;            // 0 = all charts with EA
 input double  InpRiskFraction   = 0.15;         // per-trade risk fraction (display)
 input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
@@ -52,7 +53,9 @@ void OnDeinit(const int reason)
 void OnTimer()
 {
    ExportNativeData();
-   ProcessOrderRequests();
+   // DEMO exposure QA is strictly read-only unless explicitly reconfigured.
+   if(!InpExposureOnly)
+      ProcessOrderRequests();
 }
 
 //+------------------------------------------------------------------+
