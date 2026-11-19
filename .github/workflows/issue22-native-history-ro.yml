@@ -1,0 +1,33 @@
+name: Issue22 native eight-account ledger & coverage contracts
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ops/issue22/**'
+      - 'tests/test_issue22_*'
+      - '.github/workflows/issue22-native-history-ro.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  read-only-history-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce account coverage evidence contracts without broker data
+        run: python3 -m unittest discover -s tests -p 'test_issue22_*' -v
+      - name: Compile read-only sources
+        run: python3 -m py_compile ops/issue22/fp_inception_ledger_ro.py ops/issue22/eight_native_accounts_ro.py
+      - name: Reject order-send interfaces inside evidence parsers
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -nE 'OrderSend\(|TRADE_ACTION_(DEAL|SLTP)|subprocess\.(run|Popen)|systemctl (stop|restart)' ops/issue22/*.py; then
+            echo 'Broker or system mutation interfaces forbidden in issue22 auditors'
+            exit 1
+          fi
+          echo 'Issue22 audit sources contain no native order or service mutation interfaces.'
