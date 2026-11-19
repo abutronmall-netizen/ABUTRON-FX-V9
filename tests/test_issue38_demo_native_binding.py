@@ -146,6 +146,87 @@ def test_rollback_fails_closed_when_no_backup(tmp_path):
         mgr.rollback_demo_writer_qa(data_dir=str(d))
 
 
+def test_stage_rejects_symlinked_backup_dir(tmp_path):
+    """A symlinked .backup directory is rejected (no write outside staging)."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    stage(mgr, d, ea, digest)
+    # First replacement creates the real .backup directory.
+    ea.write_bytes(b"MZnew-SYNTHETIC-binary-v2")
+    new_digest = hashlib.sha256(ea.read_bytes()).hexdigest()
+    stage(mgr, d, ea, new_digest, allow_replace=True)
+    # Replace .backup with a symlink pointing outside the staging dir.
+    backup_dir = d / "MQL5" / "Experts" / "ABUTRON-PR37-QA" / ".backup"
+    outside = tmp_path / "outside_backup"
+    outside.mkdir()
+    for f in backup_dir.iterdir():
+        f.unlink()
+    backup_dir.rmdir()
+    backup_dir.symlink_to(outside, target_is_directory=True)
+    # A further replacement must reject the symlinked backup dir.
+    ea.write_bytes(b"MZnew-SYNTHETIC-binary-v3")
+    new_digest2 = hashlib.sha256(ea.read_bytes()).hexdigest()
+    with pytest.raises(Mt5Error, match="cannot be a symlink"):
+        stage(mgr, d, ea, new_digest2, allow_replace=True)
+    assert not list(outside.iterdir()), "must not write through symlink"
+
+
+def test_rollback_rejects_symlinked_backup_file(tmp_path):
+    """A symlinked .bak file is rejected; rollback fails closed."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    stage(mgr, d, ea, digest)
+    ea.write_bytes(b"MZnew-SYNTHETIC-binary-v2")
+    new_digest = hashlib.sha256(ea.read_bytes()).hexdigest()
+    stage(mgr, d, ea, new_digest, allow_replace=True)
+    # Replace the backup with a symlink to an unrelated file.
+    backup_dir = d / "MQL5" / "Experts" / "ABUTRON-PR37-QA" / ".backup"
+    bak = next(backup_dir.glob("*.bak"))
+    elsewhere = tmp_path / "elsewhere.bin"
+    elsewhere.write_bytes(b"EVIL")
+    bak.unlink()
+    bak.symlink_to(elsewhere)
+    with pytest.raises(Mt5Error, match="symlink"):
+        mgr.rollback_demo_writer_qa(data_dir=str(d))
+
+
+def test_rollback_rejects_corrupt_backup(tmp_path):
+    """A backup whose content does not match its SHA name is rejected."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    stage(mgr, d, ea, digest)
+    ea.write_bytes(b"MZnew-SYNTHETIC-binary-v2")
+    new_digest = hashlib.sha256(ea.read_bytes()).hexdigest()
+    stage(mgr, d, ea, new_digest, allow_replace=True)
+    # Tamper with the backup content so it no longer matches its name.
+    backup_dir = d / "MQL5" / "Experts" / "ABUTRON-PR37-QA" / ".backup"
+    bak = next(backup_dir.glob("*.bak"))
+    bak.write_bytes(b"CORRUPTED_BYTES")
+    with pytest.raises(Mt5Error, match="does not match"):
+        mgr.rollback_demo_writer_qa(data_dir=str(d))
+
+
+def test_backup_names_are_content_sha_bound_no_collision(tmp_path):
+    """Repeated replacements produce distinct content-SHA-bound backup names."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    stage(mgr, d, ea, digest)
+    backup_dir = d / "MQL5" / "Experts" / "ABUTRON-PR37-QA" / ".backup"
+    # Two distinct replacements -> two distinct backup names.
+    for i in range(2):
+        ea.write_bytes(f"MZversion-{i}-SYNTHETIC".encode())
+        dig = hashlib.sha256(ea.read_bytes()).hexdigest()
+        stage(mgr, d, ea, dig, allow_replace=True)
+    backups = sorted(backup_dir.glob("*.bak"))
+    assert len(backups) == 2, "each distinct content gets its own backup name"
+    names = {b.name for b in backups}
+    assert len(names) == 2, "backup names must be unique per content"
+
+
 @pytest.mark.parametrize("missing", ["Files", "Experts"])
 def test_missing_mt5_data_folder_is_not_created(tmp_path, missing):
     d = terminal_dir(tmp_path)

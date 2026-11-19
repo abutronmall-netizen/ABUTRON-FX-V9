@@ -228,19 +228,18 @@ class Mt5TerminalManager:
             if not allow_replace:
                 raise Mt5Error("different native writer already staged: refuse overwrite")
             # Backup+rollback discipline (Issue #38 criterion 2): preserve the
-            # current known-good binary under a timestamped backup before
-            # replacing it, so the prior artifact can be restored.
-            os.makedirs(backup_dir, exist_ok=True)
-            ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-            backup_path = os.path.join(backup_dir,
-                                       f"ApexNativeWriter.ex5.{ts}.bak")
-            if os.path.lexists(backup_path):
-                raise Mt5Error("backup collision; refusing to overwrite backup")
-            shutil.copy2(dest, backup_path)
-            try:
-                os.chmod(backup_path, 0o640)
-            except OSError:
-                pass
+            # current known-good binary under a content-SHA-bound backup name
+            # before replacing it. The name embeds the backup's own SHA-256,
+            # so it is inherently collision-free (different content -> different
+            # name) and rollback can verify the bytes match the name.
+            # Reject a symlinked .backup directory before writing into it.
+            if os.path.lexists(backup_dir) and os.path.islink(backup_dir):
+                raise Mt5Error("backup directory cannot be a symlink")
+            os.makedirs(backup_dir, mode=0o750, exist_ok=True)
+            if os.path.islink(backup_dir):
+                raise Mt5Error("backup directory cannot be a symlink")
+            backup_path = self._write_backup_atomic(
+                backup_dir, dest, existing, files_dir)
         # Atomic install; no chart/profile/Files changes or order activation.
         import tempfile
         fd, tmp = tempfile.mkstemp(prefix=".ApexNativeWriter.", dir=destdir)
@@ -263,7 +262,7 @@ class Mt5TerminalManager:
             # prior binary so the terminal is never left without a writer.
             if os.path.lexists(dest) and backup_path:
                 try:
-                    shutil.copy2(backup_path, dest)
+                    self._atomic_install(backup_path, dest, files_dir)
                 except OSError:
                     pass
             raise
@@ -272,29 +271,110 @@ class Mt5TerminalManager:
                 os.unlink(tmp)
         return dest
 
+    @staticmethod
+    def _write_backup_atomic(backup_dir: str, src: str,
+                             content_sha: str, files_dir: str) -> str:
+        """Write a verified, fsync'd backup under a content-SHA-bound name.
+
+        The backup filename is ``ApexNativeWriter.ex5.<sha256>.bak`` so the
+        name encodes the exact content. Writes via a temp file + fsync +
+        atomic rename inside backup_dir; never follows symlinks.
+        """
+        backup_path = os.path.join(
+            backup_dir, f"ApexNativeWriter.ex5.{content_sha}.bak")
+        if os.path.lexists(backup_path):
+            if os.path.islink(backup_path) or not os.path.isfile(backup_path):
+                raise Mt5Error("backup path is a symlink or non-file")
+            with open(backup_path, "rb") as fh:
+                if hashlib.sha256(fh.read()).hexdigest() != content_sha:
+                    raise Mt5Error("existing backup name does not match content")
+            return backup_path
+        import tempfile
+        fd, tmp = tempfile.mkstemp(prefix=".ApexNativeWriter.",
+                                   dir=backup_dir)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                with open(src, "rb") as inp:
+                    shutil.copyfileobj(inp, out)
+                out.flush()
+                os.fsync(out.fileno())
+            st = os.stat(files_dir)
+            if os.geteuid() == 0:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            elif os.geteuid() != st.st_uid:
+                raise Mt5Error("stage as the MT5 data owner or root only")
+            os.chmod(tmp, 0o640)
+            os.replace(tmp, backup_path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        return backup_path
+
+    @staticmethod
+    def _atomic_install(src: str, dest: str, files_dir: str) -> None:
+        """Atomically install src over dest with correct owner/mode."""
+        import tempfile
+        destdir = os.path.dirname(dest)
+        fd, tmp = tempfile.mkstemp(prefix=".ApexNativeWriter.", dir=destdir)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                with open(src, "rb") as inp:
+                    shutil.copyfileobj(inp, out)
+                out.flush()
+                os.fsync(out.fileno())
+            st = os.stat(files_dir)
+            if os.geteuid() == 0:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            elif os.geteuid() != st.st_uid:
+                raise Mt5Error("stage as the MT5 data owner or root only")
+            os.chmod(tmp, 0o640)
+            os.replace(tmp, dest)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
     def rollback_demo_writer_qa(self, *, data_dir: str) -> str:
-        """Restore the most recent backup of a staged DEMO writer binary.
+        """Restore the most recent verified backup of a staged DEMO writer.
 
         Issue #38 criterion 2 backup+rollback discipline: reverts
         ``MQL5/Experts/ABUTRON-PR37-QA/ApexNativeWriter.ex5`` to the
-        newest timestamped ``.backup/`` artifact. Fails closed if no
-        backup exists or the current binary cannot be identified.
+        newest valid ``.backup/`` artifact. Fail-closed: rejects symlinked
+        backup directories, symlinked/corrupt backup files (name SHA must
+        match content SHA), missing backups, and installs via atomic
+        replace (never a bare copy over the staged file).
         """
         files_dir, experts_dir = self._validated_terminal_data_dir(data_dir)
-        dest = os.path.join(experts_dir, "ABUTRON-PR37-QA",
-                            "ApexNativeWriter.ex5")
-        backup_dir = os.path.join(experts_dir, "ABUTRON-PR37-QA", ".backup")
-        if not os.path.isdir(backup_dir):
+        qa_dir = os.path.join(experts_dir, "ABUTRON-PR37-QA")
+        dest = os.path.join(qa_dir, "ApexNativeWriter.ex5")
+        backup_dir = os.path.join(qa_dir, ".backup")
+        if not os.path.isdir(backup_dir) or os.path.islink(backup_dir):
             raise Mt5Error("no backup directory; nothing to roll back to")
-        backups = [os.path.join(backup_dir, f) for f in os.listdir(backup_dir)
-                   if f.endswith(".bak") and os.path.isfile(
-                       os.path.join(backup_dir, f))]
+        # Enumerate only real regular-file backups (never follow symlinks),
+        # and verify each backup's content matches the SHA in its filename.
+        backups: list[str] = []
+        for entry in os.listdir(backup_dir):
+            if not entry.endswith(".bak"):
+                continue
+            bpath = os.path.join(backup_dir, entry)
+            if os.path.islink(bpath) or not os.path.isfile(bpath):
+                raise Mt5Error(f"backup {entry} is a symlink or non-file")
+            # Filename is ApexNativeWriter.ex5.<sha256>.bak
+            stem = entry[:-len(".bak")]
+            sha_part = stem.rsplit(".", 1)[-1]
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", sha_part):
+                raise Mt5Error(f"backup {entry} has malformed content-SHA name")
+            with open(bpath, "rb") as fh:
+                actual = hashlib.sha256(fh.read()).hexdigest()
+            if actual.lower() != sha_part.lower():
+                raise Mt5Error(
+                    f"backup {entry} content does not match its SHA name")
+            backups.append(bpath)
         if not backups:
-            raise Mt5Error("no writer backups present; nothing to roll back to")
+            raise Mt5Error("no valid writer backups present; nothing to roll back to")
         latest = max(backups, key=os.path.getmtime)
         if not os.path.isfile(dest) or os.path.islink(dest):
             raise Mt5Error("current staged writer is missing or a symlink")
-        shutil.copy2(latest, dest)
+        self._atomic_install(latest, dest, files_dir)
         return dest
 
     def mark_native_authenticated(self, connection_id: str,
