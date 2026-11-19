@@ -363,6 +363,12 @@ def test_shadow_candidate_does_not_imply_broker_fill_certification():
         direction = "BUY"
         conviction = 0.8
         reason_code = "synthetic-positive-qa-only"
+        candidate_id = "qa-decision-id"
+        price = 1.1001
+        stop_loss = 1.0990
+        take_profit = 1.1023
+        volume = 0.6
+        risk_fraction = 0.6
 
     class _PositiveStub(_StubEngine):
         def run_decision_pass(self, **kwargs):
@@ -374,6 +380,8 @@ def test_shadow_candidate_does_not_imply_broker_fill_certification():
         connection_id=CID, broker=BROKER, owner_id="owner1",
         account={"equity": 10000.0})
     assert result["candidates_generated"] == 1
+    assert result["candidates"][0]["risk_fraction"] == 0.6
+    assert result["candidates"][0]["stop_loss"] == 1.0990
     assert result["broker_native_signal_certified"] is False
     assert result["shadow_decision_evaluated"] is True
 

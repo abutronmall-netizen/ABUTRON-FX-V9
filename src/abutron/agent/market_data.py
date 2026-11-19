@@ -383,6 +383,12 @@ def run_shadow_decision_pass(
                 "direction": c.direction,
                 "conviction": c.conviction,
                 "reason_code": c.reason_code,
+                "candidate_id": c.candidate_id,
+                "price": c.price,
+                "stop_loss": c.stop_loss,
+                "take_profit": c.take_profit,
+                "model_quantity_raw": c.volume,
+                "risk_fraction": c.risk_fraction,
             }
             for c in candidates
         ],
