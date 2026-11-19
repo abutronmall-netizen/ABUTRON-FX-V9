@@ -195,7 +195,7 @@ class Mt5TerminalManager:
                      after.st_size)):
                 raise Mt5Error("QA file changed during read")
             if expected_sha and hashlib.sha256(raw).hexdigest() != expected_sha:
-                raise Mt5Error("QA backup hash mismatch")
+                raise Mt5Error("QA backup content does not match expected SHA")
             return raw
         finally:
             os.close(fd)
