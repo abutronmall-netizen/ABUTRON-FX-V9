@@ -7,6 +7,8 @@
 input bool EnableNativeDemoOrders = false;
 input bool EnableAdaptiveEquityV2 = true; // Only for versioned native requests
 input bool AdaptiveV2ReconcilerApproved = false; // OFF until native V2 lifecycle is verified
+// Separate native protective stop amendment; default OFF, DEMO-only, never an entry.
+input bool EnableNativeChandelierTrailing = false;
 
 #define DIR_BASE "ABUTRON_FP\\"
 #define DIR_RECEIPTS "ABUTRON_FP\\receipts\\"
@@ -620,6 +622,8 @@ void UpdateEvidence()
  SaveEvidenceScanOffset();
 }
 
+#include "NativeChandelierTrailingV1.mqh"
+
 int OnInit()
 {
  // V117 cold-start fix: do NOT return INIT_FAILED if the native heartbeat
@@ -678,5 +682,8 @@ void OnTimer()
  if(gConsecutiveFeedFailures>0)
     Print("APEX_V2_BROKER_FEED_RECOVERED_AFTER_",gConsecutiveFeedFailures,"_CHECKS");
  gConsecutiveFeedFailures=0;
- WriteReadiness();UpdateEvidence();HandleRequest();
+ WriteReadiness();UpdateEvidence();
+ // No trailing before independent account/nonce/heartbeat verification.
+ NativeChandelierTrailing();
+ HandleRequest();
 }
