@@ -167,10 +167,12 @@ def test_adapter_parses_real_tab_delimited_format(tmp_path):
     from abutron.feeds.mt5_terminal import Mt5TerminalManager
     import types
 
-    bars_file = tmp_path / "ABUTRON_NATIVE_BARS_V2_test.txt"
-    ident_file = tmp_path / "ABUTRON_NATIVE_ACCOUNT_V2_test.txt"
-    quotes_file = tmp_path / "ABUTRON_NATIVE_QUOTES_V2_test.txt"
-    nonce = _current_nonce()
+    # The real deployed legacy writer uses a stable opaque 32-character
+    # nonce; all three export filenames must carry this exact nonce.
+    nonce = "a" * 32
+    bars_file = tmp_path / f"ABUTRON_NATIVE_BARS_V2_{nonce}.txt"
+    ident_file = tmp_path / f"ABUTRON_NATIVE_ACCOUNT_V2_{nonce}.txt"
+    quotes_file = tmp_path / f"ABUTRON_NATIVE_QUOTES_V2_{nonce}.txt"
     bars_file.write_text(_tab_delimited_bars(nonce=nonce))
     ident_file.write_text(_text_identity(nonce=nonce))
     quotes_file.write_text('{"quotes":[{"symbol":"EURUSD.r",'
@@ -185,10 +187,10 @@ def test_adapter_parses_real_tab_delimited_format(tmp_path):
     mgr = Mt5TerminalManager()
     mgr._terminals[CID] = term
 
-    # The text-format identity has no server field, so set the expected
-    # server to empty to match.
+    # The legacy source has no server field; the DEMO terminal registration
+    # must still carry an independent required server binding.
     adapter = BrokerNativeMarketDataAdapter(
-        mgr, connection_id=CID, broker=BROKER, login=LOGIN, server="")
+        mgr, connection_id=CID, broker=BROKER, login=LOGIN, server=SERVER)
     md = adapter.read()
     assert md.candle_count >= 1
     assert md.quote_count >= 1
@@ -464,3 +466,52 @@ class _NativeParserTests:
         mgr._terminals[CID] = term
         export = mgr.read_native_export(CID)
         assert export is None  # nonce mismatch
+
+
+
+def test_real_opaque_nonce_never_reinterpreted_as_timestamp(tmp_path):
+    from abutron.feeds.mt5_terminal import Mt5TerminalManager
+    nonce = "e" * 32
+    p = tmp_path / "ABUTRON_NATIVE_ACCOUNT_V2_x.txt"
+    p.write_text(_text_identity(nonce=nonce))
+    parsed = Mt5TerminalManager._parse_identity_file(str(p))
+    assert parsed["nonce"] == nonce
+    assert parsed["connection_id"] == ""
+    assert parsed["_legacy_text_unattested"] is True
+    assert parsed["worker_health_ts"].endswith("Z")
+
+
+def test_native_quote_spread_is_a_price_distance_not_points():
+    q = _adapter().read().quotes[0]
+    assert q.spread == pytest.approx(q.ask - q.bid)
+    assert q.spread_in_points() < 100
+
+
+@pytest.mark.parametrize("bad_bid,bad_ask", [
+    (float("nan"), 1.01), (1.05, 1.01),
+    (float("inf"), float("inf")),
+])
+def test_quote_rejects_nan_inf_crossed_market(bad_bid, bad_ask):
+    q = _quotes_payload()
+    q["quotes"][0].update(bid=bad_bid, ask=bad_ask)
+    with pytest.raises(MarketDataError, match="invalid bid/ask"):
+        _adapter(_FakeMgr(quotes=q)).read()
+
+
+def test_native_files_must_share_same_nonce_across_three_sources(tmp_path):
+    from abutron.feeds.mt5_terminal import Mt5TerminalManager
+    from types import SimpleNamespace
+    nonce = "f" * 32
+    idp = tmp_path / f"ABUTRON_NATIVE_ACCOUNT_V2_{nonce}.txt"
+    barp = tmp_path / f"ABUTRON_NATIVE_BARS_V2_{nonce}.txt"
+    qp = tmp_path / f"ABUTRON_NATIVE_QUOTES_V2_{nonce}.txt"
+    idp.write_text(_text_identity(nonce=nonce))
+    barp.write_text(_tab_delimited_bars(nonce=nonce))
+    qp.write_text(json.dumps(_quotes_payload()))
+    m = Mt5TerminalManager()
+    m._terminals[CID] = SimpleNamespace(
+        export_dir=str(tmp_path), is_running=True,
+        external_evidence_only=False)
+    assert m.read_native_export_full(CID) is not None
+    qp.rename(tmp_path / f"ABUTRON_NATIVE_QUOTES_V2_{'b'*32}.txt")
+    assert m.read_native_export_full(CID) is None

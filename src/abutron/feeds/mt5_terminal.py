@@ -487,7 +487,8 @@ class Mt5TerminalManager:
         """Return the live terminal for a connection, or None."""
         return self._terminals.get(connection_id)
 
-    def read_native_export(self, connection_id: str) -> Optional[Dict]:
+    def read_native_export(self, connection_id: str,
+                           required_nonce: Optional[str] = None) -> Optional[Dict]:
         """Read the latest native export (bars + identity) from MQL5/Files.
 
         Supports both the JSON format (ApexNativeWriter) and the real
@@ -510,8 +511,18 @@ class Mt5TerminalManager:
                                      "ABUTRON_NATIVE_ACCOUNT_V2_*.txt")
         bars_file = os.path.join(term.export_dir,
                                  "ABUTRON_NATIVE_BARS_V2_*.txt")
-        ident_path = _latest_match(identity_file)
-        bars_path = _latest_match(bars_file)
+        if required_nonce is not None:
+            # Latest file may belong to the next incomplete timer cycle.
+            # Pair the exact nonce from the latest complete quote snapshot.
+            if not required_nonce or "/" in required_nonce or "\\" in required_nonce:
+                return None
+            ident_path = identity_file.replace("*", required_nonce)
+            bars_path = bars_file.replace("*", required_nonce)
+            if not (os.path.isfile(ident_path) and os.path.isfile(bars_path)):
+                return None
+        else:
+            ident_path = _latest_match(identity_file)
+            bars_path = _latest_match(bars_file)
         if not ident_path or not bars_path:
             return None
 
@@ -527,8 +538,24 @@ class Mt5TerminalManager:
 
         # --- Nonce pairing: bars nonce must match identity nonce ----
         bars_nonce = bars_raw.get("_nonce", "")
-        if bars_nonce and identity.get("nonce") and bars_nonce != identity["nonce"]:
+        ident_nonce = str(identity.get("nonce") or "")
+        if not ident_nonce:
             return None
+        # Pair all formats to the same native export cycle.  JSON bar
+        # payloads omit nonce; their filename carries it.
+        bars_nonce = bars_nonce or os.path.basename(bars_path).split(
+            "ABUTRON_NATIVE_BARS_V2_", 1)[-1].removesuffix(".txt")
+        ident_file_nonce = os.path.basename(ident_path).split(
+            "ABUTRON_NATIVE_ACCOUNT_V2_", 1)[-1].removesuffix(".txt")
+        if not (bars_nonce == ident_nonce == ident_file_nonce):
+            return None
+        if any(os.path.islink(f) for f in (ident_path, bars_path)):
+            return None
+        if max(time.time() - os.stat(f).st_mtime for f in
+               (ident_path, bars_path)) > 180:
+            return None
+        identity["_native_file_mtime"] = min(
+            os.stat(ident_path).st_mtime, os.stat(bars_path).st_mtime)
 
         return {
             "identity": identity,
@@ -556,9 +583,17 @@ class Mt5TerminalManager:
         if not q_path:
             return None
         try:
-            data = json.loads(open(q_path).read())
-            if "quotes" in data:
+            if os.path.islink(q_path) or os.stat(q_path).st_size > 1000000:
+                return None
+            if time.time() - os.stat(q_path).st_mtime > 180:
+                return None
+            with open(q_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("quotes"), list):
                 data["_file"] = q_path
+                data["_nonce"] = os.path.basename(q_path).split(
+                    "ABUTRON_NATIVE_QUOTES_V2_", 1)[-1].removesuffix(".txt")
+                data["_native_file_mtime"] = os.stat(q_path).st_mtime
                 return data
         except (ValueError, OSError):
             pass
@@ -570,10 +605,22 @@ class Mt5TerminalManager:
         Combines :meth:`read_native_export` and :meth:`read_native_quotes`.
         Quotes may be None (the adapter decides how to handle them).
         """
-        export = self.read_native_export(connection_id)
+        quotes = self.read_native_quotes(connection_id)
+        # Use the latest *complete* cycle. The writer publishes identity,
+        # then bars, then quotes; latest identity may belong to an
+        # incomplete newer cycle and must not be mixed with prior quotes.
+        export = self.read_native_export(
+            connection_id,
+            required_nonce=quotes["_nonce"] if quotes is not None else None)
         if export is None:
             return None
-        quotes = self.read_native_quotes(connection_id)
+        # Refuse a quote file from a different account/export cycle.
+        if quotes is not None:
+            if quotes.get("_nonce") != export["identity"].get("nonce"):
+                return None
+            if abs(quotes["_native_file_mtime"] -
+                   export["identity"]["_native_file_mtime"]) > 120:
+                return None
         export["quotes"] = quotes
         return export
 
@@ -584,6 +631,13 @@ class Mt5TerminalManager:
         try:
             data = json.loads(open(path).read())
             if isinstance(data, dict) and "connection_id" in data:
+                # MQL5 TimeToString is broker-server wall time, not UTC.
+                # For read-only shadow freshness use the local native file's
+                # observed mtime; do not mislabel server time as UTC.
+                hb = data.get("worker_health_ts", "")
+                if isinstance(hb, str) and "." in hb and "T" not in hb:
+                    data["_broker_wall_clock"] = hb
+                    data["worker_health_ts"] = _mtime_iso(path)
                 return data
         except (ValueError, OSError):
             pass
@@ -613,20 +667,12 @@ class Mt5TerminalManager:
             fields["equity"] = float(fields["equity"])
         except (ValueError, TypeError):
             return None
-        # Derive connection_id, challenge, heartbeat from the nonce.
-        # Nonce format: ABUTRON_NATIVE_<login>_<unix_ts>
-        parts = fields["nonce"].split("_")
-        if len(parts) >= 3:
-            fields["connection_id"] = parts[-2]
-            try:
-                ts = int(parts[-1])
-                fields["worker_health_ts"] = time.strftime(
-                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
-            except (ValueError, TypeError):
-                fields["worker_health_ts"] = ""
-        else:
-            fields["connection_id"] = ""
-            fields["worker_health_ts"] = ""
+        # Legacy Deriv nonce is an opaque 32-char token, NOT a clock.
+        # File mtime is an observation timestamp, not a broker signature.
+        # The external terminal binding supplies CID/broker/server.
+        fields["connection_id"] = ""
+        fields["worker_health_ts"] = _mtime_iso(path)
+        fields["_legacy_text_unattested"] = True
         fields["broker"] = "native"
         fields["server"] = ""
         fields["challenge"] = ""
@@ -673,11 +719,16 @@ class Mt5TerminalManager:
                 close = float(parts[6])
             except (ValueError, TypeError):
                 continue  # skip malformed rows
+            tf_sec = {"M5": 300}.get(timeframe)
+            # The decision adapter uses M5 exclusively. Keep other
+            # original native timeframe rows outside this contract.
+            if tf_sec is None or bar_open_epoch <= 0:
+                continue
             bars.append({
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "open_time": _epoch_to_iso(bar_open_epoch),
-                "close_time": _epoch_to_iso(bar_open_epoch + 300),
+                "close_time": _epoch_to_iso(bar_open_epoch + tf_sec),
                 "open": open_p,
                 "high": high,
                 "low": low,
@@ -688,7 +739,7 @@ class Mt5TerminalManager:
                 "spread": 0.0,
                 "tick_size": 0.0,
                 "point": 0.0,
-                "closed": True,
+                "closed": bar_open_epoch + tf_sec <= time.time(),
             })
         if not bars:
             return None
@@ -801,6 +852,12 @@ def _latest_match(pattern: str) -> Optional[str]:
 def _epoch_to_iso(epoch: int) -> str:
     """Convert a unix epoch (seconds) to an ISO-8601 UTC string."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _mtime_iso(path: str) -> str:
+    """Trusted host observation timestamp; does not certify broker clock."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                         time.gmtime(os.stat(path).st_mtime))
 
 
 # Singleton

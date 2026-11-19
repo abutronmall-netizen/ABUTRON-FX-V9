@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -124,20 +125,29 @@ class BrokerNativeMarketDataAdapter:
             # and only fail on real mismatches (login, broker, nonce).
             text_format = "schema" in identity
             if text_format:
-                real_errors = [
-                    e for e in errors
-                    if e not in ("EXPORT_CONNECTION_MISMATCH",
-                                 "EXPORT_CHALLENGE_MISSING",
-                                 "EXPORT_HEARTBEAT_MISSING")
-                ]
-                if real_errors:
+                if identity.get("broker") != "native" or not self.server:
                     raise MarketDataError(
-                        f"native export envelope invalid for {cid}: "
-                        + ", ".join(real_errors))
+                        "legacy text requires registered broker/server binding")
+                # Legacy text lacks CID/server/challenge and has an opaque
+                # nonce. Bind using the explicitly registered DEMO terminal,
+                # its login and the session-paired file names; shadow only.
+                allowed = {"EXPORT_CONNECTION_MISMATCH",
+                           "EXPORT_CHALLENGE_MISSING",
+                           "EXPORT_BROKER_MISMATCH"}
+                real_errors = [e for e in errors if e not in allowed]
+            elif (identity.get("broker") == "native" and
+                  self.broker.lower() in ("deriv", "fpmarkets") and
+                  bool(self.server) and identity.get("server") == self.server):
+                # ApexNativeWriter uses "native" as a protocol marker;
+                # the DEMO broker/server is pinned independently.
+                real_errors = [e for e in errors
+                               if e != "EXPORT_BROKER_MISMATCH"]
             else:
+                real_errors = errors
+            if real_errors:
                 raise MarketDataError(
                     f"native export envelope invalid for {cid}: "
-                    + ", ".join(errors))
+                    + ", ".join(real_errors))
 
         # Server binding: enforce when both the export and the adapter
         # declare a server. Text-format identities (Deriv MT5 writer)
@@ -152,17 +162,25 @@ class BrokerNativeMarketDataAdapter:
         # Freshness check: reject stale sources by heartbeat timestamp.
         # The identity heartbeat is the authoritative source timestamp.
         hb_raw = identity.get("worker_health_ts", "")
-        export_ts = _parse_health_ts(hb_raw)
-        if export_ts <= 0 or export_ts > time.time() + 5:
+        export_ts = float(identity.get("_native_file_mtime") or
+                          _parse_health_ts(hb_raw))
+        if (not math.isfinite(export_ts) or export_ts <= 0 or
+            export_ts > time.time() + 5):
             raise MarketDataError("native export heartbeat invalid or future")
+        if time.time() - export_ts > self.max_stale_seconds:
+            raise MarketDataError("native export heartbeat stale")
         if since is not None and export_ts < since:
             raise MarketDataError(
                 f"native M5 export stale for {cid}: "
                 f"heartbeat older than run start")
 
         # Parse bars into Candles.
+        # Legacy bar exporters contain M1/M15/H1/H4/D1 as well as M5.
+        # Only completed native M5 bars belong in this decision pass.
+        m5_raw = {"bars": [r for r in bars_raw.get("bars", [])
+                           if r.get("timeframe") == "M5"]}
         candles = normalize_native_bars(
-            bars_raw, connection_id=cid, login=self.login, broker=self.broker)
+            m5_raw, connection_id=cid, login=self.login, broker=self.broker)
 
         # Validate candles: all closed, non-empty, sufficient bars.
         self._validate_candles(candles, cid)
@@ -199,10 +217,13 @@ class BrokerNativeMarketDataAdapter:
         """Reject open candles, incomplete bars and missing feature windows."""
         if not candles:
             raise MarketDataError(f"no candles in native export for {cid}")
-        if len(candles) < self.min_bars:
+        per_symbol = {}
+        for c in candles:
+            per_symbol[c.symbol] = per_symbol.get(c.symbol, 0) + 1
+        if any(count < self.min_bars for count in per_symbol.values()):
             raise MarketDataError(
-                f"insufficient closed M5 bars for {cid}: "
-                f"{len(candles)} < min {self.min_bars}")
+                f"insufficient closed M5 bars per symbol for {cid}: "
+                f"minimum {self.min_bars}")
         open_candles = [c for c in candles if not c.closed]
         if open_candles:
             raise MarketDataError(
@@ -253,13 +274,19 @@ class BrokerNativeMarketDataAdapter:
             q = snap_by_symbol[symbol]
             bid = float(q.get("bid", 0))
             ask = float(q.get("ask", 0))
-            if bid <= 0 or ask <= 0:
-                raise MarketDataError(
-                    f"invalid bid/ask in quote snapshot for {cid}: "
-                    f"{symbol}")
-            spread = float(q.get("spread", 0)) or (ask - bid)
             tick_size = float(q.get("tick_size", 0))
             point = float(q.get("point", 0))
+            if (not all(math.isfinite(v) for v in
+                        (bid, ask, tick_size, point)) or
+                bid <= 0 or ask < bid or ask <= 0 or
+                tick_size <= 0 or point <= 0):
+                raise MarketDataError(
+                    f"invalid bid/ask or tick geometry in quote snapshot "
+                    f"for {cid}: {symbol}")
+            # The MQL5 writer exports spread in *points* (int); the Quote
+            # contract requires price distance. Derive from real bid/ask,
+            # never from candle OHLC or arbitrary synthetic prices.
+            spread = ask - bid
             observed_at = q.get("observed_at", "")
             quotes.append(Quote(
                 symbol=symbol,
