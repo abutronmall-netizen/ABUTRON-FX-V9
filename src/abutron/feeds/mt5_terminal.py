@@ -260,7 +260,18 @@ class Mt5TerminalManager:
         import secrets
         Mt5TerminalManager._qa_backup_directory(backup_dir)
         source = Mt5TerminalManager._qa_read_checked(src, expected_sha=old_sha)
-        ident = f"{time.time_ns()}.{secrets.token_hex(8)}"
+        # Sequence numbers never go backwards even if the host clock moves.
+        # A random suffix makes a concurrent collision fail safely under
+        # O_EXCL rather than overwriting an existing backup.
+        prior = []
+        for candidate in os.listdir(backup_dir):
+            match = re.fullmatch(
+                r"ApexNativeWriter\.ex5\.(\d{19,22})\.[0-9a-f]{16}\."
+                r"[0-9a-f]{64}\.[0-9a-f]{64}\.bak", candidate)
+            if match:
+                prior.append(int(match.group(1)))
+        sequence = max(time.time_ns(), max(prior, default=0) + 1)
+        ident = f"{sequence}.{secrets.token_hex(8)}"
         path = os.path.join(
             backup_dir, f"ApexNativeWriter.ex5.{ident}.{old_sha}.{new_sha}.bak")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
