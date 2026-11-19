@@ -231,6 +231,14 @@ def emit(output:Path,report:dict)->None:
     finally:
         if os.path.lexists(tmp):os.unlink(tmp)
 
+def safe_error_code(exc:Exception)->str:
+    """Expose only predeclared source/risk code, never private paths or data."""
+    if isinstance(exc,ReleaseEvidenceError):
+        reason=str(exc)
+        if 1<=len(reason)<=100 and all(ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for ch in reason):
+            return reason
+    return "REVIEW_"+type(exc).__name__.upper()
+
 def main()->None:
     ap=argparse.ArgumentParser()
     ap.add_argument("--config",required=True)
@@ -242,7 +250,7 @@ def main()->None:
         report={"schema":"abutron.issue44.fp_demo_sha_pinned_readonly_release_review.v1",
                 "checked_at_utc":dt.datetime.now(dt.timezone.utc).isoformat(),
                 "status":"RELEASE_PROMOTION_INHIBITED",
-                "inhibitors":["PRECHECK_INVALID_"+type(exc).__name__],
+                "inhibitors":["PRECHECK_INVALID_"+safe_error_code(exc)],
                 "production_promoted":False,
                 "broker_trailing_sltp_amendment_certified":False,
                 "new_order_execution_authorized":False,
