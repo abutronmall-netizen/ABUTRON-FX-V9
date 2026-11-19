@@ -75,4 +75,15 @@ class SourceContract(unittest.TestCase):
   self.assertIn("ROOT_PRIVATE_OUTPUT_REQUIRED",FILE.read_text())
   self.assertIn("new_order_execution_authorized",FILE.read_text())
 
+ def test_sensitive_source_paths_not_displayed(self):
+  secret=FileNotFoundError("/var/lib/private/hidden-secret.json")
+  self.assertEqual(m.safe_error_code(secret),"REVIEW_FILENOTFOUNDERROR")
+  self.assertNotIn("private",m.safe_error_code(secret))
+
+ def test_specific_source_failure_code_remains_safe(self):
+  self.assertEqual(m.safe_error_code(m.ReleaseEvidenceError("RECONCILER_EQUITY_NOT_CURRENT")),
+                   "RECONCILER_EQUITY_NOT_CURRENT")
+  self.assertEqual(m.safe_error_code(m.ReleaseEvidenceError("file /private")),
+                   "REVIEW_RELEASEEVIDENCEERROR")
+
 if __name__=="__main__":unittest.main()
