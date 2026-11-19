@@ -107,6 +107,7 @@ def parse_native(raw):
         raise LedgerEvidenceError("ACCOUNT_BALANCE_DOES_NOT_EQUAL_NATIVE_DEAL_LEDGER")
     return {
         "native_snapshot_sha256":sha256(raw).hexdigest(),
+        "account_suffix":rows[4][-4:],
         "snapshot_utc":snapshot_utc,
         "broker_offset_seconds":offset,
         "balance":balance,
@@ -127,6 +128,12 @@ def parse_native(raw):
 def reconcile(native,broker,inception_notice_iso):
     if not isinstance(broker,dict) or broker.get("schema") is None:
         raise LedgerEvidenceError("INVALID_FRESH_BROKER_HISTORY_SCHEMA")
+    # Bind independent sources to the SAME masked broker login. Their
+    # nonce/owner token schemes differ, so compare the trusted MT5 login
+    # suffix rather than copying a private login into any public report.
+    if (not re.fullmatch(r"[0-9]{4}",native.get("account_suffix","")) or
+        broker.get("account_masked")!="••••"+native["account_suffix"]):
+        raise LedgerEvidenceError("INDEPENDENT_BROKER_ACCOUNT_IDENTITY_MISMATCH")
     if (broker.get("history_verified_from_mt5") is not True or
         broker.get("broker")!="FP Markets" or broker.get("environment")!="DEMO" or
         broker.get("account_currency")!="USD" or
@@ -152,6 +159,9 @@ def reconcile(native,broker,inception_notice_iso):
         history_from>created_utc+native["broker_offset_seconds"] or
         history_to-native["broker_offset_seconds"]<native["snapshot_utc"]):
         raise LedgerEvidenceError("SELECTED_WINDOW_DOES_NOT_COVER_ORIGINAL_INCEPTION")
+    if not isinstance(broker.get("native_file_sha256"),str) or not re.fullmatch(
+        "[0-9a-f]{64}",broker["native_file_sha256"]):
+        raise LedgerEvidenceError("INDEPENDENT_BROKER_SOURCE_DIGEST_INVALID")
     fields=[
         ("broker_deals_count","deal_count"),
         ("trade_deals_count","trade_deals"),
