@@ -1,0 +1,25 @@
+name: Issue43 bounded native history source-contract tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ops/issue43/**'
+      - 'tests/test_issue43_native_history_growth.py'
+      - '.github/workflows/issue43-native-history-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-bounded-native-history:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate authenticated native-history growth source boundaries
+        run: python3 -m unittest discover -s tests -p 'test_issue43_native_history_growth.py' -v
+      - name: Confirm this workflow has no broker authority
+        run: |
+          echo 'Source-contract tests only; no account credentials, broker API, deployment, risk or CRM actions.'
