@@ -264,3 +264,16 @@ def test_compiled_writer_exposure_only_is_default_before_order_send():
     assert "input bool    InpExposureOnly   = true;" in source
     assert "if(!InpExposureOnly)" in source
     assert "ProcessOrderRequests();" in source
+
+def test_native_hmac_known_answer_and_utf8_export():
+    source = (Path(__file__).resolve().parents[1] /
+              "mql5" / "ApexNativeWriter.mq5").read_text()
+    assert "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8" in source
+    assert "FileWriteString(h, content)" in source
+    assert "FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8" in source
+    assert 'H[i] & 0xFF' in source
+    assert "ACCOUNT_TRADE_MODE_DEMO" in source
+    fragment = source.split("string expJson = StringFormat(", 1)[1].split(
+        "expJson += posJson", 1)[0]
+    assert (chr(92) * 3 + '"') not in fragment
+    assert fragment.count(chr(92) + '"') >= 20

@@ -40,7 +40,17 @@ string g_activation_secret = "";                // resolved at OnInit
 int OnInit()
 {
    // Terminal-level algorithmic trading permissions are managed by MT5.
+   // Verify our bundled SHA256/HMAC implementation before issuing any
+   // account-bound evidence. A compile-only pass cannot validate hash math.
+   if(HmacSha256Hex("key", "The quick brown fox jumps over the lazy dog")
+      != "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+      return(INIT_FAILED);
    g_activation_secret = LoadActivationSecret();
+   if(g_activation_secret == "" || InpConnectionId == "" ||
+      InpBrokerServer == "" ||
+      AccountInfoString(ACCOUNT_SERVER) != InpBrokerServer ||
+      AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO)
+      return(INIT_FAILED); // no unsigned or account-misbound exposure
    EventSetTimer(5);                                  // export + handoff loop
    return(INIT_SUCCEEDED);
 }
@@ -199,7 +209,7 @@ void ExportNativeData()
                                      ticket, sym, dir, vol, entry, sl, tp,
                                      stopRiskUsd, ocVerified ? "true" : "false");
       posJson += StringFormat(
-         "{\"ticket\":%d,\"symbol\":\"%s\",\"direction\":\"%s\","
+         "{\"ticket\":%I64u,\"symbol\":\"%s\",\"direction\":\"%s\","
          "\"volume\":%.2f,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
          "\"swap\":%.2f,\"stop_risk_usd\":%.2f,\"ordercalcprofit_verified\":%s},",
          ticket, sym, dir, vol, entry, sl, tp, swap, stopRiskUsd,
@@ -222,10 +232,10 @@ void ExportNativeData()
       return;  // Without provisioned key, never publish certifiable evidence.
    string sig = HmacSha256Hex(g_activation_secret, canonical);
    string expJson = StringFormat(
-      "{\\\"nonce\\\":\\\"%s\\\",\\\"challenge\\\":\\\"%s\\\",\\\"connection_id\\\":\\\"%s\\\","
-      "\\\"login\\\":\\\"%s\\\",\\\"server\\\":\\\"%s\\\",\\\"equity\\\":%s,\\\"balance\\\":%s,"
-      "\\\"currency\\\":\\\"%s\\\",\\\"position_count\\\":%d,\\\"sig\\\":\\\"%s\\\","
-      "\\\"positions\\\":[",
+      "{\"nonce\":\"%s\",\"challenge\":\"%s\",\"connection_id\":\"%s\","
+      "\"login\":\"%s\",\"server\":\"%s\",\"equity\":%s,\"balance\":%s,"
+      "\"currency\":\"%s\",\"position_count\":%d,\"sig\":\"%s\","
+      "\"positions\":[",
       expNonce, expChallenge, InpConnectionId, loginStr, expServer,
       DoubleToString(equityD, 2), DoubleToString(balanceD, 2),
       expCurrency, n, sig);
@@ -369,10 +379,12 @@ double NormalizeLots(double v, string symbol)
 //+------------------------------------------------------------------+
 void WriteTextFile(string filename, string content)
 {
-   int h = FileOpen(filename, FILE_WRITE | FILE_TXT);
-   if(h > 0)
+   // Python reads UTF-8: MQL5 FILE_TXT without FILE_ANSI defaults to UTF-16.
+   int h = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+   if(h != INVALID_HANDLE)
    {
-      FileWrite(h, content);
+      FileWriteString(h, content);
+      FileFlush(h);
       FileClose(h);
    }
 }
@@ -436,15 +448,15 @@ string LoadActivationSecret()
    string file = "ABUTRON_ACTIVATION_SECRET.txt";
    if(FileIsExist(file))
    {
-      int h = FileOpen(file, FILE_READ | FILE_TXT);
-      if(h > 0)
+      int h = FileOpen(file, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+      if(h != INVALID_HANDLE)
       {
-         string s = FileReadString(h);
+         string secret = FileReadString(h);
          FileClose(h);
-         if(StringLen(s) > 0)
-            StringTrimLeft(s);
-            StringTrimRight(s);
-            return(s);
+         StringTrimLeft(secret);
+         StringTrimRight(secret);
+         if(StringLen(secret) > 0)
+            return(secret);
       }
    }
    return("");
@@ -609,10 +621,10 @@ string Sha256Hex(ushort &inputBytes[], int inputLen)
    string hex = "";
    for(int i = 0; i < 8; i++)
    {
-      hex += StringFormat("%02x", (ushort)(H[i] >> 24));
-      hex += StringFormat("%02x", (ushort)(H[i] >> 16));
-      hex += StringFormat("%02x", (ushort)(H[i] >> 8));
-      hex += StringFormat("%02x", (ushort)(H[i]));
+      hex += StringFormat("%02x", (uint)((H[i] >> 24) & 0xFF));
+      hex += StringFormat("%02x", (uint)((H[i] >> 16) & 0xFF));
+      hex += StringFormat("%02x", (uint)((H[i] >> 8) & 0xFF));
+      hex += StringFormat("%02x", (uint)(H[i] & 0xFF));
    }
    return(hex);
 }
