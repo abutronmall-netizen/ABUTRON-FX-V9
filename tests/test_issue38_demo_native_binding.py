@@ -100,6 +100,52 @@ def test_stage_refuses_overwriting_different_qa_binary(tmp_path):
     assert hashlib.sha256(staged.read_bytes()).hexdigest() == digest
 
 
+def test_stage_allow_replace_backs_up_prior_binary(tmp_path):
+    """allow_replace=True backs up the current binary before replacing."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    staged = Path(stage(mgr, d, ea, digest))
+    old_digest = digest
+    # New binary, different content.
+    ea.write_bytes(b"MZnew-SYNTHETIC-binary-v2")
+    new_digest = hashlib.sha256(ea.read_bytes()).hexdigest()
+    assert new_digest != old_digest
+    staged2 = Path(stage(mgr, d, ea, new_digest, allow_replace=True))
+    assert hashlib.sha256(staged2.read_bytes()).hexdigest() == new_digest
+    # A timestamped backup of the prior binary must exist.
+    backup_dir = d / "MQL5" / "Experts" / "ABUTRON-PR37-QA" / ".backup"
+    backups = list(backup_dir.glob("ApexNativeWriter.ex5.*.bak"))
+    assert backups, "prior binary must be backed up before replace"
+    assert hashlib.sha256(backups[0].read_bytes()).hexdigest() == old_digest
+
+
+def test_rollback_restored_last_backup(tmp_path):
+    """rollback_demo_writer_qa restores the most recent backup."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    staged = Path(stage(mgr, d, ea, digest))
+    old_digest = digest
+    ea.write_bytes(b"MZnew-SYNTHETIC-binary-v2")
+    new_digest = hashlib.sha256(ea.read_bytes()).hexdigest()
+    stage(mgr, d, ea, new_digest, allow_replace=True)
+    assert hashlib.sha256(staged.read_bytes()).hexdigest() == new_digest
+    restored = Path(mgr.rollback_demo_writer_qa(data_dir=str(d)))
+    assert restored == staged
+    assert hashlib.sha256(staged.read_bytes()).hexdigest() == old_digest
+
+
+def test_rollback_fails_closed_when_no_backup(tmp_path):
+    """No backup present -> rollback raises (fail-closed)."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    stage(mgr, d, ea, digest)
+    with pytest.raises(Mt5Error, match="no backup"):
+        mgr.rollback_demo_writer_qa(data_dir=str(d))
+
+
 @pytest.mark.parametrize("missing", ["Files", "Experts"])
 def test_missing_mt5_data_folder_is_not_created(tmp_path, missing):
     d = terminal_dir(tmp_path)

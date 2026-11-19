@@ -175,11 +175,18 @@ class Mt5TerminalManager:
     def stage_demo_writer_qa(self, *, connection_id: str, broker: str,
                              login: int, server: str, environment: str,
                              data_dir: str, compiled_ex5: str,
-                             expected_sha256: str) -> str:
+                             expected_sha256: str,
+                             allow_replace: bool = False) -> str:
         """Stage, but DO NOT attach, a pinned compiled EA on an existing DEMO.
 
         Does not modify Files/, chart profiles, terminal settings or
-        activation secrets. Refuses unknown/unpinned sources and overwrites.
+        activation secrets. Refuses unknown/unpinned sources. Under
+        backup+rollback discipline (Issue #38 criterion 2): before any
+        replacement of an already-staged binary, the current binary is
+        copied to a timestamped backup under ``.backup/`` so the prior
+        known-good artifact can be restored via rollback_demo_writer_qa().
+        Replacement requires the explicit ``allow_replace=True`` flag;
+        the default is fail-closed (refuse overwrite of a different binary).
         """
         if environment.lower() != "demo":
             raise Mt5Error("native writer QA staging is DEMO-only")
@@ -209,13 +216,31 @@ class Mt5TerminalManager:
             raise Mt5Error("stage as the MT5 data owner or root only")
         os.chmod(destdir, 0o750)
         dest = os.path.join(destdir, "ApexNativeWriter.ex5")
+        backup_dir = os.path.join(destdir, ".backup")
+        backup_path: str = ""
         if os.path.lexists(dest):
             if not os.path.isfile(dest) or os.path.islink(dest):
                 raise Mt5Error("native QA destination is not a regular file")
             with open(dest, "rb") as fh:
-                if hashlib.sha256(fh.read()).hexdigest() != actual:
-                    raise Mt5Error("different native writer already staged: refuse overwrite")
-            return dest
+                existing = hashlib.sha256(fh.read()).hexdigest()
+            if existing == actual:
+                return dest
+            if not allow_replace:
+                raise Mt5Error("different native writer already staged: refuse overwrite")
+            # Backup+rollback discipline (Issue #38 criterion 2): preserve the
+            # current known-good binary under a timestamped backup before
+            # replacing it, so the prior artifact can be restored.
+            os.makedirs(backup_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            backup_path = os.path.join(backup_dir,
+                                       f"ApexNativeWriter.ex5.{ts}.bak")
+            if os.path.lexists(backup_path):
+                raise Mt5Error("backup collision; refusing to overwrite backup")
+            shutil.copy2(dest, backup_path)
+            try:
+                os.chmod(backup_path, 0o640)
+            except OSError:
+                pass
         # Atomic install; no chart/profile/Files changes or order activation.
         import tempfile
         fd, tmp = tempfile.mkstemp(prefix=".ApexNativeWriter.", dir=destdir)
@@ -233,9 +258,43 @@ class Mt5TerminalManager:
                 raise Mt5Error("stage as the MT5 data owner or root only")
             os.chmod(tmp, 0o640)
             os.replace(tmp, dest)
+        except BaseException:
+            # Rollback: if the install failed after backing up, restore the
+            # prior binary so the terminal is never left without a writer.
+            if os.path.lexists(dest) and backup_path:
+                try:
+                    shutil.copy2(backup_path, dest)
+                except OSError:
+                    pass
+            raise
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
+        return dest
+
+    def rollback_demo_writer_qa(self, *, data_dir: str) -> str:
+        """Restore the most recent backup of a staged DEMO writer binary.
+
+        Issue #38 criterion 2 backup+rollback discipline: reverts
+        ``MQL5/Experts/ABUTRON-PR37-QA/ApexNativeWriter.ex5`` to the
+        newest timestamped ``.backup/`` artifact. Fails closed if no
+        backup exists or the current binary cannot be identified.
+        """
+        files_dir, experts_dir = self._validated_terminal_data_dir(data_dir)
+        dest = os.path.join(experts_dir, "ABUTRON-PR37-QA",
+                            "ApexNativeWriter.ex5")
+        backup_dir = os.path.join(experts_dir, "ABUTRON-PR37-QA", ".backup")
+        if not os.path.isdir(backup_dir):
+            raise Mt5Error("no backup directory; nothing to roll back to")
+        backups = [os.path.join(backup_dir, f) for f in os.listdir(backup_dir)
+                   if f.endswith(".bak") and os.path.isfile(
+                       os.path.join(backup_dir, f))]
+        if not backups:
+            raise Mt5Error("no writer backups present; nothing to roll back to")
+        latest = max(backups, key=os.path.getmtime)
+        if not os.path.isfile(dest) or os.path.islink(dest):
+            raise Mt5Error("current staged writer is missing or a symlink")
+        shutil.copy2(latest, dest)
         return dest
 
     def mark_native_authenticated(self, connection_id: str,
