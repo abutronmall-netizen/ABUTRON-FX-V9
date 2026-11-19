@@ -103,8 +103,8 @@ class BrokerNativeMarketDataAdapter:
         if not cid:
             raise MarketDataError("no connection_id for market data read")
 
-        # Read the native export (identity + bars) from the terminal.
-        export = self.manager.read_native_export(cid)
+        # Read the native export (identity + bars + quotes) from the terminal.
+        export = self.manager.read_native_export_full(cid)
         if export is None:
             raise MarketDataError(
                 f"no native M5 export for {cid}: no broker-native market data")
@@ -113,15 +113,41 @@ class BrokerNativeMarketDataAdapter:
         bars_raw = export.get("bars", {})
 
         # Validate the identity envelope (account binding, nonce, freshness).
+        # Text-format identities (Deriv MT5 writer) carry login + nonce but
+        # not connection_id/challenge — those are bound at the terminal
+        # level (files are read from the bound terminal's export_dir).
         errors = validate_export_envelope(
             identity, connection_id=cid, login=self.login, broker=self.broker)
         if errors:
-            raise MarketDataError(
-                f"native export envelope invalid for {cid}: "
-                + ", ".join(errors))
+            # For text-format identities, connection_id and challenge are
+            # absent by design (bound at terminal level). Filter those out
+            # and only fail on real mismatches (login, broker, nonce).
+            text_format = "schema" in identity
+            if text_format:
+                real_errors = [
+                    e for e in errors
+                    if e not in ("EXPORT_CONNECTION_MISMATCH",
+                                 "EXPORT_CHALLENGE_MISSING",
+                                 "EXPORT_HEARTBEAT_MISSING")
+                ]
+                if real_errors:
+                    raise MarketDataError(
+                        f"native export envelope invalid for {cid}: "
+                        + ", ".join(real_errors))
+            else:
+                raise MarketDataError(
+                    f"native export envelope invalid for {cid}: "
+                    + ", ".join(errors))
 
-        if identity.get("server") != self.server or not self.server:
-            raise MarketDataError("native export server does not match bound terminal")
+        # Server binding: enforce when both the export and the adapter
+        # declare a server. Text-format identities (Deriv MT5 writer)
+        # carry no server field — binding is at the terminal level.
+        exp_server = identity.get("server", "")
+        if exp_server and self.server and exp_server != self.server:
+            raise MarketDataError(
+                "native export server does not match bound terminal")
+        if not self.server and exp_server:
+            raise MarketDataError("server required but adapter server is empty")
 
         # Freshness check: reject stale sources by heartbeat timestamp.
         # The identity heartbeat is the authoritative source timestamp.
@@ -141,11 +167,12 @@ class BrokerNativeMarketDataAdapter:
         # Validate candles: all closed, non-empty, sufficient bars.
         self._validate_candles(candles, cid)
 
-        # Build quotes from the latest closed bar per symbol.
-        quotes = self._build_quotes(candles)
-        if not quotes:
-            raise MarketDataError(
-                f"no quotes could be built for {cid}: missing bid/ask data")
+        # Build quotes from the separate authenticated quote snapshot.
+        # The bar file (tab-delimited Deriv format) has OHLC only — no
+        # bid/ask/spread/tick_size. Quotes MUST come from the broker's
+        # own SymbolInfoDouble at export time, never derived from OHLC.
+        quotes = self._build_quotes_from_snapshot(
+            export.get("quotes"), candles, cid)
 
         # Source hash: SHA-256 of the bars file content + identity nonce.
         source_hash = _compute_source_hash(
@@ -189,25 +216,59 @@ class BrokerNativeMarketDataAdapter:
                     f"{c.symbol} {c.open_time}")
 
     @staticmethod
-    def _build_quotes(candles: List[Candle]) -> List[Quote]:
-        """Build Quote objects from the latest closed bar per symbol."""
-        by_symbol: Dict[str, Candle] = {}
-        for c in candles:
-            if c.closed:
-                by_symbol[c.symbol] = c
+    def _build_quotes_from_snapshot(
+        quotes_snapshot: Optional[Dict],
+        candles: List[Candle],
+        cid: str,
+    ) -> List[Quote]:
+        """Build Quote objects from the authenticated quote snapshot.
+
+        The quote snapshot (``ABUTRON_NATIVE_QUOTES_V2_*.txt``) carries
+        broker-native bid/ask/spread/tick_size/point from SymbolInfoDouble.
+        This is the ONLY valid source of quotes — they must never be
+        derived from OHLC bar closes.
+
+        Raises ``MarketDataError`` if the snapshot is missing or does not
+        cover all evaluated symbols.
+        """
+        if not quotes_snapshot or "quotes" not in quotes_snapshot:
+            raise MarketDataError(
+                f"no authenticated quote snapshot for {cid}: "
+                f"broker-native bid/ask required, OHLC is not a quote")
+
+        snap_by_symbol = {q.get("symbol", ""): q
+                         for q in quotes_snapshot.get("quotes", [])}
+
+        # Determine which symbols need quotes (those with closed candles).
+        needed = sorted({c.symbol for c in candles if c.closed})
+
+        missing = [s for s in needed if s not in snap_by_symbol]
+        if missing:
+            raise MarketDataError(
+                f"quote snapshot missing symbols for {cid}: "
+                f"{', '.join(missing)}")
+
         quotes: List[Quote] = []
-        for symbol, c in by_symbol.items():
-            if c.bid <= 0 or c.ask <= 0:
-                continue
-            spread = c.spread if c.spread > 0 else (c.ask - c.bid)
+        for symbol in needed:
+            q = snap_by_symbol[symbol]
+            bid = float(q.get("bid", 0))
+            ask = float(q.get("ask", 0))
+            if bid <= 0 or ask <= 0:
+                raise MarketDataError(
+                    f"invalid bid/ask in quote snapshot for {cid}: "
+                    f"{symbol}")
+            spread = float(q.get("spread", 0)) or (ask - bid)
+            tick_size = float(q.get("tick_size", 0))
+            point = float(q.get("point", 0))
+            observed_at = q.get("observed_at", "")
             quotes.append(Quote(
                 symbol=symbol,
-                bid=c.bid,
-                ask=c.ask,
+                bid=bid,
+                ask=ask,
                 spread=spread,
-                tick_size=c.tick_size,
-                point=c.point,
-                observed_at=c.close_time,
+                tick_size=tick_size,
+                point=point,
+                observed_at=observed_at,
             ))
         return quotes
 

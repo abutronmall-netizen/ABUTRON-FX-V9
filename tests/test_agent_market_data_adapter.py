@@ -4,6 +4,8 @@ Covers the P0 implementation handoff: replace empty candles=[]/quotes=[]
 with real broker-native, account/session-bound, fresh, closed M5 data,
 and prove a real nonempty-input shadow decision pass.
 
+Tests cover both the JSON format (ApexNativeWriter) and the real
+tab-delimited text format produced by the deployed Deriv MT5 writer.
 All fixtures are synthetic; no real terminal, credentials or broker data.
 """
 from __future__ import annotations
@@ -16,14 +18,15 @@ import pytest
 from abutron.agent.market_data import (BrokerNativeMarketDataAdapter,
                                        MarketDataError, run_shadow_decision_pass)
 from abutron.feeds.feed_quality import Candle, Quote
-from abutron.feeds.mt5_terminal import Mt5TerminalManager
 
 
 CID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-BROKER = "fpmarkets"
+BROKER = "native"
 LOGIN = 7410512
-SERVER = "FPMarketsSC-Demo"
+SERVER = "DerivDemo"
 NONCE = "ABUTRON_NATIVE_7410512_1795080000"
+
+_UNSET = object()
 
 
 def _identity():
@@ -46,20 +49,63 @@ def _bars_payload(closed=True, n=3):
             "close_time": ot,
             "open": 1.10000, "high": 1.10050, "low": 1.09950,
             "close": 1.10020, "volume": 10.0,
-            "bid": 1.10010, "ask": 1.10030, "spread": 0.0002,
-            "tick_size": 0.00001, "point": 0.0001,
+            "bid": 0.0, "ask": 0.0, "spread": 0.0,
+            "tick_size": 0.0, "point": 0.0,
             "closed": closed,
         })
     return {"bars": bars}
 
 
-class _FakeMgr:
-    """Mock Mt5TerminalManager returning a canned native export."""
+def _quotes_payload():
+    return {
+        "quotes": [{
+            "symbol": "EURUSD.r", "bid": 1.10010, "ask": 1.10030,
+            "spread": 20, "tick_size": 0.00001, "point": 0.0001,
+            "observed_at": "2026-11-19T10:00:00Z",
+        }],
+    }
 
-    def __init__(self, identity=None, bars=None, export_ts=None):
+
+def _current_nonce():
+    return f"ABUTRON_NATIVE_{LOGIN}_{int(time.time())}"
+
+
+def _tab_delimited_bars(closed=True, n=3, nonce=None):
+    """Real Deriv MT5 writer format: tab-delimited, no bid/ask columns."""
+    now_epoch = int(time.time())
+    lines = ["ABUTRON_NATIVE_BARS_V2", nonce or _current_nonce()]
+    base = now_epoch - n * 300
+    for i in range(n):
+        epoch = base + i * 300
+        lines.append(
+            f"EURUSD.r\tM5\t{epoch}\t1.10000\t1.10050\t1.09950\t1.10020")
+    return "\n".join(lines) + "\n"
+
+
+def _text_identity(nonce=None):
+    """Real Deriv MT5 writer 7-line identity format."""
+    nonce = nonce or _current_nonce()
+    return "\n".join([
+        "ABUTRON_NATIVE_ACCOUNT_V2",
+        nonce,
+        str(LOGIN),
+        "10000.00",
+        "10050.00",
+        "USD",
+        "0",
+    ]) + "\n"
+
+
+class _FakeMgr:
+    """Mock Mt5TerminalManager returning canned native exports."""
+
+    def __init__(self, identity=None, bars=None, quotes=_UNSET,
+                 identity_text=None, bars_text=None):
         self._identity = identity or _identity()
         self._bars = bars if bars is not None else _bars_payload()
-        self._export_ts = export_ts if export_ts is not None else time.time()
+        self._quotes = _quotes_payload() if quotes is _UNSET else quotes
+        self._identity_text = identity_text
+        self._bars_text = bars_text
 
     def read_native_export(self, connection_id, since=None):
         return {
@@ -69,6 +115,18 @@ class _FakeMgr:
             "bars_file": "/tmp/fake_bars.txt",
         }
 
+    def read_native_export_full(self, connection_id, since=None):
+        return {
+            "identity": self._identity,
+            "bars": self._bars,
+            "identity_file": "/tmp/fake_identity.txt",
+            "bars_file": "/tmp/fake_bars.txt",
+            "quotes": self._quotes,
+        }
+
+    def read_native_quotes(self, connection_id, since=None):
+        return self._quotes
+
 
 def _adapter(mgr=None, **kw):
     defaults = dict(connection_id=CID, broker=BROKER, login=LOGIN,
@@ -77,7 +135,7 @@ def _adapter(mgr=None, **kw):
     return BrokerNativeMarketDataAdapter(mgr or _FakeMgr(), **defaults)
 
 
-# ------------------------------------------- success path
+# ------------------------------------------- success path (JSON format)
 def test_adapter_reads_fresh_closed_m5_candles_and_quotes():
     md = _adapter().read()
     assert md.candle_count >= 1
@@ -102,6 +160,44 @@ def test_adapter_quotes_have_valid_bid_ask():
         assert q.spread > 0
 
 
+# ------------------------------------------- success path (tab-delimited)
+def test_adapter_parses_real_tab_delimited_format(tmp_path):
+    """The real Deriv MT5 writer exports tab-delimited OHLC, no JSON."""
+    # Write real-format files to a temp export_dir.
+    from abutron.feeds.mt5_terminal import Mt5TerminalManager
+    import types
+
+    bars_file = tmp_path / "ABUTRON_NATIVE_BARS_V2_test.txt"
+    ident_file = tmp_path / "ABUTRON_NATIVE_ACCOUNT_V2_test.txt"
+    quotes_file = tmp_path / "ABUTRON_NATIVE_QUOTES_V2_test.txt"
+    nonce = _current_nonce()
+    bars_file.write_text(_tab_delimited_bars(nonce=nonce))
+    ident_file.write_text(_text_identity(nonce=nonce))
+    quotes_file.write_text('{"quotes":[{"symbol":"EURUSD.r",'
+                           '"bid":1.10010,"ask":1.10030,"spread":20,'
+                           '"tick_size":0.00001,"point":0.0001,'
+                           '"observed_at":"2026-11-19T10:00:00Z"}]}')
+
+    # Build a fake terminal entry pointing at the temp dir.
+    term = types.SimpleNamespace(export_dir=str(tmp_path),
+                                 is_running=True,
+                                 external_evidence_only=False)
+    mgr = Mt5TerminalManager()
+    mgr._terminals[CID] = term
+
+    # The text-format identity has no server field, so set the expected
+    # server to empty to match.
+    adapter = BrokerNativeMarketDataAdapter(
+        mgr, connection_id=CID, broker=BROKER, login=LOGIN, server="")
+    md = adapter.read()
+    assert md.candle_count >= 1
+    assert md.quote_count >= 1
+    assert md.evaluated_symbols == ["EURUSD.r"]
+    # The tab-delimited bars have no bid/ask; quotes come from the file.
+    assert md.quotes[0].bid == 1.10010
+    assert md.quotes[0].ask == 1.10030
+
+
 # ------------------------------------------- rejection paths
 def test_adapter_rejects_wrong_broker():
     mgr = _FakeMgr(identity={**_identity(), "broker": "wrong-broker"})
@@ -122,13 +218,26 @@ def test_adapter_rejects_wrong_login():
         _adapter(mgr).read()
 
 
+def test_adapter_rejects_wrong_server():
+    ident = {**_identity(), "server": "FPMarketsSC-Live"}
+    with pytest.raises(MarketDataError, match="server"):
+        _adapter(_FakeMgr(identity=ident)).read()
+
+
 def test_adapter_rejects_stale_export():
-    # The identity heartbeat is in the past; since filters it out.
     stale_hb = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                              time.gmtime(time.time() - 3600))
     mgr = _FakeMgr(identity={**_identity(), "worker_health_ts": stale_hb})
     with pytest.raises(MarketDataError, match="STALE"):
         _adapter(mgr).read(since=time.time())
+
+
+def test_adapter_rejects_future_heartbeat():
+    future = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                           time.gmtime(time.time() + 3600))
+    mgr = _FakeMgr(identity={**_identity(), "worker_health_ts": future})
+    with pytest.raises(MarketDataError, match="future"):
+        _adapter(mgr).read()
 
 
 def test_adapter_rejects_open_candle():
@@ -145,14 +254,25 @@ def test_adapter_rejects_incomplete_ohlc():
         _adapter(mgr).read()
 
 
-def test_adapter_rejects_missing_quote():
-    # All bars have zero bid/ask -> no quotes can be built.
-    bars = _bars_payload()
-    for b in bars["bars"]:
-        b["bid"] = 0
-        b["ask"] = 0
-    mgr = _FakeMgr(bars=bars)
+def test_adapter_rejects_missing_quote_snapshot():
+    """No quote file — quotes must not be derived from OHLC."""
+    mgr = _FakeMgr(quotes=None)
     with pytest.raises(MarketDataError, match="quote"):
+        _adapter(mgr).read()
+
+
+def test_adapter_rejects_missing_quote_symbol():
+    """Quote snapshot doesn't cover a symbol that has candles."""
+    mgr = _FakeMgr(quotes={"quotes": []})
+    with pytest.raises(MarketDataError, match="missing"):
+        _adapter(mgr).read()
+
+
+def test_adapter_rejects_invalid_bid_ask_in_quote():
+    quotes = {"quotes": [{"symbol": "EURUSD.r", "bid": 0, "ask": 0,
+                          "spread": 0, "tick_size": 0, "point": 0}]}
+    mgr = _FakeMgr(quotes=quotes)
+    with pytest.raises(MarketDataError, match="invalid"):
         _adapter(mgr).read()
 
 
@@ -165,7 +285,9 @@ def test_adapter_rejects_insufficient_bars():
 
 def test_adapter_rejects_missing_export():
     class _EmptyMgr:
-        def read_native_export(self, connection_id, since=None):
+        def read_native_export_full(self, connection_id, since=None):
+            return None
+        def read_native_quotes(self, connection_id, since=None):
             return None
     with pytest.raises(MarketDataError, match="no native"):
         _adapter(_EmptyMgr()).read()
@@ -233,20 +355,6 @@ def test_shadow_uses_latest_closed_candle_not_first_warmup_bar():
     assert result["broker_native_signal_certified"] is False
 
 
-def test_wrong_server_rejected_even_with_matching_connection():
-    ident = {**_identity(), "server": "FPMarketsSC-Live"}
-    with pytest.raises(MarketDataError, match="server"):
-        _adapter(_FakeMgr(identity=ident)).read()
-
-
-def test_future_identity_timestamp_rejected():
-    future = time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                           time.gmtime(time.time() + 3600))
-    ident = {**_identity(), "worker_health_ts": future}
-    with pytest.raises(MarketDataError, match="future"):
-        _adapter(_FakeMgr(identity=ident)).read()
-
-
 def test_shadow_candidate_does_not_imply_broker_fill_certification():
     class _Candidate:
         symbol = "EURUSD.r"
@@ -266,3 +374,93 @@ def test_shadow_candidate_does_not_imply_broker_fill_certification():
     assert result["candidates_generated"] == 1
     assert result["broker_native_signal_certified"] is False
     assert result["shadow_decision_evaluated"] is True
+
+
+# ------------------------------------------- native text-format parser tests
+class _NativeParserTests:
+    """Tests for the real tab-delimited format parsers."""
+
+    def test_parse_bars_file_tab_delimited(self, tmp_path):
+        from abutron.feeds.mt5_terminal import Mt5TerminalManager
+        p = tmp_path / "bars.txt"
+        nonce = _current_nonce()
+        p.write_text(_tab_delimited_bars(nonce=nonce))
+        result = Mt5TerminalManager._parse_bars_file(str(p))
+        assert result is not None
+        assert "_nonce" in result
+        assert result["_nonce"] == nonce
+        assert len(result["bars"]) == 3
+        bar = result["bars"][0]
+        assert bar["symbol"] == "EURUSD.r"
+        assert bar["timeframe"] == "M5"
+        assert bar["closed"] is True
+        assert bar["open"] == 1.10000
+        assert bar["bid"] == 0.0  # no bid/ask in tab format
+
+    def test_parse_bars_file_json(self, tmp_path):
+        from abutron.feeds.mt5_terminal import Mt5TerminalManager
+        p = tmp_path / "bars.json"
+        p.write_text('{"bars":[{"symbol":"X","timeframe":"M5"}]}')
+        result = Mt5TerminalManager._parse_bars_file(str(p))
+        assert result is not None
+        assert len(result["bars"]) == 1
+
+    def test_parse_bars_file_truncated(self, tmp_path):
+        from abutron.feeds.mt5_terminal import Mt5TerminalManager
+        p = tmp_path / "bars.txt"
+        p.write_text("ABUTRON_NATIVE_BARS_V2\n" + NONCE + "\n")
+        result = Mt5TerminalManager._parse_bars_file(str(p))
+        assert result is None
+
+    def test_parse_bars_file_malformed_row(self, tmp_path):
+        from abutron.feeds.mt5_terminal import Mt5TerminalManager
+        content = "ABUTRON_NATIVE_BARS_V2\n" + NONCE + "\n"
+        content += "EURUSD.r\tM5\t123\t1.1\n"  # only 4 fields, not 7
+        content += "EURUSD.r\tM5\t123\t1.1\t1.2\t1.0\t1.15"
+        p = tmp_path / "bars.txt"
+        p.write_text(content)
+        result = Mt5TerminalManager._parse_bars_file(str(p))
+        assert result is not None
+        assert len(result["bars"]) == 1  # malformed row skipped
+
+    def test_parse_identity_file_text(self, tmp_path):
+        from abutron.feeds.mt5_terminal import Mt5TerminalManager
+        p = tmp_path / "id.txt"
+        nonce = _current_nonce()
+        p.write_text(_text_identity(nonce=nonce))
+        result = Mt5TerminalManager._parse_identity_file(str(p))
+        assert result is not None
+        assert result["login"] == LOGIN
+        assert result["nonce"] == nonce
+        assert result["equity"] == 10050.0
+
+    def test_parse_identity_file_json(self, tmp_path):
+        from abutron.feeds.mt5_terminal import Mt5TerminalManager
+        p = tmp_path / "id.json"
+        p.write_text(json.dumps(_identity()))
+        result = Mt5TerminalManager._parse_identity_file(str(p))
+        assert result is not None
+        assert result["connection_id"] == CID
+
+    def test_nonce_mismatch_rejected(self, tmp_path):
+        """Bars nonce must match identity nonce."""
+        from abutron.feeds.mt5_terminal import Mt5TerminalManager
+        import types as _types
+
+        bars_file = tmp_path / "ABUTRON_NATIVE_BARS_V2_test.txt"
+        ident_file = tmp_path / "ABUTRON_NATIVE_ACCOUNT_V2_test.txt"
+        quotes_file = tmp_path / "ABUTRON_NATIVE_QUOTES_V2_test.txt"
+        # Different nonces in bars vs identity.
+        nonce = _current_nonce()
+        bars_file.write_text(
+            _tab_delimited_bars(nonce="DIFFERENT_NONCE"))
+        ident_file.write_text(_text_identity(nonce=nonce))
+        quotes_file.write_text(json.dumps(_quotes_payload()))
+
+        term = _types.SimpleNamespace(export_dir=str(tmp_path),
+                                     is_running=True,
+                                     external_evidence_only=False)
+        mgr = Mt5TerminalManager()
+        mgr._terminals[CID] = term
+        export = mgr.read_native_export(CID)
+        assert export is None  # nonce mismatch

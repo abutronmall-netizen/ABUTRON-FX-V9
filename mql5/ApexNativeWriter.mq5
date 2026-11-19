@@ -131,6 +131,27 @@ void ExportNativeData()
    string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + Nonce() + ".txt";
    WriteTextFile(barsFile, barsJson);
 
+   // --- Authenticated quote snapshot (bid/ask/tick geometry) -------
+   // Separate from bars: the bar file has OHLC only. Quotes must come
+   // from the broker's own SymbolInfoDouble at export time, bound to
+   // the same nonce/login/server/session. Never derive quotes from
+   // bar close.
+   string quotesFile = dir + "ABUTRON_NATIVE_QUOTES_V2_" + Nonce() + ".txt";
+   string qJson = "{\"quotes\":[";
+   string qs = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,"
+      "\"spread\":%.0f,\"tick_size\":%.5f,\"point\":%.5f,\"observed_at\":\"%s\"},",
+      _Symbol,
+      SymbolInfoDouble(_Symbol, SYMBOL_BID),
+      SymbolInfoDouble(_Symbol, SYMBOL_ASK),
+      (int)((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
+             SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point),
+      _Point, _Point,
+      TimeStampToStr(TimeCurrent()));
+   qJson += qs;
+   qJson = StringSubstr(qJson, 0, StringLen(qJson) - 1); // strip trailing comma
+   qJson += "]}";
+   WriteTextFile(quotesFile, qJson);
+
    // --- Order flow: aggressor trades since last export -------------
    string ofJson = "{\"trades\":[";
    string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";

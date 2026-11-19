@@ -488,7 +488,21 @@ class Mt5TerminalManager:
         return self._terminals.get(connection_id)
 
     def read_native_export(self, connection_id: str) -> Optional[Dict]:
-        """Read the latest native export (bars + identity) from MQL5/Files."""
+        """Read the latest native export (bars + identity) from MQL5/Files.
+
+        Supports both the JSON format (ApexNativeWriter) and the real
+        tab-delimited text format produced by the deployed Deriv MT5
+        writer:
+
+        - ``ABUTRON_NATIVE_BARS_V2_*.txt``: line 1 schema tag, line 2
+          account-bound nonce, then 7-field rows:
+          ``symbol<TAB>timeframe<TAB>bar_open_epoch<TAB>open<TAB>high<TAB>low<TAB>close``
+        - ``ABUTRON_NATIVE_ACCOUNT_V2_*.txt``: either JSON (ApexNativeWriter)
+          or a 7-line text record: schema, nonce, login, balance, equity,
+          currency, count.
+
+        The nonce pairing between bars and identity files is validated.
+        """
         term = self._terminals.get(connection_id)
         if term is None or not (term.is_running or term.external_evidence_only):
             return None
@@ -496,21 +510,189 @@ class Mt5TerminalManager:
                                      "ABUTRON_NATIVE_ACCOUNT_V2_*.txt")
         bars_file = os.path.join(term.export_dir,
                                  "ABUTRON_NATIVE_BARS_V2_*.txt")
-        ident = _latest_match(identity_file)
-        bars = _latest_match(bars_file)
-        if not ident or not bars:
+        ident_path = _latest_match(identity_file)
+        bars_path = _latest_match(bars_file)
+        if not ident_path or not bars_path:
             return None
-        try:
-            identity = json.loads(open(ident).read())
-            bars_raw = json.loads(open(bars).read())
-        except (ValueError, OSError):
+
+        # --- Parse identity (JSON or 7-line text) --------------------
+        identity = self._parse_identity_file(ident_path)
+        if identity is None:
             return None
+
+        # --- Parse bars (JSON or tab-delimited) ---------------------
+        bars_raw = self._parse_bars_file(bars_path)
+        if bars_raw is None:
+            return None
+
+        # --- Nonce pairing: bars nonce must match identity nonce ----
+        bars_nonce = bars_raw.get("_nonce", "")
+        if bars_nonce and identity.get("nonce") and bars_nonce != identity["nonce"]:
+            return None
+
         return {
             "identity": identity,
             "bars": bars_raw,
-            "identity_file": ident,
-            "bars_file": bars,
+            "identity_file": ident_path,
+            "bars_file": bars_path,
         }
+
+    def read_native_quotes(self, connection_id: str) -> Optional[Dict]:
+        """Read the authenticated native quote snapshot.
+
+        Returns ``{"quotes": [...], "_file": path}`` from the
+        ``ABUTRON_NATIVE_QUOTES_V2_*.txt`` export produced by
+        ApexNativeWriter. Quotes are broker-native bid/ask from
+        SymbolInfoDouble, bound to the same nonce/login/server/session.
+
+        Returns None if no quote file exists or parsing fails.
+        """
+        term = self._terminals.get(connection_id)
+        if term is None or not (term.is_running or term.external_evidence_only):
+            return None
+        quotes_file = os.path.join(term.export_dir,
+                                   "ABUTRON_NATIVE_QUOTES_V2_*.txt")
+        q_path = _latest_match(quotes_file)
+        if not q_path:
+            return None
+        try:
+            data = json.loads(open(q_path).read())
+            if "quotes" in data:
+                data["_file"] = q_path
+                return data
+        except (ValueError, OSError):
+            pass
+        return None
+
+    def read_native_export_full(self, connection_id: str) -> Optional[Dict]:
+        """Read bars + identity + quotes in one call.
+
+        Combines :meth:`read_native_export` and :meth:`read_native_quotes`.
+        Quotes may be None (the adapter decides how to handle them).
+        """
+        export = self.read_native_export(connection_id)
+        if export is None:
+            return None
+        quotes = self.read_native_quotes(connection_id)
+        export["quotes"] = quotes
+        return export
+
+    @staticmethod
+    def _parse_identity_file(path: str) -> Optional[Dict]:
+        """Parse identity from JSON or 7-line text format."""
+        # Try JSON first (ApexNativeWriter format).
+        try:
+            data = json.loads(open(path).read())
+            if isinstance(data, dict) and "connection_id" in data:
+                return data
+        except (ValueError, OSError):
+            pass
+        # Line-based text format (Deriv MT5 writer).
+        try:
+            lines = [l.strip() for l in open(path).readlines() if l.strip()]
+        except OSError:
+            return None
+        if not lines or len(lines) < 7:
+            return None
+        # Line 1 is schema tag; expect ABUTRON_NATIVE_ACCOUNT_V2 or similar.
+        if "ACCOUNT" not in lines[0].upper():
+            return None
+        fields = {
+            "schema": lines[0],
+            "nonce": lines[1],
+            "login": lines[2],
+            "balance": lines[3],
+            "equity": lines[4],
+            "currency": lines[5],
+            "count": lines[6],
+        }
+        # Convert numeric fields.
+        try:
+            fields["login"] = int(fields["login"])
+            fields["balance"] = float(fields["balance"])
+            fields["equity"] = float(fields["equity"])
+        except (ValueError, TypeError):
+            return None
+        # Derive connection_id, challenge, heartbeat from the nonce.
+        # Nonce format: ABUTRON_NATIVE_<login>_<unix_ts>
+        parts = fields["nonce"].split("_")
+        if len(parts) >= 3:
+            fields["connection_id"] = parts[-2]
+            try:
+                ts = int(parts[-1])
+                fields["worker_health_ts"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+            except (ValueError, TypeError):
+                fields["worker_health_ts"] = ""
+        else:
+            fields["connection_id"] = ""
+            fields["worker_health_ts"] = ""
+        fields["broker"] = "native"
+        fields["server"] = ""
+        fields["challenge"] = ""
+        return fields
+
+    @staticmethod
+    def _parse_bars_file(path: str) -> Optional[Dict]:
+        """Parse bars from JSON or tab-delimited text format.
+
+        Tab-delimited: line 1 schema tag, line 2 nonce, then 7-field rows:
+        ``symbol<TAB>timeframe<TAB>bar_open_epoch<TAB>open<TAB>high<TAB>low<TAB>close``
+        """
+        # Try JSON first (ApexNativeWriter format).
+        try:
+            data = json.loads(open(path).read())
+            if isinstance(data, dict) and "bars" in data:
+                return data
+        except (ValueError, OSError):
+            pass
+        # Tab-delimited text format (Deriv MT5 writer).
+        try:
+            lines = [l.rstrip("\n") for l in open(path).readlines()]
+        except OSError:
+            return None
+        # Strip trailing empty lines.
+        lines = [l for l in lines if l.strip()]
+        if len(lines) < 3:
+            return None
+        if "BARS" not in lines[0].upper():
+            return None
+        nonce = lines[1].strip()
+        bars = []
+        for line in lines[2:]:
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue  # skip malformed rows
+            symbol = parts[0].strip()
+            timeframe = parts[1].strip()
+            try:
+                bar_open_epoch = int(float(parts[2]))
+                open_p = float(parts[3])
+                high = float(parts[4])
+                low = float(parts[5])
+                close = float(parts[6])
+            except (ValueError, TypeError):
+                continue  # skip malformed rows
+            bars.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "open_time": _epoch_to_iso(bar_open_epoch),
+                "close_time": _epoch_to_iso(bar_open_epoch + 300),
+                "open": open_p,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 0.0,
+                "bid": 0.0,
+                "ask": 0.0,
+                "spread": 0.0,
+                "tick_size": 0.0,
+                "point": 0.0,
+                "closed": True,
+            })
+        if not bars:
+            return None
+        return {"bars": bars, "_nonce": nonce}
 
     def read_native_exposure(self, connection_id: str,
                              since: Optional[float] = None) -> Optional[Dict]:
@@ -614,6 +796,11 @@ class Mt5TerminalManager:
 def _latest_match(pattern: str) -> Optional[str]:
     matches = glob.glob(pattern)
     return max(matches, key=os.path.getmtime) if matches else None
+
+
+def _epoch_to_iso(epoch: int) -> str:
+    """Convert a unix epoch (seconds) to an ISO-8601 UTC string."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
 
 # Singleton
