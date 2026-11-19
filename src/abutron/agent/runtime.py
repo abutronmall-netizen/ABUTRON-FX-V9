@@ -35,6 +35,7 @@ from ..execution.receipts import ReceiptManager
 from ..execution.writer_gateway import SingleWriterGateway
 from .market_data import (BrokerNativeMarketDataAdapter, MarketDataError,
                           run_shadow_decision_pass)
+from .operator_override import OperatorOverride, load_override
 from .production import AgenticDecisionEngine
 
 
@@ -116,11 +117,20 @@ def run_agentic_pass(
     dispatcher: Optional[NativeDispatcher] = None,
     since: Optional[float] = None,
     event_log: Optional[Any] = None,
+    override: Optional[OperatorOverride] = None,
 ) -> AgenticRuntimeResult:
     """Run one full agentic pass: real data -> brain -> gated dispatch.
 
-    This is the function the deployed runtime should call instead of
-    ``run_decision_pass(..., candles=[], quotes=[])``.
+    ``override`` is an explicit, logged, scoped operator override that
+    allows dispatch past the ``DEMO_NOT_EFFECTIVE_ON`` and
+    ``LIVE_NOT_AUTHORIZED`` policy gates. It does NOT bypass:
+
+    * Market data errors (data correctness — non-negotiable)
+    * Exposure certification inside ``NativeDispatcher`` (20% ceiling,
+      0.15%/trade, R:R >= 1.50 — real risk invariants)
+
+    Every bypass is logged with the operator identity, the gate that
+    was bypassed, and the current risk state.
     """
     log = event_log or engine_db.event_log
 
@@ -196,20 +206,43 @@ def run_agentic_pass(
 
     # --- Gated dispatch ------------------------------------------
     # DEMO: dispatch only if effective_on AND exposure certified.
-    # LIVE: never dispatch (LIVE OFF by design). Requires distinct
-    # live authorization which is never granted by DEMO effective-ON.
+    # LIVE: never dispatch unless effective_on AND distinct live intent.
+    # An operator override can bypass the policy gates (effective_on,
+    # live authorization) but NOT market data errors or exposure
+    # certification. Every bypass is logged.
     candidates = shadow.get("candidates", [])
 
     if not candidates:
-        # No approved candidate — HOLD/reject. Nothing to dispatch.
+        # No approved candidate -- HOLD/reject. Nothing to dispatch.
         log.append(make_event(
             "agentic.hold_no_dispatch", connection_id=connection_id,
             broker=broker, execution_state="HOLD",
             reason_code="NO_APPROVED_CANDIDATE"))
         return result
 
+    # Resolve the override (load from config if not passed directly).
+    if override is None:
+        override = load_override()
+
+    def _log_bypass(gate: str, ov: OperatorOverride) -> None:
+        log.append(make_event(
+            "agentic.override_bypass", connection_id=connection_id,
+            broker=broker, execution_state="DISPATCH_OVERRIDDEN",
+            reason_code=gate,
+            payload={
+                "authorized_by": ov.authorized_by,
+                "authorized_at": ov.authorized_at,
+                "reason": ov.reason,
+                "gate_bypassed": gate,
+                "risk_state": {
+                    "environment": environment,
+                    "effective_on": effective_on,
+                    "candidates_generated": result.candidates_generated,
+                },
+            }))
+
     if is_demo:
-        if not effective_on:
+        if not effective_on and not (override and override.covers(connection_id)):
             result.dispatch_blocked = True
             result.dispatch_reason = "DEMO_NOT_EFFECTIVE_ON"
             log.append(make_event(
@@ -217,17 +250,22 @@ def run_agentic_pass(
                 broker=broker, execution_state="BLOCKED",
                 reason_code="DEMO_NOT_EFFECTIVE_ON"))
             return result
+        if not effective_on and override and override.covers(connection_id):
+            _log_bypass("DEMO_NOT_EFFECTIVE_ON", override)
         # DEMO dispatch is gated by the existing exposure certification
         # inside NativeDispatcher.dispatch_account(). No additional gate
-        # is needed — the dispatcher blocks on BLOCKED_INCOMPLETE_EXPOSURE.
+        # is needed -- the dispatcher blocks on BLOCKED_INCOMPLETE_EXPOSURE.
     elif not _is_live_authorized(connection_id, account):
-        result.dispatch_blocked = True
-        result.dispatch_reason = "LIVE_NOT_AUTHORIZED"
-        log.append(make_event(
-            "agentic.dispatch_blocked", connection_id=connection_id,
-            broker=broker, execution_state="BLOCKED",
-            reason_code="LIVE_NOT_AUTHORIZED"))
-        return result
+        if override and override.covers(connection_id):
+            _log_bypass("LIVE_NOT_AUTHORIZED", override)
+        else:
+            result.dispatch_blocked = True
+            result.dispatch_reason = "LIVE_NOT_AUTHORIZED"
+            log.append(make_event(
+                "agentic.dispatch_blocked", connection_id=connection_id,
+                broker=broker, execution_state="BLOCKED",
+                reason_code="LIVE_NOT_AUTHORIZED"))
+            return result
 
     # --- Dispatch via the existing NativeDispatcher -----------------
     if dispatcher is None:
