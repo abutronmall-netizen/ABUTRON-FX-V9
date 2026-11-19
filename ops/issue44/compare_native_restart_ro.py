@@ -123,7 +123,7 @@ def parse_native(raw:bytes):
         raise NativeRestartEvidenceError("EXTRA_RECORDS_AFTER_END")
     return {
         "session":(nonce,owner,server,login,mode),
-        "utc":utc,"account":account,
+        "utc":utc,"broker_utc_offset_seconds":offset,"account":account,
         "positions":positions,"orders":orders,"deals":deals,
         "source_sha256":sha256(raw).hexdigest(),
     }
@@ -145,7 +145,8 @@ def compare(before,after):
         p=initial[ticket]
         exits=[d for d in after["deals"] if d["position_id"]==ticket
                and d["symbol"]==p["symbol"]
-               and d["entry"] in (1,2,3) and d["occurred"]>=before["utc"]-10]
+               and d["entry"] in (1,2,3) and
+               d["occurred"]-after["broker_utc_offset_seconds"]>=before["utc"]-10]
         if not exits:
             raise NativeRestartEvidenceError("MISSING_POSITION_WITHOUT_AUTHENTIC_NATIVE_EXIT")
         closed+=1
