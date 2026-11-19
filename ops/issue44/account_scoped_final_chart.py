@@ -40,7 +40,7 @@ def apply_fp_demo_single_account_overlay(
         re.fullmatch(r"[0-9a-f]{32}",target_connection_id) is None or
         candidate_chart_sha256!=NEW_ISSUE44_CHART_PIN or
         not isinstance(new_chart_path,str) or
-        re.fullmatch(r"/usr/local/lib/[a-zA-Z0-9_./-]+\\.chr",new_chart_path) is None or
+        re.fullmatch(r"/usr/local/lib/[a-zA-Z0-9_./-]+\.chr",new_chart_path) is None or
         ".." in new_chart_path):
         raise ChartOverrideError("INVALID_PRIVATE_ACCOUNT_OR_RELEASE_PIN")
     a='''  slot=("0512" if cid=="'''+target_connection_id+'''" else "1636")
