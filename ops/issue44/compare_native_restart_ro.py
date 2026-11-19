@@ -106,8 +106,9 @@ def parse_native(raw:bytes):
         elif cols[0]=="D":
             if len(cols)!=15:
                 raise NativeRestartEvidenceError("MALFORMED_HISTORICAL_DEAL")
-            _integer(cols[1],True)
+            deal_ticket=_integer(cols[1],True)
             deals.append({
+                "ticket":deal_ticket,
                 "position_id":_integer(cols[3]),
                 "occurred":_integer(cols[4],True),
                 "entry":_integer(cols[6]),
@@ -135,6 +136,15 @@ def compare(before,after):
         raise NativeRestartEvidenceError("ISOLATED_RESTART_TIME_SEPARATION_INVALID")
     if before["orders"] or after["orders"]:
         raise NativeRestartEvidenceError("PENDING_BROKER_ORDERS_CANNOT_CERTIFY_RESTART")
+    # A reconnect must not silently publish a smaller or substituted broker
+    # history due to HistorySelect(0) loading asynchronously. This separate
+    # source contract is NOT lifetime/inception certification.
+    original_deals={d["ticket"] for d in before["deals"]}
+    confirmed_deals={d["ticket"] for d in after["deals"]}
+    if (len(original_deals)!=len(before["deals"]) or
+        len(confirmed_deals)!=len(after["deals"]) or
+        not original_deals.issubset(confirmed_deals)):
+        raise NativeRestartEvidenceError("BROKER_HISTORY_NOT_REHYDRATED_AFTER_RESTART")
     initial=before["positions"]
     final=after["positions"]
     overlap=set(initial)&set(final)
@@ -172,6 +182,9 @@ def compare(before,after):
         "positions_confirmed_after_restart":len(overlap),
         "positions_closed_with_native_deal_evidence":closed,
         "positions_opened_during_restart":len(new),
+        "historical_deals_verified_before":len(original_deals),
+        "historical_deals_verified_after":len(confirmed_deals),
+        "observed_history_deal_ids_preserved_after_restart":True,
         "before_pending_orders":0,"after_pending_orders":0,
         "two_independent_broker_native_snapshots_compared":True,
         "same_profile_restart_certified":False,
