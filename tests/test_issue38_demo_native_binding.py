@@ -269,6 +269,25 @@ def test_rollback_repeated_contents_restores_immediate_predecessor(tmp_path):
     assert restored.read_bytes() != versions[1]
 
 
+def test_backup_sequence_survives_a_backwards_system_clock(tmp_path, monkeypatch):
+    """The most recent completed transition must win, even after clock drift."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    stage(mgr, d, ea, digest)
+    b = b"MZ-clock-B-QA"
+    ea.write_bytes(b)
+    staged = Path(stage(mgr, d, ea, hashlib.sha256(b).hexdigest(),
+                        allow_replace=True))
+    c = b"MZ-clock-C-QA"
+    ea.write_bytes(c)
+    monkeypatch.setattr("abutron.feeds.mt5_terminal.time.time_ns",
+                        lambda: 1000000000000000000)
+    stage(mgr, d, ea, hashlib.sha256(c).hexdigest(), allow_replace=True)
+    restored = Path(mgr.rollback_demo_writer_qa(data_dir=str(d)))
+    assert restored.read_bytes() == b
+
+
 def test_rollback_rejects_current_binary_with_no_committed_transition(tmp_path):
     """An unknown current digest must never select unrelated old backups."""
     d = terminal_dir(tmp_path)
