@@ -227,6 +227,142 @@ def test_backup_names_are_content_sha_bound_no_collision(tmp_path):
     assert len(names) == 2, "backup names must be unique per content"
 
 
+
+def test_rollback_rejects_unrelated_sha_named_file(tmp_path):
+    """SHA validity alone must not authorize an unrelated file as QA backup."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    staged = Path(stage(mgr, d, ea, digest))
+    expected_old = staged.read_bytes()
+    ea.write_bytes(b"MZnew-QA-version")
+    stage(mgr, d, ea, hashlib.sha256(ea.read_bytes()).hexdigest(),
+          allow_replace=True)
+    bdir = staged.parent / ".backup"
+    unrelated = b"MZunrelated-not-a-prior-writer"
+    bad_sha = hashlib.sha256(unrelated).hexdigest()
+    fake = bdir / f"NOT_APEX_WRITER.{bad_sha}.bak"
+    fake.write_bytes(unrelated)
+    with pytest.raises(Mt5Error, match="not an exact QA transaction"):
+        mgr.rollback_demo_writer_qa(data_dir=str(d))
+    assert staged.read_bytes() != unrelated
+    fake.unlink()
+    assert Path(mgr.rollback_demo_writer_qa(data_dir=str(d))).read_bytes() == expected_old
+
+
+def test_rollback_repeated_contents_restores_immediate_predecessor(tmp_path):
+    """A -> B -> A -> C MUST restore A, not B by older file mtime."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    versions = [ea.read_bytes(), b"MZversion-B-QA", ea.read_bytes(),
+                b"MZversion-C-QA"]
+    staged = Path(stage(mgr, d, ea, digest))
+    for new_bytes in versions[1:]:
+        ea.write_bytes(new_bytes)
+        stage(mgr, d, ea, hashlib.sha256(new_bytes).hexdigest(),
+              allow_replace=True)
+    backup_dir = staged.parent / ".backup"
+    assert len(list(backup_dir.glob("*.bak"))) == 3
+    restored = Path(mgr.rollback_demo_writer_qa(data_dir=str(d)))
+    assert restored.read_bytes() == versions[2]
+    assert restored.read_bytes() != versions[1]
+
+
+def test_backup_sequence_survives_a_backwards_system_clock(tmp_path, monkeypatch):
+    """The most recent completed transition must win, even after clock drift."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    stage(mgr, d, ea, digest)
+    b = b"MZ-clock-B-QA"
+    ea.write_bytes(b)
+    staged = Path(stage(mgr, d, ea, hashlib.sha256(b).hexdigest(),
+                        allow_replace=True))
+    c = b"MZ-clock-C-QA"
+    ea.write_bytes(c)
+    monkeypatch.setattr("abutron.feeds.mt5_terminal.time.time_ns",
+                        lambda: 1000000000000000000)
+    stage(mgr, d, ea, hashlib.sha256(c).hexdigest(), allow_replace=True)
+    restored = Path(mgr.rollback_demo_writer_qa(data_dir=str(d)))
+    assert restored.read_bytes() == b
+
+
+def test_rollback_rejects_current_binary_with_no_committed_transition(tmp_path):
+    """An unknown current digest must never select unrelated old backups."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    staged = Path(stage(mgr, d, ea, digest))
+    ea.write_bytes(b"MZnext-QA-binary")
+    stage(mgr, d, ea, hashlib.sha256(ea.read_bytes()).hexdigest(),
+          allow_replace=True)
+    staged.write_bytes(b"MZunknown-current-not-from-staging")
+    with pytest.raises(Mt5Error, match="no committed rollback"):
+        mgr.rollback_demo_writer_qa(data_dir=str(d))
+    assert staged.read_bytes() == b"MZunknown-current-not-from-staging"
+
+
+def test_rollback_ignores_uncommitted_backup_even_with_matching_target(tmp_path):
+    """An interrupted deployment's pending backup cannot be treated as history."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    staged = Path(stage(mgr, d, ea, digest))
+    first = staged.read_bytes()
+    ea.write_bytes(b"MZcommitted-new-QA")
+    new_sha = hashlib.sha256(ea.read_bytes()).hexdigest()
+    stage(mgr, d, ea, new_sha, allow_replace=True)
+    bdir = staged.parent / ".backup"
+    fake_old = b"MZuncommitted-not-current-old"
+    import time as time_module
+    pending = bdir / (
+        f"ApexNativeWriter.ex5.{time_module.time_ns()}.1234567890abcdef."
+        f"{hashlib.sha256(fake_old).hexdigest()}.{new_sha}.bak")
+    pending.write_bytes(fake_old)
+    assert not (bdir / (pending.name + ".committed")).exists()
+    assert Path(mgr.rollback_demo_writer_qa(data_dir=str(d))).read_bytes() == first
+
+
+def test_failed_commit_rolls_back_without_silently_accepting_new_binary(
+        tmp_path, monkeypatch):
+    """Failure to persist the transaction marker restores prior bytes."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    staged = Path(stage(mgr, d, ea, digest))
+    original = staged.read_bytes()
+    ea.write_bytes(b"MZnew-uncommitted-QA")
+    new_sha = hashlib.sha256(ea.read_bytes()).hexdigest()
+
+    def fail_commit(*args):
+        raise OSError("synthetic journal fsync failure")
+
+    monkeypatch.setattr(mgr, "_commit_backup", fail_commit)
+    with pytest.raises(OSError, match="journal fsync failure"):
+        stage(mgr, d, ea, new_sha, allow_replace=True)
+    assert staged.read_bytes() == original
+    assert not list((staged.parent / ".backup").glob("*.committed"))
+
+
+def test_rollback_rejects_symlinked_commit_marker(tmp_path):
+    """A substituted commit marker is not authentic proof of a transition."""
+    d = terminal_dir(tmp_path)
+    ea, digest = qa_bin(tmp_path)
+    mgr = manager(tmp_path)
+    staged = Path(stage(mgr, d, ea, digest))
+    ea.write_bytes(b"MZnew-stage-with-marker")
+    stage(mgr, d, ea, hashlib.sha256(ea.read_bytes()).hexdigest(),
+          allow_replace=True)
+    marker = next((staged.parent / ".backup").glob("*.committed"))
+    other = tmp_path / "external-marker"
+    other.write_bytes(marker.read_bytes())
+    marker.unlink()
+    marker.symlink_to(other)
+    with pytest.raises(Mt5Error, match="marker invalid"):
+        mgr.rollback_demo_writer_qa(data_dir=str(d))
+
+
 @pytest.mark.parametrize("missing", ["Files", "Experts"])
 def test_missing_mt5_data_folder_is_not_created(tmp_path, missing):
     d = terminal_dir(tmp_path)
