@@ -35,6 +35,10 @@ def main() -> None:
         sys.exit(f"account {cid} not found")
 
     log = EventLog(os.path.join(DATA_ROOT, "events.jsonl"))
+    # Record run-start time to remove stale-file ambiguity (Issue #38
+    # STALE_NATIVE_FILE): only snapshots produced for this invocation
+    # are eligible for certification.
+    run_start = time.time()
     demo_data_dir = os.getenv("ABUTRON_DEMO_MT5_DATA_DIR", "").strip()
     if demo_data_dir:
         # Bind to the existing DEMO terminal's exports without spawning a
@@ -75,7 +79,7 @@ def main() -> None:
             # from real broker evidence — never a manually supplied flag.
             if time.time() - last_publish >= 30:
                 try:
-                    certified = publish_exposure(cid, log=log)
+                    certified = publish_exposure(cid, log=log, since=run_start)
                     terminal_manager.mark_native_authenticated(cid, certified)
                     last_publish = time.time()
                 except Exception as exc:  # noqa: BLE001 - log, never crash the loop

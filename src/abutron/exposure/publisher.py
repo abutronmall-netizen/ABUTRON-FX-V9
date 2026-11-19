@@ -28,7 +28,8 @@ from ..feeds.mt5_terminal import Mt5TerminalManager, terminal_manager
 
 def publish_exposure(connection_id: str,
                      log: Optional[EventLog] = None,
-                     manager: Optional[Mt5TerminalManager] = None) -> Dict:
+                     manager: Optional[Mt5TerminalManager] = None,
+                     since: Optional[float] = None) -> Dict:
     """Read the broker-native exposure snapshot and certify it.
 
     Called by the MT5 worker after each native export cycle. Reads the
@@ -37,15 +38,20 @@ def publish_exposure(connection_id: str,
     equity. Certification is therefore derived from broker-native evidence,
     not a manually supplied flag.
 
-    Raises ``CrmError`` if the snapshot is missing, the nonce is invalid, or
-    the account is unknown — the caller should log and NOT certify (the
-    dispatcher then blocks on BLOCKED_INCOMPLETE_EXPOSURE, fail-closed).
+    ``since`` (unix timestamp) removes stale-file ambiguity: only
+    snapshots produced for the current invocation are considered (Issue
+    #38 ``STALE_NATIVE_FILE``). When None, the newest snapshot is used.
+
+    Raises ``CrmError`` if the snapshot is missing, stale, the nonce is
+    invalid, or the account is unknown — the caller should log and NOT
+    certify (the dispatcher then blocks on BLOCKED_INCOMPLETE_EXPOSURE,
+    fail-closed).
     """
     mgr = manager or terminal_manager
-    snapshot = mgr.read_native_exposure(connection_id)
+    snapshot = mgr.read_native_exposure(connection_id, since=since)
     if snapshot is None:
         raise CrmError(
-            f"no broker-native exposure snapshot for {connection_id}: "
+            f"no fresh broker-native exposure snapshot for {connection_id}: "
             "cannot certify exposure without authenticated broker evidence")
 
     nonce = snapshot.get("nonce", "")

@@ -512,23 +512,40 @@ class Mt5TerminalManager:
             "bars_file": bars,
         }
 
-    def read_native_exposure(self, connection_id: str) -> Optional[Dict]:
-        """Read the latest broker-native exposure snapshot (Issue #36).
+    def read_native_exposure(self, connection_id: str,
+                             since: Optional[float] = None) -> Optional[Dict]:
+        """Read a broker-native exposure snapshot (Issue #36/#38).
 
-        Returns the parsed ABUTRON_NATIVE_EXPOSURE_V2 export — open
+        Returns the parsed ``ABUTRON_NATIVE_EXPOSURE_V2`` export — open
         positions + equity/balance/currency authenticated by the native
         export nonce. This is the broker-native evidence the worker feeds
         to crm.certify_exposure so exposure certification is derived from
         real broker data, not a manually supplied flag.
+
+        ``since`` (unix timestamp) removes stale-file ambiguity: only
+        snapshots whose file mtime is >= ``since`` are considered. This
+        prevents a reused Wine prefix from returning an old snapshot as
+        if it were fresh (the Issue #38 ``STALE_NATIVE_FILE`` failure).
+        When ``since`` is None, the newest file is returned (legacy
+        behavior for read-only consumers).
+
+        Rejects symlinks, oversized files, and (on the fresh-run path)
+        snapshots whose connection_id/login/server do not match the
+        bound terminal.
         """
         term = self._terminals.get(connection_id)
         if term is None or not (term.is_running or term.external_evidence_only):
             return None
         pattern = os.path.join(term.export_dir,
                                "ABUTRON_NATIVE_EXPOSURE_V2_*.txt")
-        path = _latest_match(pattern)
-        if not path:
+        candidates = sorted(glob.glob(pattern),
+                            key=os.path.getmtime, reverse=True)
+        if since is not None:
+            candidates = [p for p in candidates
+                          if os.path.getmtime(p) >= since]
+        if not candidates:
             return None
+        path = candidates[0]
         try:
             # Reject symlink artifacts and incomplete files; never silently
             # interpret unreadable native evidence as a flat broker account.
@@ -540,8 +557,35 @@ class Mt5TerminalManager:
             return None
         if not isinstance(snapshot, dict):
             return None
+        # Account-binding check (fresh-run path only): when `since` is
+        # provided, the snapshot must belong to the bound terminal. This
+        # prevents a fresh run from accepting wrong-account/wrong-server
+        # data. Legacy read-only consumers (since=None) keep prior
+        # behavior; mark_native_authenticated still enforces the binding.
+        if since is not None and not self._snapshot_matches_terminal(snapshot, term):
+            return None
         snapshot["exposure_file"] = path
         return snapshot
+
+    @staticmethod
+    def _snapshot_matches_terminal(snapshot: Dict, term: "Terminal") -> bool:
+        """Verify a native snapshot is bound to the correct terminal.
+
+        Checks connection_id, login and server against the bound DEMO
+        terminal identity. A snapshot from a different account, server
+        or connection must never be accepted as evidence for this
+        terminal (fail-closed).
+        """
+        sid = str(snapshot.get("connection_id", "") or "")
+        if sid and sid != term.connection_id:
+            return False
+        slogin = str(snapshot.get("login", "") or "")
+        if slogin and slogin != str(term.login):
+            return False
+        sserver = str(snapshot.get("server", "") or "")
+        if sserver and sserver != term.server:
+            return False
+        return True
 
     def health(self, connection_id: str) -> Dict:
         term = self._terminals.get(connection_id)

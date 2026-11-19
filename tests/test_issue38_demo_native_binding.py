@@ -511,6 +511,92 @@ def test_untrusted_symlink_native_export_refused(tmp_path):
     assert mgr.read_native_exposure(CID) is None
 
 
+def test_read_native_exposure_rejects_stale_file(tmp_path):
+    """A snapshot older than the run-start time is rejected (STALE_NATIVE_FILE)."""
+    root = terminal_dir(tmp_path)
+    mgr = manager(tmp_path)
+    mgr.bind_demo_data_source(
+        connection_id=CID, broker="fpmarkets", login=LOGIN,
+        server=SERVER, data_dir=str(root), environment="demo",
+    )
+    path = root / "MQL5" / "Files" / "ABUTRON_NATIVE_EXPOSURE_V2_OLD.txt"
+    path.write_text(json.dumps(signed_flat_snapshot()))
+    # The file was created in the past, before the run started.
+    stale_time = time.time() - 3600
+    os.utime(path, (stale_time, stale_time))
+    # Without `since`: legacy behavior returns the file.
+    assert mgr.read_native_exposure(CID) is not None
+    # With `since` set to now: the stale file is rejected.
+    assert mgr.read_native_exposure(CID, since=time.time()) is None
+
+
+def test_read_native_exposure_accepts_fresh_file(tmp_path):
+    """A snapshot created after the run-start time is accepted."""
+    root = terminal_dir(tmp_path)
+    mgr = manager(tmp_path)
+    mgr.bind_demo_data_source(
+        connection_id=CID, broker="fpmarkets", login=LOGIN,
+        server=SERVER, data_dir=str(root), environment="demo",
+    )
+    run_start = time.time() - 1
+    path = root / "MQL5" / "Files" / "ABUTRON_NATIVE_EXPOSURE_V2_NEW.txt"
+    path.write_text(json.dumps(signed_flat_snapshot()))
+    fresh_time = time.time()
+    os.utime(path, (fresh_time, fresh_time))
+    snap = mgr.read_native_exposure(CID, since=run_start)
+    assert snap is not None
+    assert snap["nonce"].startswith("ABUTRON_NATIVE_")
+
+
+def test_read_native_exposure_rejects_wrong_account(tmp_path):
+    """A snapshot bound to a different connection_id is rejected (fresh run)."""
+    root = terminal_dir(tmp_path)
+    mgr = manager(tmp_path)
+    mgr.bind_demo_data_source(
+        connection_id=CID, broker="fpmarkets", login=LOGIN,
+        server=SERVER, data_dir=str(root), environment="demo",
+    )
+    bad = signed_flat_snapshot()
+    bad["connection_id"] = "different-connection-9999"
+    path = root / "MQL5" / "Files" / "ABUTRON_NATIVE_EXPOSURE_V2_WRONG.txt"
+    path.write_text(json.dumps(bad))
+    assert mgr.read_native_exposure(CID, since=time.time() - 1) is None
+
+
+def test_read_native_exposure_rejects_wrong_login(tmp_path):
+    """A snapshot bound to a different login is rejected (fresh run)."""
+    root = terminal_dir(tmp_path)
+    mgr = manager(tmp_path)
+    mgr.bind_demo_data_source(
+        connection_id=CID, broker="fpmarkets", login=LOGIN,
+        server=SERVER, data_dir=str(root), environment="demo",
+    )
+    bad = signed_flat_snapshot()
+    bad["login"] = str(LOGIN + 99999)
+    path = root / "MQL5" / "Files" / "ABUTRON_NATIVE_EXPOSURE_V2_WRONG.txt"
+    path.write_text(json.dumps(bad))
+    assert mgr.read_native_exposure(CID, since=time.time() - 1) is None
+
+
+def test_publish_exposure_rejects_stale_snapshot(tmp_path, monkeypatch):
+    """publish_exposure with `since` raises when only stale files exist."""
+    monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", QA_SECRET)
+    db = MemoryDB()
+    monkeypatch.setattr(crm, "engine", db)
+    root = terminal_dir(tmp_path)
+    mgr = manager(tmp_path)
+    mgr.bind_demo_data_source(
+        connection_id=CID, broker="fpmarkets", login=LOGIN,
+        server=SERVER, data_dir=str(root), environment="demo",
+    )
+    path = root / "MQL5" / "Files" / "ABUTRON_NATIVE_EXPOSURE_V2_OLD.txt"
+    path.write_text(json.dumps(signed_flat_snapshot()))
+    stale_time = time.time() - 3600
+    os.utime(path, (stale_time, stale_time))
+    with pytest.raises(CrmError, match="no fresh"):
+        publish_exposure(CID, manager=mgr, since=time.time())
+
+
 def test_bind_live_environment_refused(tmp_path):
     root = terminal_dir(tmp_path)
     mgr = manager(tmp_path)

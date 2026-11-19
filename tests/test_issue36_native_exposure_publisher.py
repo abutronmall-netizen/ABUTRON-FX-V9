@@ -302,7 +302,7 @@ def test_parse_native_nonce_invalid():
 # ------------------------------------------- publisher path
 def test_publisher_rejects_missing_snapshot(monkeypatch):
     class _Mgr:
-        def read_native_exposure(self, cid):
+        def read_native_exposure(self, cid, since=None):
             return None
 
     monkeypatch.setattr(crm, "engine", types.SimpleNamespace(
@@ -314,7 +314,7 @@ def test_publisher_rejects_missing_snapshot(monkeypatch):
 
 def test_publisher_rejects_forged_nonce(monkeypatch):
     class _Mgr:
-        def read_native_exposure(self, cid):
+        def read_native_exposure(self, cid, since=None):
             return {"nonce": "forged", "equity": "10000.00",
                     "currency": "USD", "positions": []}
 
@@ -330,7 +330,7 @@ def test_publisher_certifies_from_authenticated_snapshot(monkeypatch):
     snap = _signed_snapshot()
 
     class _Mgr:
-        def read_native_exposure(self, cid):
+        def read_native_exposure(self, cid, since=None):
             return snap
 
     store = _account()
@@ -362,7 +362,7 @@ def test_publisher_rejects_unsigned_snapshot(monkeypatch):
     snap["sig"] = ""  # strip the signature
 
     class _Mgr:
-        def read_native_exposure(self, cid):
+        def read_native_exposure(self, cid, since=None):
             return snap
 
     monkeypatch.setattr(crm, "engine", types.SimpleNamespace(
