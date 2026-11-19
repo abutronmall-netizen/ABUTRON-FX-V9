@@ -1,0 +1,98 @@
+name: ABUTRON FP DEMO Issue39 Native Evidence Compile QA
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mql5/AbutronFPNativeOrderBridgeV101.mq5'
+      - 'mql5/AdaptiveRiskProofV2.mqh'
+      - '.github/workflows/issue39-fp-native-evidence-compile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-native-fp-evidence:
+    name: Official signed MetaEditor compile - NO MT5 account or broker session
+    runs-on: windows-2022
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch official MetaQuotes installer and verify signature
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup
+          $sig = Get-AuthenticodeSignature -FilePath $setup
+          if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate -or
+              $sig.SignerCertificate.Subject -notmatch 'MetaQuotes') {
+            throw 'Official MetaEditor installer signature invalid'
+          }
+
+      - name: Install isolated MetaEditor without broker credentials
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          $install = Join-Path $env:RUNNER_TEMP 'Issue39NativeCompiler'
+          New-Item -Path $install -ItemType Directory -Force | Out-Null
+          $proc = Start-Process -FilePath $setup -ArgumentList @('/auto', ('/path:"{0}"' -f $install)) -Wait -PassThru
+          if (-not (Test-Path (Join-Path $install 'metaeditor64.exe'))) {
+            throw "Official MetaEditor was not installed (exit=$($proc.ExitCode))"
+          }
+
+      - name: Compile FP demo bridge and validate actual diagnostics
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = Join-Path $env:RUNNER_TEMP 'Issue39NativeCompiler\metaeditor64.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'mql5\AbutronFPNativeOrderBridgeV101.mq5'
+          $reportPath = [IO.Path]::ChangeExtension($source, '.log')
+          $ex5 = [IO.Path]::ChangeExtension($source, '.ex5')
+          & $compiler "/compile:$source" '/log'
+          $deadline = (Get-Date).AddMinutes(3)
+          $report = ''
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $reportPath) {
+              $report = Get-Content -LiteralPath $reportPath -Encoding Unicode -Raw
+              if ($report -match '(?mi)^Result:') { break }
+            }
+            Start-Sleep -Milliseconds 750
+          }
+          if ($report -notmatch '(?mi)Result:\s*0 errors') {
+            throw "FP native compile failed or report incomplete: $report"
+          }
+          if (-not (Test-Path -LiteralPath $ex5)) {
+            throw 'EX5 missing despite successful native compile'
+          }
+          $hash = (Get-FileHash -LiteralPath $ex5 -Algorithm SHA256).Hash
+          "AbutronFPNativeOrderBridgeV101.ex5 SHA256 $hash" | Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5\AbutronFPNativeOrderBridgeV101.ex5.sha256.txt')
+          Write-Host $report
+          Write-Host "ISSUE39_NATIVE_EX5_SHA256=$hash"
+          Write-Host 'NO DEMO/LIVE ACCOUNT, CRM OR CHART USED. NOT DEPLOYED.'
+
+      - name: Preserve compiler diagnostics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: abutron-issue39-fp-native-compile-log
+          retention-days: 21
+          if-no-files-found: warn
+          path: |
+            mql5/AbutronFPNativeOrderBridgeV101.log
+            mql5/AbutronFPNativeOrderBridgeV101.ex5.sha256.txt
+
+      - name: Preserve compiled EX5 for isolated DEMO QA only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abutron-issue39-fp-native-evidence-ex5-demo-qa
+          retention-days: 7
+          if-no-files-found: error
+          path: mql5/AbutronFPNativeOrderBridgeV101.ex5
