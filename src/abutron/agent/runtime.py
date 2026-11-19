@@ -53,6 +53,7 @@ class AgenticRuntimeResult:
     candidates_generated: int = 0
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     dispatch_results: List[Dict[str, Any]] = field(default_factory=list)
+    reserved_candidate_ids: List[str] = field(default_factory=list)
     dispatch_blocked: bool = False
     dispatch_reason: str = ""
     broker_native_signal_certified: bool = False
@@ -73,6 +74,7 @@ class AgenticRuntimeResult:
             "candidates_generated": self.candidates_generated,
             "candidates": self.candidates,
             "dispatch_results": self.dispatch_results,
+            "reserved_candidate_ids": self.reserved_candidate_ids,
             "dispatch_blocked": self.dispatch_blocked,
             "dispatch_reason": self.dispatch_reason,
             "broker_native_signal_certified": self.broker_native_signal_certified,
@@ -118,6 +120,10 @@ def run_agentic_pass(
     since: Optional[float] = None,
     event_log: Optional[Any] = None,
     override: Optional[OperatorOverride] = None,
+    native_specs: Optional[Dict[str, Dict[str, Any]]] = None,
+    owner_open_risk_usd: Optional[float] = None,
+    owner_equity_usd: Optional[float] = None,
+    native_writer: Optional[Dict[str, str]] = None,
 ) -> AgenticRuntimeResult:
     """Run one full agentic pass: real data -> brain -> gated dispatch.
 
@@ -267,15 +273,106 @@ def run_agentic_pass(
                 reason_code="LIVE_NOT_AUTHORIZED"))
             return result
 
-    # --- Dispatch via the existing NativeDispatcher -----------------
+    # --- Real agentic candidates -> account-scoped native reservations ---
+    # The AI quantity is NOT a broker lot size. Convert only from current
+    # account-bound native contract/quote/OrderCalcProfit evidence.
+    if native_specs is None or owner_open_risk_usd is None or owner_equity_usd is None:
+        result.dispatch_blocked = True
+        result.dispatch_reason = "NATIVE_BROKER_ORDER_GEOMETRY_MISSING"
+        return result
+    # A model decision is not a reservation until an account-native EA
+    # can actually receive it. Prevent orphaned/stale queued decisions.
+    gateway = None
+    if dispatcher is None:
+        if not native_writer:
+            result.dispatch_blocked = True
+            result.dispatch_reason = "ACCOUNT_NATIVE_EA_ATTACHMENT_MISSING"
+            return result
+        # MQL5 native ActivationRevision is HMAC(secret, connection|seed).
+        # CRM revision is a separate account control, checked independently.
+        import os
+        from ..crypto import hmac_sign
+        if str(native_writer.get("crm_activation_revision", "")) != str(account.get("activation_revision", "")):
+            result.dispatch_blocked = True
+            result.dispatch_reason = "CRM_ACTIVATION_REVISION_CHANGED"
+            return result
+        try:
+            seed = int(native_writer["activation_seed"])
+            native_rev = hmac_sign(os.environ["ABUTRON_ACTIVATION_SECRET"],
+                                   connection_id + "|" + str(seed))
+        except (KeyError, ValueError, TypeError):
+            result.dispatch_blocked = True
+            result.dispatch_reason = "NATIVE_EA_ACTIVATION_SEED_NOT_BOUND"
+            return result
+        gateway = SingleWriterGateway(event_log=log)
+        status = gateway.arm(
+            connection_id=connection_id,
+            ea_path=native_writer["ea_path"],
+            expected_sha256=native_writer["ea_sha256"],
+            activation_revision=native_rev,
+            broker=broker,
+            mql5_files_dir=native_writer["mql5_files_dir"],
+        )
+        if not status.armed:
+            result.dispatch_blocked = True
+            result.dispatch_reason = "ACCOUNT_NATIVE_EA_NOT_ARMED"
+            return result
+
+    from types import SimpleNamespace
+    from ..execution.native_agentic_sizing import (
+        NativeSizingError, plan_native_agentic_order)
+    import json
+    from ..config import utc_now
+    for cand in candidates:
+        try:
+            plan = plan_native_agentic_order(
+                SimpleNamespace(**cand), native_specs[cand["symbol"]],
+                equity_usd=float(account.get("equity", 0.0)),
+                owner_open_risk_usd=float(owner_open_risk_usd),
+                owner_equity_usd=float(owner_equity_usd))
+        except (KeyError, ValueError, TypeError, NativeSizingError):
+            log.append(make_event(
+                "agentic.native_plan_rejected", connection_id=connection_id,
+                broker=broker, execution_state="HOLD",
+                reason_code="BROKER_NATIVE_ORDER_GEOMETRY_INVALID"))
+            continue
+        # Connection scope is part of the replay key: one symbol/bar on
+        # another account must never suppress an independent account.
+        replay_key = (connection_id + ":" + str(cand["symbol"]) + ":" +
+                      str(cand.get("bar_open", "")) + ":" + str(cand["direction"]))
+        row = dict(candidate_id=cand["candidate_id"],
+                   connection_id=connection_id, owner_id=owner_id,
+                   broker=broker, symbol=cand["symbol"],
+                   timeframe=str(cand.get("timeframe", "M5")),
+                   bar_open=str(cand.get("bar_open", "")),
+                   replay_key=replay_key, direction=cand["direction"],
+                   conviction=float(cand.get("conviction", 0.0)),
+                   agent_votes=json.dumps({"source": "AGENTIC_V9",
+                                           "native_order_plan": plan}),
+                   risk_fraction=float(cand.get("risk_fraction", 0.0)),
+                   stop_risk_usd=plan["estimated_stop_risk_usd"],
+                   volume=plan["volume"], price=plan["price"],
+                   stop_loss=plan["stop_loss"], take_profit=plan["take_profit"],
+                   entry_type="CONFIRM", trigger_price=plan["price"],
+                   trail_k=2.0, trail_stop=0.0,
+                   execution_state="RESERVED",
+                   reason_code="V9_BROKER_NATIVE_PLAN",
+                   created_at=utc_now(), updated_at=utc_now())
+        if engine_db.add_candidate(row):
+            result.reserved_candidate_ids.append(cand["candidate_id"])
+    if not result.reserved_candidate_ids:
+        result.dispatch_blocked = True
+        result.dispatch_reason = "NO_NEW_BROKER_SIZED_AGENTIC_CANDIDATES"
+        return result
+
+    # --- Use the already-armed native single writer for this account ---
     if dispatcher is None:
         dispatcher = NativeDispatcher(
-            event_log=log,
-            gateway=SingleWriterGateway(event_log=log),
-            receipt_mgr=ReceiptManager(event_log=log),
-        )
+            event_log=log, gateway=gateway,
+            receipt_mgr=ReceiptManager(event_log=log))
 
-    dispatch_result = dispatcher.dispatch_account(connection_id)
+    dispatch_result = dispatcher.dispatch_account(
+        connection_id, candidate_ids=result.reserved_candidate_ids)
     result.dispatch_results = dispatch_result.get("details", [])
     if dispatch_result.get("error"):
         result.dispatch_blocked = True

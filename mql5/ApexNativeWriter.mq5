@@ -30,6 +30,9 @@ input string  InpBrokerServer   = "";           // broker server
 input long    InpActivationSeed = 0;            // activation seed (per arm)
 input string  InpActivationSecret = "";         // HMAC key (or file-provisioned)
 input bool    InpExposureOnly   = true;         // QA default: export only, NO OrderSend
+input ulong   InpTradeMagic     = 20261120;      // V9-owned trades only
+input bool    InpTrailingEnabled = true;          // only active if InpExposureOnly=false
+input double  InpTrailingAtrMult = 2.0;           // closed-M5 ATR distance
 input int     InpManagedCharts  = 0;            // 0 = all charts with EA
 input double  InpRiskFraction   = 0.15;         // per-trade risk fraction (display)
 input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
@@ -83,7 +86,10 @@ void OnTimer()
    ExportNativeData();
    // DEMO exposure QA is strictly read-only unless explicitly reconfigured.
    if(!InpExposureOnly)
+   {
       ProcessOrderRequests();
+      ManageAgenticTrailingStops();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -293,8 +299,8 @@ void ProcessOrderRequests()
    if(!FileIsExist(pending)) return;
 
    // Open and read the pending request
-   int h = FileOpen(pending, FILE_READ | FILE_TXT);
-   if(h <= 0) { FileDelete(pending); return; }
+   int h = FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+   if(h == INVALID_HANDLE) { return; }
    string body = FileReadString(h);
    FileClose(h);
 
@@ -371,6 +377,7 @@ void ProcessOrderRequests()
    req.tp        = tp;
    req.type      = (dirn == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    req.deviation = 10;
+   req.magic     = InpTradeMagic;
 
    // Validate actual broker stop-risk, not raw AI position_size * price.
    // InpRiskFraction is the configured per-trade PERCENT, e.g. 0.15%.
@@ -762,3 +769,120 @@ double JsonNum(string json, string key)
    return(StringToDouble(num));
 }
 //+------------------------------------------------------------------+
+
+
+//+------------------------------------------------------------------+
+//| Native MT5 trailing: broker-side SLTP, actual retcode + readback   |
+//| Only this V9 writer's magic-numbered positions may be modified.   |
+//+------------------------------------------------------------------+
+void ManageAgenticTrailingStops()
+{
+   if(InpExposureOnly || !InpTrailingEnabled || InpTrailingAtrMult <= 0.0)
+      return;
+   if(AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO)
+      return;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpTradeMagic)
+         continue;
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      long side = PositionGetInteger(POSITION_TYPE);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double oldSL = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      if(entry <= 0.0 || oldSL <= 0.0 || tp <= 0.0)
+         continue;
+      if((side == POSITION_TYPE_BUY && oldSL >= entry && oldSL >= tp) ||
+         (side == POSITION_TYPE_SELL && oldSL <= entry && oldSL <= tp))
+         continue;
+
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol,tick) || tick.bid <= 0.0 || tick.ask <= 0.0)
+         continue;
+      double favorable = (side == POSITION_TYPE_BUY) ?
+                         tick.bid - entry : entry - tick.ask;
+      double riskDistance = MathAbs(entry - oldSL);
+      if(riskDistance <= 0.0 || favorable < riskDistance)
+         continue;
+
+      int atrHandle = iATR(symbol, PERIOD_M5, 14);
+      if(atrHandle == INVALID_HANDLE)
+         continue;
+      double atr[1];
+      int copied = CopyBuffer(atrHandle, 0, 1, 1, atr);
+      IndicatorRelease(atrHandle);
+      if(copied != 1 || !MathIsValidNumber(atr[0]) || atr[0] <= 0.0)
+         continue;
+
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+      if(point <= 0.0 || tickSize <= 0.0)
+         continue;
+      long stops = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      long freeze = SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+      double brokerDistance = (double)MathMax(stops, freeze) * point + tickSize;
+      double gap = InpTrailingAtrMult * atr[0];
+      double target = (side == POSITION_TYPE_BUY) ?
+                      MathMax(entry, tick.bid - gap) :
+                      MathMin(entry, tick.ask + gap);
+      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+      target = NormalizeDouble(target, digits);
+      if(side == POSITION_TYPE_BUY)
+      {
+         if(target <= oldSL + tickSize ||
+            target >= tick.bid - brokerDistance || target >= tp)
+            continue;
+      }
+      else
+      {
+         if(target >= oldSL - tickSize ||
+            target <= tick.ask + brokerDistance || target <= tp)
+            continue;
+      }
+      MqlTradeRequest modify;
+      MqlTradeResult result;
+      ZeroMemory(modify); ZeroMemory(result);
+      modify.action = TRADE_ACTION_SLTP;
+      modify.symbol = symbol;
+      modify.position = ticket;
+      modify.sl = target;
+      modify.tp = tp;
+      modify.magic = InpTradeMagic;
+      bool sent = OrderSend(modify,result);
+      double readback = 0.0;
+      bool found = PositionSelectByTicket(ticket);
+      if(found)
+         readback = PositionGetDouble(POSITION_SL);
+      bool verified = sent && result.retcode == TRADE_RETCODE_DONE &&
+                      found && MathAbs(readback - target) <= tickSize;
+      WriteAgenticTrailingReceipt(ticket, symbol, oldSL, target,
+                                 readback, tp, result.retcode, verified);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Broker-side trailing receipts, separate from entry ACK files      |
+//+------------------------------------------------------------------+
+void WriteAgenticTrailingReceipt(ulong ticket, string symbol,
+                                double previousSL, double requestedSL,
+                                double brokerSL, double tp,
+                                uint retcode, bool verified)
+{
+   string fname = "ABUTRON_NATIVE_TRAILING_V1_" +
+                  IntegerToString((long)ticket) + "_" +
+                  IntegerToString((long)TimeCurrent()) + ".json";
+   string status = verified ? "BROKER_READBACK_VERIFIED" : "UNKNOWN";
+   string payload = StringFormat(
+      "{\"connection_id\":\"%s\",\"login\":%I64d," +
+      "\"ticket\":%I64d,\"symbol\":\"%s\"," +
+      "\"previous_sl\":%.8f,\"requested_sl\":%.8f," +
+      "\"broker_sl\":%.8f,\"tp\":%.8f," +
+      "\"retcode\":%u,\"state\":\"%s\"}",
+      InpConnectionId, AccountInfoInteger(ACCOUNT_LOGIN),
+      (long)ticket, symbol, previousSL, requestedSL,
+      brokerSL, tp, retcode, status);
+   WriteTextFile(fname, payload);
+}

@@ -13,7 +13,10 @@ from pathlib import Path
 def make_probe(source: str) -> str:
     timer = """   // DEMO exposure QA is strictly read-only unless explicitly reconfigured.
    if(!InpExposureOnly)
-      ProcessOrderRequests();"""
+   {
+      ProcessOrderRequests();
+      ManageAgenticTrailingStops();
+   }"""
     assert source.count(timer) == 1, "Unexpected OnTimer layout"
     source = source.replace(
         timer,
@@ -40,9 +43,15 @@ def make_probe(source: str) -> str:
         'input bool    InpExposureOnly   = true; // NO-ORDER build, fixed behavior',
         1,
     )
+    trailing_marker = "//| Native MT5 trailing: broker-side SLTP"
+    assert source.count(trailing_marker) == 1, "Unexpected trailing layout"
+    trailing_start = source.rfind("//+------------------------------------------------------------------+", 0, source.index(trailing_marker))
+    source = source[:trailing_start]
     for forbidden in (
         "OrderSend(", "ProcessOrderRequests(", "WriteReceipt(",
-        "TRADE_ACTION_DEAL", "ABUTRON_REQ_PENDING", "FileDelete(",
+        "ManageAgenticTrailingStops(", "WriteAgenticTrailingReceipt(",
+        "TRADE_ACTION_DEAL", "TRADE_ACTION_SLTP",
+        "ABUTRON_REQ_PENDING", "FileDelete(",
     ):
         assert forbidden not in source, f"Order capability retained: {forbidden}"
     assert "void ExportNativeData()" in source

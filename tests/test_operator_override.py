@@ -94,6 +94,10 @@ class _FakeDB:
             _os.remove(_ev_path)
         self.event_log = EventLog(path=_ev_path)
 
+    def add_candidate(self, row):
+        self._last_candidate = dict(row)
+        return True
+
     def get_account(self, connection_id):
         return self._account if connection_id == CID else None
 
@@ -151,7 +155,7 @@ class _MockDispatcher:
             "unknown": 0, "rejected": 0, "details": [],
         }
 
-    def dispatch_account(self, connection_id):
+    def dispatch_account(self, connection_id, candidate_ids=None):
         return self._result
 
 
@@ -443,7 +447,16 @@ def test_override_does_not_bypass_exposure_certification(monkeypatch):
     result = run_agentic_pass(
         CID, broker=BROKER, owner_id="owner1",
         engine=_PositiveEngine(), adapter=_adapter(),
-        override=ov, dispatcher=blocked_dispatcher)
+        override=ov, dispatcher=blocked_dispatcher,
+        native_specs={"EURUSD.r": dict(
+            symbol="EURUSD.r", bid=1.1001, ask=1.1003,
+            tick_age_ms=0, tick_size=0.0001, point=0.0001,
+            min_lots=0.01, max_lots=10, volume_step=0.01,
+            stops_level_points=2, freeze_level_points=2,
+            pnl_probe_displacement_ticks=10,
+            buy_probe_native_ordercalcprofit_usd=-1,
+            broker_tick_value_loss=1)},
+        owner_open_risk_usd=0, owner_equity_usd=10000)
     # Policy gate was bypassed (not DEMO_NOT_EFFECTIVE_ON), but
     # exposure certification still blocked the dispatch.
     assert result.dispatch_reason != "DEMO_NOT_EFFECTIVE_ON"
