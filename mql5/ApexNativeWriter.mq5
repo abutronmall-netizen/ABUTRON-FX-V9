@@ -344,8 +344,9 @@ void ProcessOrderRequests()
    }
 
    double price = 0.0;
-   if(dirn == "BUY")  price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   else               price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   // Use the requested instrument, not whichever chart hosts the EA.
+   if(dirn == "BUY")  price = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   else               price = SymbolInfoDouble(symbol, SYMBOL_BID);
 
    // Floor volume to broker lot step — never round up.
    // If the floored lot is below the minimum, REJECT (not increase).
@@ -370,6 +371,36 @@ void ProcessOrderRequests()
    req.tp        = tp;
    req.type      = (dirn == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    req.deviation = 10;
+
+   // Validate actual broker stop-risk, not raw AI position_size * price.
+   // InpRiskFraction is the configured per-trade PERCENT, e.g. 0.15%.
+   double brokerStopPnL = 0.0;
+   double accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(price <= 0.0 || sl <= 0.0 || tp <= 0.0 || accountEquity <= 0.0 ||
+      InpRiskFraction <= 0.0 ||
+      !OrderCalcProfit(req.type, symbol, normVol, price, sl, brokerStopPnL) ||
+      !MathIsValidNumber(brokerStopPnL) || brokerStopPnL >= 0.0 ||
+      -brokerStopPnL > accountEquity * InpRiskFraction / 100.0)
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "BROKER_NATIVE_STOP_RISK_INVALID",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
+
+   // Run the broker's real margin/filling/stop validation before OrderSend.
+   MqlTradeCheckResult nativeCheck;
+   ZeroMemory(nativeCheck);
+   if(!OrderCheck(req, nativeCheck) ||
+      (nativeCheck.retcode != TRADE_RETCODE_DONE &&
+       nativeCheck.retcode != TRADE_RETCODE_PLACED &&
+       nativeCheck.retcode != 0))
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "BROKER_NATIVE_ORDERCHECK_FAILED",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
 
    if(OrderSend(req, res))
    {
