@@ -110,6 +110,21 @@ void WriteReadiness()
     IntegerToString((long)EnableNativeDemoOrders)+"\r\n");
   FileFlush(mh);FileClose(mh);
  }
+ // Separate native status for Issue44 stop trailing. This file does not
+ // grant permission; it exposes the exact input actually loaded by MT5.
+ // The original V2/V3 broker-entry readiness formats remain unchanged.
+ string trailReady="ABUTRON_FP_TRAILING_READY_V1_"+gNonce+".txt";
+ int th=FileOpen(trailReady,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
+ if(th!=INVALID_HANDLE)
+ {
+  string trailBody="APEX_FP_NATIVE_TRAILING_READY_V1\r\n"+
+     gNonce+"\r\n"+gLogin+"\r\n"+gServer+"\r\n"+
+     (VerifiedDemoAccount()?"DEMO_VERIFIED":"UNVERIFIED")+"\r\n"+
+     IntegerToString((long)TimeGMT())+"\r\n"+
+     IntegerToString((long)EnableNativeChandelierTrailing)+"\r\n"+
+     IntegerToString((long)EnableNativeDemoOrders)+"\r\n";
+  FileWriteString(th,trailBody);FileFlush(th);FileClose(th);
+ }
  // Exact new policy marker; only the $50/$100 build emits this proof.
  // Used by the Python new-order gate; old V2 does not write this file.
  string usdproof="ABUTRON_FP_BRIDGE_USD_50_100_"+gNonce+".txt";
