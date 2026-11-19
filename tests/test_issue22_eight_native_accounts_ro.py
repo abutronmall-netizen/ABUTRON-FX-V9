@@ -145,6 +145,59 @@ class EightAccountCoverage(unittest.TestCase):
     with self.assertRaisesRegex(m.AccountCoverageError,"BROKER_ACCOUNT_OPEN_POSITIONS_DO_NOT_MATCH_OWNER"):
      self.validate(a)
 
+ def registration_fixture(self):
+    a=bundle()
+    rows=[]
+    for suffix in m.FP_SUFFIXES:
+      a[1][suffix]["history_from_broker_time"]=1785000000+7200
+      a[1][suffix]["history_to_broker_time"]=1795100000+7200
+      a[1][suffix]["broker_clock_offset_seconds"]=7200
+      rows.append((suffix,1794500000,"FPMarketsSC-Demo"))
+    return a,rows
+
+ def test_all_four_crm_registrations_inside_native_window_not_issuer_inception(self):
+    accounts,rows=self.registration_fixture()
+    r=m.crm_window_check(m.build(*accounts),accounts[1],rows)
+    self.assertEqual(r["crm_registration_covered_by_native_window_count"],4)
+    self.assertFalse(r["all_eight_issuer_certified_lifetime"])
+    for row in r["accounts"]:
+      if row["broker"]=="FP Markets" and row["environment"]=="DEMO":
+        self.assertTrue(row["native_90day_history_spans_local_crm_registration"])
+        self.assertGreater(row["window_earlier_than_crm_registration_days"],1)
+        self.assertFalse(row["crm_registration_is_broker_issued_inception"])
+
+ def test_duplicate_crm_account_suffix_rejected(self):
+    accounts,rows=self.registration_fixture()
+    rows[1]=rows[0]
+    with self.assertRaises(m.AccountCoverageError):
+      m.crm_window_check(m.build(*accounts),accounts[1],rows)
+
+ def test_crm_server_must_match_broker(self):
+    accounts,rows=self.registration_fixture()
+    rows[2]=(rows[2][0],rows[2][1],"FPMarketsSC-Live")
+    with self.assertRaisesRegex(m.AccountCoverageError,"CRM_ACCOUNT_IDENTITY"):
+      m.crm_window_check(m.build(*accounts),accounts[1],rows)
+
+ def test_native_clock_must_be_attested(self):
+    accounts,rows=self.registration_fixture()
+    accounts[1]["1636"]["broker_clock_offset_seconds"]=0
+    with self.assertRaisesRegex(m.AccountCoverageError,"BROKER_CLOCK_OFFSET_NOT_AUTHENTICATED"):
+      m.crm_window_check(m.build(*accounts),accounts[1],rows)
+
+ def test_history_starting_after_crm_creation_refused(self):
+    accounts,rows=self.registration_fixture()
+    accounts[1]["2582"]["history_from_broker_time"]=1794700000+7200
+    with self.assertRaisesRegex(m.AccountCoverageError,"DOES_NOT_SPAN_CRM"):
+      m.crm_window_check(m.build(*accounts),accounts[1],rows)
+
+ def test_created_at_inferred_funding_not_promoted_to_deposit(self):
+    accounts,rows=self.registration_fixture()
+    d=m.crm_window_check(m.build(*accounts),accounts[1],rows)
+    for rec in d["accounts"]:
+      if rec["broker"]=="FP Markets" and rec["environment"]=="DEMO":
+        self.assertTrue(rec["initial_funding_is_inferred_not_native_issuer_proved"])
+        self.assertFalse(rec["issuer_independent_full_account_lifetime_certified"])
+
  def test_no_broker_mutation_api(self):
     text=P.read_text()
     for banned in ("OrderSend(","TRADE_ACTION_DEAL","TRADE_ACTION_SLTP",
