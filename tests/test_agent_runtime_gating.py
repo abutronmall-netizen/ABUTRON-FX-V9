@@ -122,6 +122,8 @@ class _Candidate:
     stop_loss = 1.0990
     take_profit = 1.1030
     trigger_price = 1.1002
+    price = 1.1002
+    risk_fraction = 0.15
 
 
 class _PositiveEngine(_StubEngine):
