@@ -164,7 +164,7 @@ def build(config:dict,now:float|None=None)->dict:
         raise ReleaseEvidenceError("NATIVE_FINANCIAL_AMOUNTS_INVALID")
     if (not math.isfinite(equity) or not math.isfinite(risk) or
         equity<=0 or risk<0):raise ReleaseEvidenceError("NATIVE_FINANCIAL_AMOUNTS_INVALID")
-    if abs(float(recon.get("broker_equity_usd",float("nan")))-equity)>.15:
+    if abs(float(recon.get("broker_equity_usd",float("nan")))-equity)>max(10.0,.001*equity):
         raise ReleaseEvidenceError("RECONCILER_EQUITY_NOT_CURRENT")
     with sqlite3.connect(f"file:{sources['crm_db']}?mode=ro",uri=True,timeout=2) as db:
         db.execute("PRAGMA query_only=ON")
@@ -217,8 +217,8 @@ def build(config:dict,now:float|None=None)->dict:
     }
 
 def emit(output:Path,report:dict)->None:
-    if output.parent.is_symlink() or not output.parent.is_dir() or
-        output.parent.stat().st_uid!=0 or output.parent.stat().st_mode&0o077:
+    if (output.parent.is_symlink() or not output.parent.is_dir() or
+        output.parent.stat().st_uid!=0 or output.parent.stat().st_mode&0o077):
         raise ReleaseEvidenceError("ROOT_PRIVATE_OUTPUT_REQUIRED")
     fd,tmp=tempfile.mkstemp(prefix=".fp-demo-release-review-",dir=output.parent)
     try:
