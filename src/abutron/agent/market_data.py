@@ -16,6 +16,7 @@ inference scores for real Candle/Quote data.
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import time
 from dataclasses import dataclass, field
@@ -119,11 +120,16 @@ class BrokerNativeMarketDataAdapter:
                 f"native export envelope invalid for {cid}: "
                 + ", ".join(errors))
 
+        if identity.get("server") != self.server or not self.server:
+            raise MarketDataError("native export server does not match bound terminal")
+
         # Freshness check: reject stale sources by heartbeat timestamp.
         # The identity heartbeat is the authoritative source timestamp.
         hb_raw = identity.get("worker_health_ts", "")
         export_ts = _parse_health_ts(hb_raw)
-        if since is not None and export_ts > 0 and export_ts < since:
+        if export_ts <= 0 or export_ts > time.time() + 5:
+            raise MarketDataError("native export heartbeat invalid or future")
+        if since is not None and export_ts < since:
             raise MarketDataError(
                 f"native M5 export stale for {cid}: "
                 f"heartbeat older than run start")
@@ -211,7 +217,7 @@ def _parse_health_ts(hb: str) -> float:
     if not hb:
         return 0.0
     try:
-        return time.mktime(time.strptime(hb, "%Y-%m-%dT%H:%M:%SZ"))
+        return calendar.timegm(time.strptime(hb, "%Y-%m-%dT%H:%M:%SZ"))
     except (ValueError, TypeError):
         return 0.0
 
@@ -256,15 +262,20 @@ def run_shadow_decision_pass(
         if c.closed:
             history_by_key.setdefault(
                 (c.symbol, c.timeframe), []).append(c)
+    latest_closed = []
     for (symbol, timeframe), candles in history_by_key.items():
-        engine.set_history(symbol, timeframe, candles)
+        ordered = sorted(candles, key=lambda c: c.open_time)
+        engine.set_history(symbol, timeframe, ordered)
+        # The engine evaluates the FIRST candle per symbol it sees.
+        # Give it the latest closed bar, not the oldest warm-up bar.
+        latest_closed.append(ordered[-1])
 
     # Call the existing decision engine with real Candle/Quote objects.
     candidates = engine.run_decision_pass(
         connection_id=connection_id,
         broker=broker,
         owner_id=owner_id,
-        candles=md.candles,
+        candles=latest_closed,
         quotes=md.quotes,
         account=account,
         equity=equity if equity is not None else float(
@@ -289,7 +300,9 @@ def run_shadow_decision_pass(
         ],
         "source_hash": md.source_hash,
         "source_ts": md.source_ts,
-        "broker_native_signal_certified": len(candidates) > 0,
+        # A candidate is not a broker-acknowledged trade or certified fill.
+        "broker_native_signal_certified": False,
+        "shadow_decision_evaluated": True,
         "connection_id": md.connection_id,
         "broker": md.broker,
         "login": md.login,
