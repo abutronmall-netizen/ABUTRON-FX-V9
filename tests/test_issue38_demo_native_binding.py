@@ -277,3 +277,19 @@ def test_native_hmac_known_answer_and_utf8_export():
         "expJson += posJson", 1)[0]
     assert (chr(92) * 3 + '"') not in fragment
     assert fragment.count(chr(92) + '"') >= 20
+
+
+def test_generated_probe_has_no_order_authority():
+    import sys
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "scripts"))
+    from generate_issue38_exposure_probe import make_probe
+    generated = make_probe((root / "mql5" / "ApexNativeWriter.mq5").read_text())
+    assert "OrderSend(" not in generated
+    assert "ProcessOrderRequests(" not in generated
+    assert "TRADE_ACTION_DEAL" not in generated
+    assert "ABUTRON_REQ_PENDING" not in generated
+    assert "WriteReceipt(" not in generated
+    assert "void ExportNativeData()" in generated
+    assert "FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8" in generated
+    assert "ACCOUNT_TRADE_MODE_DEMO" in generated

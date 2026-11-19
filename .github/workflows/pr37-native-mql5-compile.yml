@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'mql5/ApexNativeWriter.mq5'
+      - 'scripts/generate_issue38_exposure_probe.py'
       - '.github/workflows/pr37-native-mql5-compile.yml'
   workflow_dispatch:
 
@@ -108,3 +109,53 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           path: mql5/ApexNativeWriter.ex5
+
+
+      - name: Generate no-order DEMO exposure probe (OrderSend removed)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/generate_issue38_exposure_probe.py --source mql5/ApexNativeWriter.mq5 --output mql5/ApexNativeExposureProbe.mq5
+
+      - name: Native compile no-order DEMO exposure probe
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = Join-Path $env:RUNNER_TEMP 'AbutronMT5CompilerQA\metaeditor64.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeExposureProbe.mq5'
+          $log = [IO.Path]::ChangeExtension($source, '.log')
+          $ex5 = [IO.Path]::ChangeExtension($source, '.ex5')
+          & $compiler "/compile:$source" '/log'
+          $deadline = (Get-Date).AddMinutes(3)
+          $report = ''
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $log) {
+              $report = Get-Content -LiteralPath $log -Encoding Unicode -Raw
+              if ($report -match '(?mi)^Result:') { break }
+            }
+            Start-Sleep -Milliseconds 750
+          }
+          if (-not $report -or $report -notmatch '(?mi)Result:\s*0 errors,\s*0 warnings') {
+            throw "No-order native probe compile failed: $report"
+          }
+          if (-not (Test-Path -LiteralPath $ex5)) {
+            throw 'No-order exposure-only EX5 missing'
+          }
+          $hash = (Get-FileHash -LiteralPath $ex5 -Algorithm SHA256).Hash
+          "ApexNativeExposureProbe.ex5 SHA256 $hash" |
+            Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeExposureProbe.ex5.sha256.txt')
+          Write-Host $report
+          Write-Host "NO_ORDER_EXPOSURE_PROBE_SHA256=$hash"
+
+      - name: Archive NO-ORDER exposure probe for isolated DEMO evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abutron-issue38-no-order-ex5-qa
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            mql5/ApexNativeExposureProbe.ex5
+            mql5/ApexNativeExposureProbe.log
+            mql5/ApexNativeExposureProbe.ex5.sha256.txt
