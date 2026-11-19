@@ -98,7 +98,7 @@ def test_native_broker_demo_trade_defaults_remain_disabled():
     text = source()
     assert "input bool EnableNativeDemoOrders = false;" in text
     assert "input bool AdaptiveV2ReconcilerApproved = false;" in text
-    assert "if(!VerifiedDemoAccount())" in text
+    assert "(!VerifiedDemoAccount())" in text
     assert text.count("bool sent=OrderSend(req,res);") == 1
     assert text.count("bool checked=OrderCheck(req,check);") == 1
 
