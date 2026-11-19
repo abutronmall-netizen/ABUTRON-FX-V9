@@ -107,13 +107,19 @@ def run_manifest(manifest):
     records=manifest.get("artifacts")
     if not isinstance(records,list) or not 1<=len(records)<=16:
         raise RehearsalError("NO_ACCOUNT_RELEASE_ARTIFACTS")
-    items={}
+    # Validate ALL names/schema before opening any external source path.
+    # A duplicate entry must not cause an unintended read of its first item.
+    seen=set()
     for rec in records:
         if not isinstance(rec,dict) or set(rec)!={"name","old_path","old_sha","new_path","new_sha"}:
             raise RehearsalError("BAD_ARTIFACT_SCHEMA")
         name=rec["name"]
-        if not isinstance(name,str) or not name.isidentifier() or name in items:
+        if not isinstance(name,str) or not name.isidentifier() or name in seen:
             raise RehearsalError("DUPLICATE_OR_BAD_ARTIFACT")
+        seen.add(name)
+    items={}
+    for rec in records:
+        name=rec["name"]
         items[name]=(read_exact(Path(rec["old_path"]),rec["old_sha"]),
                      read_exact(Path(rec["new_path"]),rec["new_sha"]))
     result=simulate(items)
