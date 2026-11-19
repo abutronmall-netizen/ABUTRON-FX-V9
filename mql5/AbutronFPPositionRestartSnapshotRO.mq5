@@ -8,6 +8,9 @@
 string FP_H_NONCE="",FP_H_OWNER="",FP_H_SERVER="",FP_H_LOGIN="",FP_H_MODE="";
 bool FP_H_READY=false;
 const int MAX_DEALS=10000;
+// This QA-only threshold prevents transient empty HistorySelect(0) responses
+// from being mistaken for a fully hydrated broker history after restart.
+input int MinBrokerDealsToPublish=0;
 const int MAX_POSITIONS=500;
 const int MAX_ORDERS=500;
 bool IsHex32(const string value){
@@ -64,6 +67,11 @@ void ExportHistory(){
  if(pcount<0 || pcount>MAX_POSITIONS || ocount<0 || ocount>MAX_ORDERS ||
     dcount<0 || dcount>MAX_DEALS){
   Print("FP_HISTORY_BROKER_LIMIT_EXCEEDED");
+  return;
+ }
+ if(dcount<MinBrokerDealsToPublish){
+  Print("FP_RESTART_HISTORY_HYDRATION_PENDING observed=",dcount,
+        " minimum=",MinBrokerDealsToPublish);
   return;
  }
  string file="ABUTRON_FP_RESTART_SNAPSHOT_V103_"+FP_H_NONCE+".txt";
@@ -154,6 +162,9 @@ void ExportHistory(){
    " orders=",no," deals=",nd," window_from_epoch_zero");
 }
 int OnInit(){
+ if(MinBrokerDealsToPublish<0 || MinBrokerDealsToPublish>MAX_DEALS){
+  Print("FP_RESTART_HISTORY_REQUIREMENT_INVALID");return INIT_FAILED;
+ }
  int f=FileOpen("ABUTRON_FP_HISTORY_REQUEST_V1.txt",FILE_READ|FILE_TXT|FILE_ANSI);
  if(f==INVALID_HANDLE){Print("FP_HISTORY_REQUEST_MISSING");return INIT_FAILED;}
  string schema=FileReadString(f);
