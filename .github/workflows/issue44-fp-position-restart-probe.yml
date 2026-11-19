@@ -7,12 +7,21 @@ on:
       - 'mql5/AbutronFPPositionRestartSnapshotRO.mq5'
       - '.github/workflows/issue44-fp-position-restart-probe.yml'
       - 'tests/test_issue44_position_restart_probe_contract.py'
+      - 'ops/issue44/compare_native_restart_ro.py'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  verify-native-position-continuity-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify read-only native snapshot replay and failure cases
+        run: python3 -m unittest discover -s tests -p 'test_issue44_position_restart_probe_contract.py' -v
+
   compile-native-no-order-observer:
     runs-on: windows-2022
     timeout-minutes: 22
