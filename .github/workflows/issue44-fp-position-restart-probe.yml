@@ -1,0 +1,111 @@
+name: Issue44 FP DEMO read-only native position restart probe compile
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mql5/AbutronFPPositionRestartSnapshotRO.mq5'
+      - '.github/workflows/issue44-fp-position-restart-probe.yml'
+      - 'tests/test_issue44_position_restart_probe_contract.py'
+      - 'ops/issue44/compare_native_restart_ro.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-native-position-continuity-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify read-only native snapshot replay and failure cases
+        run: python3 -m unittest discover -s tests -p 'test_issue44_position_restart_probe_contract.py' -v
+
+  compile-native-no-order-observer:
+    runs-on: windows-2022
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify zero trade/send operations in the isolated observer source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content 'mql5/AbutronFPPositionRestartSnapshotRO.mq5' -Raw
+          foreach($bad in @('OrderSend(', 'OrderSendAsync(', 'CTrade', 'TRADE_ACTION_DEAL', 'TRADE_ACTION_SLTP', 'OrderCheck(', 'FileDelete("ABUTRON_FP_NATIVE_ORDER')) {
+            if($source.Contains($bad)) { throw "Broker-order operation forbidden in restart probe: $bad" }
+          }
+          if(-not $source.Contains('PositionsTotal()') -or -not $source.Contains('ACCOUNT_TRADE_MODE_DEMO')) {
+            throw 'Broker-native DEMO account/position attestation missing'
+          }
+      - name: Download official MetaQuotes installer and verify signature
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup
+          $sig = Get-AuthenticodeSignature -FilePath $setup
+          if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate -or
+              $sig.SignerCertificate.Subject -notmatch 'MetaQuotes') {
+            throw 'MetaQuotes signed installer verification failed'
+          }
+      - name: Install official isolated MetaEditor without broker credentials
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          $install = Join-Path $env:RUNNER_TEMP 'Issue44RestartProbeCompiler'
+          New-Item -Path $install -ItemType Directory -Force | Out-Null
+          $proc = Start-Process -FilePath $setup -ArgumentList @('/auto', ('/path:"{0}"' -f $install)) -Wait -PassThru
+          if (-not (Test-Path (Join-Path $install 'metaeditor64.exe'))) {
+            throw "Official MetaEditor install failed ($($proc.ExitCode))"
+          }
+      - name: Compile isolated DEMO native restart snapshot Expert
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = Join-Path $env:RUNNER_TEMP 'Issue44RestartProbeCompiler\metaeditor64.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'mql5\AbutronFPPositionRestartSnapshotRO.mq5'
+          $log = [IO.Path]::ChangeExtension($source, '.log')
+          $ex5 = [IO.Path]::ChangeExtension($source, '.ex5')
+          & $compiler "/compile:$source" '/log'
+          $deadline = (Get-Date).AddMinutes(3)
+          $report = ''
+          while((Get-Date) -lt $deadline) {
+            if(Test-Path -LiteralPath $log) {
+              $report = Get-Content -LiteralPath $log -Encoding Unicode -Raw
+              if($report -match '(?mi)^Result:') { break }
+            }
+            Start-Sleep -Milliseconds 750
+          }
+          if($report -notmatch '(?mi)Result:\s*0 errors') {
+            throw "Read-only native probe compile incomplete or failed: $report"
+          }
+          if(-not (Test-Path -LiteralPath $ex5)) {
+            throw 'Signed MetaEditor produced no EX5'
+          }
+          $sha = (Get-FileHash -LiteralPath $ex5 -Algorithm SHA256).Hash.ToLowerInvariant()
+          "AbutronFPPositionRestartSnapshotRO.ex5 SHA256 $sha" | Set-Content (Join-Path $env:GITHUB_WORKSPACE 'mql5\AbutronFPPositionRestartSnapshotRO.ex5.sha256.txt')
+          Write-Host $report
+          Write-Host "ISSUE44_RESTART_RO_EX5_SHA256=$sha"
+          Write-Host 'NO BROKER CONNECTIVITY, DEMO/LIVE AUTH OR TRADING IN CI.'
+      - name: Save native compiler diagnostics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: abutron-issue44-restart-native-compile-log
+          retention-days: 14
+          path: |
+            mql5/AbutronFPPositionRestartSnapshotRO.log
+            mql5/AbutronFPPositionRestartSnapshotRO.ex5.sha256.txt
+      - name: Save isolated read-only QA EX5 only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abutron-issue44-restart-readonly-ex5
+          retention-days: 7
+          if-no-files-found: error
+          path: mql5/AbutronFPPositionRestartSnapshotRO.ex5
