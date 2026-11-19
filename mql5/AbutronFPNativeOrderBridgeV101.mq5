@@ -475,10 +475,10 @@ bool SealEvidenceGeneration(string key,string text)
    if(FileIsExist(name))continue; // Never knowingly overwrite an event ID.
    int h=FileOpen(name,FILE_WRITE|FILE_TXT|FILE_ANSI,0,CP_UTF8);
    if(h==INVALID_HANDLE)return false;
-   uint written=FileWriteString(h,text);
+   int written=(int)FileWriteString(h,text);
    FileFlush(h);
    FileClose(h);
-   if(written==(uint)StringLen(text))return true;
+   if(written==StringLen(text))return true;
    return false; // Partial write: fail closed, never claim provenance.
  }
  return false;
