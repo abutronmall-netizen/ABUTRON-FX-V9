@@ -622,7 +622,58 @@ class Mt5TerminalManager:
                    export["identity"]["_native_file_mtime"]) > 120:
                 return None
         export["quotes"] = quotes
+        # Read order-flow trades if present (ApexNativeWriter exports
+        # ABUTRON_ORDER_FLOW_V2_<nonce>.txt with aggressor ticks).
+        term = self._terminals.get(connection_id)
+        if term is not None:
+            of_file = _latest_match(os.path.join(term.export_dir,
+                                                 "ABUTRON_ORDER_FLOW_V2_*.txt"))
+            if of_file is not None:
+                of_data = Mt5TerminalManager._parse_order_flow_file(of_file)
+                if of_data is not None:
+                    export["orderflow"] = of_data
         return export
+
+    @staticmethod
+    def _parse_order_flow_file(path: str) -> Optional[Dict]:
+        """Parse the latest order-flow export file.
+
+        Format (ApexNativeWriter): JSON ``{"trades":[{"price":...,
+        "size":..., "side":"buy"|"sell", "time":"..."}]}``.
+        Returns ``{"trades": [...]}`` or None if unparseable.
+        """
+        if not os.path.isfile(path) or os.path.islink(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict) or "trades" not in data:
+                return None
+            trades = data["trades"]
+            if not isinstance(trades, list):
+                return None
+            validated = []
+            for t in trades:
+                if not isinstance(t, dict):
+                    continue
+                try:
+                    price = float(t.get("price", 0.0))
+                    size = float(t.get("size", 0.0))
+                    side = str(t.get("side", "")).lower()
+                except (ValueError, TypeError):
+                    continue
+                if side not in ("buy", "sell") or price <= 0 or size <= 0:
+                    continue
+                validated.append({
+                    "symbol": str(t.get("symbol", "")),
+                    "price": price,
+                    "size": size,
+                    "side": side,
+                    "time": str(t.get("time", "")),
+                })
+            return {"trades": validated}
+        except (ValueError, OSError, TypeError):
+            return None
 
     @staticmethod
     def _parse_identity_file(path: str) -> Optional[Dict]:

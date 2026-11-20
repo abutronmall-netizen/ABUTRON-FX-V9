@@ -138,6 +138,7 @@ class AgenticDecisionEngine:
     ) -> Optional[Candidate]:
         # Build the agentic context from the closed candle + quote.
         orderflow = self._orderflow_summary(c, orderflow_trades)
+        footprint = self._compute_footprint(c, orderflow_trades)
         portfolio = {
             "equity": equity,
             "connection_id": connection_id,
@@ -161,7 +162,7 @@ class AgenticDecisionEngine:
             spread=float(getattr(quote, "spread", 0.0) or 0.0)
             if quote else 0.0,
             orderflow=orderflow,
-            footprint={},
+            footprint=footprint,
             portfolio=portfolio,
             extras={"account": account, "quote": _quote_dict(quote)},
             closes=closes, highs=highs, lows=lows,
@@ -243,6 +244,76 @@ class AgenticDecisionEngine:
             "delta": float(buys - (total - buys)),
             "imbalance": round(imbalance * 2.0, 4),
             "buy_ratio": round(buys / total, 4),
+        }
+
+    @staticmethod
+    def _compute_footprint(c: Candle,
+                           orderflow_trades: Dict[str, list]) -> Dict[str, Any]:
+        """Compute a compact footprint from order-flow trade ticks.
+
+        Groups trades into price buckets around the candle's range and
+        reports buy/sell volume, imbalance, and POC (price of control).
+        This is market context for the decision engine — it does not
+        generate orders.
+        """
+        ticks = orderflow_trades.get(c.symbol)
+        if not ticks or not ticks:
+            return {}
+        high = float(c.high or 0.0)
+        low = float(c.low or 0.0)
+        if high <= 0 or low <= 0 or high <= low:
+            return {}
+        # Bucket width: 10% of the candle range, capped to avoid
+        # excessive buckets on wide-range instruments.
+        range_size = high - low
+        bucket_width = max(range_size * 0.10, 1e-9)
+        buckets: Dict[float, dict] = {}
+        for t in ticks:
+            try:
+                price = float(t.get("price", 0.0))
+                size = float(t.get("size", 0.0))
+                side = str(t.get("side", "")).lower()
+            except (ValueError, TypeError):
+                continue
+            if price <= 0 or size <= 0 or side not in ("buy", "sell"):
+                continue
+            bucket_key = round(price / bucket_width) * bucket_width
+            b = buckets.setdefault(bucket_key, {
+                "price": bucket_key, "buy_vol": 0.0, "sell_vol": 0.0,
+                "total_vol": 0.0, "delta": 0.0})
+            if side == "buy":
+                b["buy_vol"] += size
+                b["delta"] += size
+            else:
+                b["sell_vol"] += size
+                b["delta"] -= size
+            b["total_vol"] += size
+        if not buckets:
+            return {}
+        # Find POC (price of control): bucket with the highest total volume.
+        poc_bucket = max(buckets.values(), key=lambda b: b["total_vol"])
+        # Build a compact footprint grid sorted by price.
+        grid = []
+        for b in sorted(buckets.values(), key=lambda x: x["price"]):
+            total = b["total_vol"]
+            grid.append({
+                "price": round(b["price"], 8),
+                "buy_vol": round(b["buy_vol"], 4),
+                "sell_vol": round(b["sell_vol"], 4),
+                "total_vol": round(total, 4),
+                "imbalance": round(b["delta"] / total, 4) if total > 0 else 0.0,
+                "delta": round(b["delta"], 4),
+            })
+        total_volume = sum(b["total_vol"] for b in buckets.values())
+        total_delta = sum(b["delta"] for b in buckets.values())
+        return {
+            "poc": round(poc_bucket["price"], 8),
+            "poc_volume": round(poc_bucket["total_vol"], 4),
+            "total_volume": round(total_volume, 4),
+            "total_delta": round(total_delta, 4),
+            "buy_volume": round(sum(b["buy_vol"] for b in buckets.values()), 4),
+            "sell_volume": round(sum(b["sell_vol"] for b in buckets.values()), 4),
+            "grid": grid,
         }
 
 

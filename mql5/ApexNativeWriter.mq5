@@ -175,8 +175,8 @@ void ExportNativeData()
       MqlRates r = rates[i];
       if(r.tick_volume <= 0) continue;
       ofJson += StringFormat(
-         "{\"price\":%.5f,\"size\":%.2f,\"side\":\"%s\",\"time\":\"%s\"},",
-         r.close, r.tick_volume / 100.0,
+         "{\"symbol\":\"%s\",\"price\":%.5f,\"size\":%.2f,\"side\":\"%s\",\"time\":\"%s\"},",
+         r.symbol, r.close, r.tick_volume / 100.0,
          (r.close >= r.open) ? "buy" : "sell",
          TimeToString(r.time, TIME_DATE|TIME_SECONDS));
    }
