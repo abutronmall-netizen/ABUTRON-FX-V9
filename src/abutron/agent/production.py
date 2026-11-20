@@ -92,6 +92,7 @@ class AgenticDecisionEngine:
         quotes: List[Quote],
         account: Dict[str, Any],
         orderflow_trades: Optional[Dict[str, list]] = None,
+        orderflow_source: str = "unknown",
         tick_size: float = 0.0001,
         equity: Optional[float] = None,
         balance: Optional[float] = None,
@@ -115,7 +116,8 @@ class AgenticDecisionEngine:
             seen_symbols.add(c.symbol)
             candidate = self._evaluate_symbol(
                 c, quotes_by_sym.get(c.symbol), connection_id, broker,
-                owner_id, account, equity, orderflow_trades or {})
+                owner_id, account, equity, orderflow_trades or {},
+                orderflow_source)
             if candidate is not None:
                 candidates.append(candidate)
 
@@ -135,10 +137,12 @@ class AgenticDecisionEngine:
         account: Dict[str, Any],
         equity: float,
         orderflow_trades: Dict[str, list],
+        orderflow_source: str = "unknown",
     ) -> Optional[Candidate]:
         # Build the agentic context from the closed candle + quote.
         orderflow = self._orderflow_summary(c, orderflow_trades)
-        footprint = self._compute_footprint(c, orderflow_trades)
+        footprint = self._compute_footprint(c, orderflow_trades,
+                                            orderflow_source)
         portfolio = {
             "equity": equity,
             "connection_id": connection_id,
@@ -248,13 +252,21 @@ class AgenticDecisionEngine:
 
     @staticmethod
     def _compute_footprint(c: Candle,
-                           orderflow_trades: Dict[str, list]) -> Dict[str, Any]:
+                           orderflow_trades: Dict[str, list],
+                           orderflow_source: str = "unknown") -> Dict[str, Any]:
         """Compute a compact footprint from order-flow trade ticks.
 
         Groups trades into price buckets around the candle's range and
         reports buy/sell volume, imbalance, and POC (price of control).
         This is market context for the decision engine — it does not
         generate orders.
+
+        ``orderflow_source`` records the provenance of the input ticks.
+        MT5/MQL5 does not expose broker trade prints to EAs, so the
+        current source is ``"candle_derived"``: direction is inferred
+        from close vs open and size from tick volume. This is an
+        estimate of directional activity, NOT genuine aggressor
+        trade-by-trade order flow or real traded-volume delta.
         """
         ticks = orderflow_trades.get(c.symbol)
         if not ticks or not ticks:
@@ -307,6 +319,7 @@ class AgenticDecisionEngine:
         total_volume = sum(b["total_vol"] for b in buckets.values())
         total_delta = sum(b["delta"] for b in buckets.values())
         return {
+            "source": orderflow_source,
             "poc": round(poc_bucket["price"], 8),
             "poc_volume": round(poc_bucket["total_vol"], 4),
             "total_volume": round(total_volume, 4),

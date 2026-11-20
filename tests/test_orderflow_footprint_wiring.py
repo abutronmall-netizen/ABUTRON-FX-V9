@@ -180,11 +180,54 @@ def test_mql5_orderflow_export_includes_symbol():
     src = pathlib.Path(__file__).parent.parent / "mql5/ApexNativeWriter.mq5"
     content = src.read_text()
     # The order-flow JSON must include "symbol" per trade
-    assert '\\"symbol\\":\\"%s\\"' in content or '"symbol"' in content
-    # The format string must include symbol in the JSON output
-    of_section = content[content.index("Order flow: aggressor trades"):
+    assert '\\\"symbol\\\":\\\"%s\\\"' in content or '"symbol"' in content
+    # The format string must include symbol in the JSON output.
+    # Uses _Symbol (chart symbol), NOT r.symbol -- MqlRates has no
+    # symbol member (would fail MetaEditor compilation).
+    of_section = content[content.index("Order flow: candle-derived activity"):
                          content.index("Broker-native exposure snapshot")]
-    assert "r.symbol" in of_section
+    assert "_Symbol" in of_section
+    assert "r.symbol" not in of_section
+
+
+def test_mql5_orderflow_export_is_labeled_candle_derived():
+    """The export must be clearly identified as candle-derived, not
+    genuine aggressor trades (MT5 does not expose trade prints)."""
+    src = pathlib.Path(__file__).parent.parent / "mql5/ApexNativeWriter.mq5"
+    content = src.read_text()
+    of_section = content[content.index("Order flow: candle-derived activity"):
+                         content.index("Broker-native exposure snapshot")]
+    assert 'candle_derived' in of_section
+    # The MQL5 string literal escapes quotes: \"source\":\"candle_derived\"
+    assert '\\"source\\":\\"candle_derived\\"' in of_section or '"source":"candle_derived"' in of_section
+
+
+def test_reader_excludes_last_marker_file():
+    """The reader must not pick the ABUTRON_ORDER_FLOW_V2_LAST.txt
+    marker (a bare timestamp, not JSON)."""
+    import glob
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Older valid trade file
+        trades_path = os.path.join(tmpdir, "ABUTRON_ORDER_FLOW_V2_001.txt")
+        with open(trades_path, "w") as f:
+            f.write(json.dumps({"trades": [
+                {"symbol": "X", "price": 1.0, "size": 1.0,
+                 "side": "buy", "time": "t"}]}))
+        # Newer LAST marker (would win the mtime race if not excluded)
+        last_path = os.path.join(tmpdir, "ABUTRON_ORDER_FLOW_V2_LAST.txt")
+        with open(last_path, "w") as f:
+            f.write("2026-11-20 09:00:00")
+
+        # The reader's own selection logic must skip the LAST marker
+        matches = [
+            p for p in glob.glob(os.path.join(tmpdir,
+                                              "ABUTRON_ORDER_FLOW_V2_*.txt"))
+            if not os.path.basename(p).endswith("_LAST.txt")
+        ]
+        selected = max(matches, key=os.path.getmtime)
+        assert os.path.basename(selected) == "ABUTRON_ORDER_FLOW_V2_001.txt"
+        assert "LAST" not in os.path.basename(selected)
 
 
 # --------------------------------------------------------------------- #
@@ -236,3 +279,41 @@ def test_run_shadow_passes_orderflow_to_engine():
     call_args = engine.run_decision_pass.call_args
     assert "orderflow_trades" in call_args.kwargs
     assert call_args.kwargs["orderflow_trades"]["X"] == md_result.orderflow_trades["X"]
+
+
+def test_compute_footprint_records_source_label():
+    """The footprint must record its provenance (candle_derived)."""
+    from abutron.agent.production import AgenticDecisionEngine
+    c = _make_candle(high=82.60, low=82.40)
+    trades = {
+        "Volatility 50 Index.0": [
+            {"symbol": "Volatility 50 Index.0", "price": 82.50,
+             "size": 2.0, "side": "buy", "time": "t1"},
+        ]
+    }
+    result = AgenticDecisionEngine._compute_footprint(
+        c, trades, orderflow_source="candle_derived")
+    assert result != {}
+    assert result["source"] == "candle_derived"
+
+
+def test_parse_order_flow_file_preserves_metadata():
+    """The parser must preserve source and connection_id from the export."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(json.dumps({
+            "connection_id": "abc-123",
+            "source": "candle_derived",
+            "trades": [
+                {"symbol": "X", "price": 1.0, "size": 1.0,
+                 "side": "buy", "time": "t"},
+            ],
+        }))
+        path = f.name
+    try:
+        result = Mt5TerminalManager._parse_order_flow_file(path)
+        assert result is not None
+        assert result["source"] == "candle_derived"
+        assert result["connection_id"] == "abc-123"
+        assert len(result["trades"]) == 1
+    finally:
+        os.unlink(path)

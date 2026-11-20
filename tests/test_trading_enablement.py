@@ -111,14 +111,45 @@ def test_script_only_touches_demo():
     assert "LIVE" in content  # mentioned in the no-LIVE-touch comment
 
 
-def test_script_sets_override_env_var():
+def test_script_does_not_create_override():
+    """The script must NOT create an operator override — the existing
+    exposure certification satisfies the DEMO gate; no bypass needed."""
     content = SCRIPT_PATH.read_text(encoding="utf-8")
-    assert "ABUTRON_OPERATOR_OVERRIDE_FILE" in content
+    assert "ABUTRON_OPERATOR_OVERRIDE_FILE" not in content
+    assert "write_override_config" not in content
+    assert "operator-override" not in content
 
 
 def test_script_runs_execute_mode():
     content = SCRIPT_PATH.read_text(encoding="utf-8")
     assert '"--mode", "execute"' in content
+
+
+def test_script_invokes_module_not_file():
+    """The script must invoke production_deriv_demo as a module."""
+    content = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert '"-m",' in content or '"-m"' in content
+    assert "abutron.agent.production_deriv_demo" in content
+    # Must not invoke the .py file directly
+    assert "production_deriv_demo.py" not in content
+
+
+def test_script_preserves_account_bound_presets():
+    """The script must preserve account-bound preset inputs."""
+    content = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "EXECUTION_KEYS" in content
+    assert "_parse_preset" in content
+    # Account-bound keys must not be in the execution-key set
+    assert "InpConnectionId" not in content.split("EXECUTION_KEYS = {")[1].split("}")[0]
+    assert "InpBrokerServer" not in content.split("EXECUTION_KEYS = {")[1].split("}")[0]
+    assert "InpActivationSecret" not in content.split("EXECUTION_KEYS = {")[1].split("}")[0]
+
+
+def test_script_rejects_native_mode_not_active():
+    """NATIVE_MT5_EXECUTION_MODE_NOT_ACTIVE must not be an acceptable result."""
+    content = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "NATIVE_MT5_EXECUTION_MODE_NOT_ACTIVE" not in content.split(
+        "ACCEPTABLE_STATUSES")[1].split(")")[0]
 
 
 def test_script_risk_invariants_not_bypassed():

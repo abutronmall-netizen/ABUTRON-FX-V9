@@ -48,6 +48,7 @@ class MarketDataResult:
     symbol_count: int
     evaluated_symbols: List[str] = field(default_factory=list)
     orderflow_trades: Dict[str, list] = field(default_factory=dict)
+    orderflow_source: str = "unknown"
 
     @property
     def candle_count(self) -> int:
@@ -202,8 +203,11 @@ class BrokerNativeMarketDataAdapter:
 
         # Group order-flow trades by symbol for the decision engine.
         orderflow_trades: Dict[str, list] = {}
+        orderflow_source: str = "unknown"
         of_data = export.get("orderflow")
         if of_data and isinstance(of_data, dict):
+            if of_data.get("source"):
+                orderflow_source = str(of_data["source"])
             for t in of_data.get("trades", []):
                 sym = t.get("symbol", "")
                 if sym and sym in evaluated:
@@ -221,6 +225,7 @@ class BrokerNativeMarketDataAdapter:
             symbol_count=len(symbols),
             evaluated_symbols=evaluated,
             orderflow_trades=orderflow_trades,
+            orderflow_source=orderflow_source,
         )
 
     # ------------------------------------------------------------------ #
@@ -378,6 +383,7 @@ def run_shadow_decision_pass(
         quotes=md.quotes,
         account=account,
         orderflow_trades=md.orderflow_trades,
+        orderflow_source=md.orderflow_source,
         equity=equity if equity is not None else float(
             account.get("equity", account.get("balance", 0.0)) or 0.0),
     )

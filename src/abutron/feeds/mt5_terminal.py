@@ -623,11 +623,17 @@ class Mt5TerminalManager:
                 return None
         export["quotes"] = quotes
         # Read order-flow trades if present (ApexNativeWriter exports
-        # ABUTRON_ORDER_FLOW_V2_<nonce>.txt with aggressor ticks).
+        # ABUTRON_ORDER_FLOW_V2_<nonce>.txt with candle-derived activity).
+        # Exclude the ABUTRON_ORDER_FLOW_V2_LAST.txt marker (a bare
+        # timestamp, not JSON) from the glob match.
         term = self._terminals.get(connection_id)
         if term is not None:
-            of_file = _latest_match(os.path.join(term.export_dir,
-                                                 "ABUTRON_ORDER_FLOW_V2_*.txt"))
+            of_matches = [
+                p for p in glob.glob(os.path.join(term.export_dir,
+                                                  "ABUTRON_ORDER_FLOW_V2_*.txt"))
+                if not os.path.basename(p).endswith("_LAST.txt")
+            ]
+            of_file = max(of_matches, key=os.path.getmtime) if of_matches else None
             if of_file is not None:
                 of_data = Mt5TerminalManager._parse_order_flow_file(of_file)
                 if of_data is not None:
@@ -638,9 +644,17 @@ class Mt5TerminalManager:
     def _parse_order_flow_file(path: str) -> Optional[Dict]:
         """Parse the latest order-flow export file.
 
-        Format (ApexNativeWriter): JSON ``{"trades":[{"price":...,
-        "size":..., "side":"buy"|"sell", "time":"..."}]}``.
-        Returns ``{"trades": [...]}`` or None if unparseable.
+        Format (ApexNativeWriter): JSON
+        ``{"connection_id":"...", "source":"candle_derived",
+        "trades":[{"symbol":..., "price":..., "size":...,
+        "side":"buy"|"sell", "time":"..."}]}``.
+
+        ``source`` records the provenance of the activity: the MQL5 EA
+        derives direction from close vs open and size from tick volume
+        because MT5 does not expose broker trade prints to EAs. This is
+        an estimate, NOT genuine aggressor trades. Returns
+        ``{"trades": [...], "source": ..., "connection_id": ...}`` or
+        None if unparseable.
         """
         if not os.path.isfile(path) or os.path.islink(path):
             return None
@@ -671,7 +685,14 @@ class Mt5TerminalManager:
                     "side": side,
                     "time": str(t.get("time", "")),
                 })
-            return {"trades": validated}
+            result = {"trades": validated}
+            src = data.get("source")
+            if src is not None:
+                result["source"] = str(src)
+            cid = data.get("connection_id")
+            if cid is not None:
+                result["connection_id"] = str(cid)
+            return result
         except (ValueError, OSError, TypeError):
             return None
 

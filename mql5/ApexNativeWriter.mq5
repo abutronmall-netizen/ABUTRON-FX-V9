@@ -158,8 +158,13 @@ void ExportNativeData()
    qJson += "]}";
    WriteTextFile(quotesFile, qJson);
 
-   // --- Order flow: aggressor trades since last export -------------
-   string ofJson = "{\"trades\":[";
+   // --- Order flow: candle-derived activity since last export ------
+   // NOTE: MQL5/MT5 does not expose broker trade prints to EAs. This
+   // export is a clearly identified CANDLE-DERIVED estimate: direction
+   // from close vs open, size from tick volume. It is NOT genuine
+   // aggressor trade prints and must not be presented as real
+   // traded-volume delta. The Python side records source="candle_derived".
+   string ofJson = "{\"connection_id\":\"" + InpConnectionId + "\",\"source\":\"candle_derived\",\"trades\":[";
    string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";
    if(FileIsExist(lastFile))
    {
@@ -176,7 +181,7 @@ void ExportNativeData()
       if(r.tick_volume <= 0) continue;
       ofJson += StringFormat(
          "{\"symbol\":\"%s\",\"price\":%.5f,\"size\":%.2f,\"side\":\"%s\",\"time\":\"%s\"},",
-         r.symbol, r.close, r.tick_volume / 100.0,
+         _Symbol, r.close, r.tick_volume / 100.0,
          (r.close >= r.open) ? "buy" : "sell",
          TimeToString(r.time, TIME_DATE|TIME_SECONDS));
    }
