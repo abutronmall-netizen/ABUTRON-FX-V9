@@ -160,6 +160,7 @@ void ExportNativeData()
    WriteTextFile(quotesFile, qJson);
 
    // --- Order flow: real, broker-reported trade ticks only ----------------
+   // Official CopyTicksRange(COPY_TICKS_TRADE) API; never infer side from bars.
    // Candle tick_volume and candle color are not actual aggressor trades.
    // If the broker does not publish buy/sell trade flags and trade volume,
    // the correct output is an empty trades list (no inferred footprint).
