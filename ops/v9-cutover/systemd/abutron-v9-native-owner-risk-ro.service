@@ -1,0 +1,28 @@
+[Unit]
+Description=ABUTRON V9 native multi-broker owner exposure and stop-risk publisher (no trading)
+After=postgresql.service abutron-six-broker-native-history-reconcile.service fp-native-reconcile-readonly.service fp-native-reconcile-readonly-1636.service fp-native-reconcile-readonly-2582.service
+Wants=fp-native-reconcile-readonly-1636.service fp-native-reconcile-readonly-2582.service
+Conflicts=abutron-customer-wide-risk-readonly.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /opt/abutron-v9-native-runtime/native_owner_risk_publisher.py
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/abutron-v4-broker-crm-supervisor-6207
+MemoryMax=180M
+TasksMax=25
+TimeoutStartSec=20

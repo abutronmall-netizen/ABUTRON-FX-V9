@@ -1,0 +1,12 @@
+[Unit]
+Description=ABUTRON V9 broker-native owner exposure refresh
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Persistent=false
+Unit=abutron-v9-native-owner-risk-ro.service
+
+[Install]
+WantedBy=timers.target
