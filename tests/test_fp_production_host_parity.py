@@ -245,6 +245,27 @@ def test_fp_risk_override_applied_to_preset(tmp_path, monkeypatch):
         "status": "V9_NATIVE_DISPATCH_EVALUATED", "native_orders_sent": 0})
     assert m.main(["--account", "0512"]) == 0
     written = preset.read_text()
-    assert "InpRiskFraction=0.001" in written
-    assert "InpRiskFractionPct=0.1" in written
+    assert "InpRiskFraction=0.1" in written
+    assert "InpRiskFractionPct=10" in written
     assert "InpRiskFraction=0.15" not in written
+
+
+
+def test_fp_native_mql5_risk_units_are_percent_not_fraction():
+    """Check the broker-side OrderCalcProfit expression and real input types."""
+    src=(ROOT / "mql5/ApexNativeWriter.mq5").read_text()
+    assert "input double  InpRiskFraction" in src
+    assert "input int     InpRiskFractionPct" in src
+    assert "accountEquity * InpRiskFraction / 100.0" in src
+    # These EA values both represent 0.10% (10 basis points).
+    module=load_enablement()
+    assert module.FP_PER_TRADE_RISK_PCT == 0.10
+    assert module.FP_PER_TRADE_RISK_PCT / 100.0 == pytest.approx(0.001)
+
+
+def test_fp_portfolio_cap_20_percent_not_0_2_percent(monkeypatch):
+    """RiskGate expects 0.20 fraction for the user-authorized 20% ceiling."""
+    from abutron.agent import production_fp_demo as fp
+    assert fp.FP_PORTFOLIO_CAP_PCT == pytest.approx(20.0)
+    assert fp.FP_PORTFOLIO_CAP_PCT / 100.0 == pytest.approx(0.20)
+    assert fp.FP_PER_TRADE_RISK_PCT / 100.0 == pytest.approx(0.001)

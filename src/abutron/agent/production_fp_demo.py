@@ -45,7 +45,10 @@ FP_DEMO_ACCOUNTS = ("0512", "1636", "1622", "2582")
 # 0512 activation policy uses 0.10% per trade. Configurable via env so
 # the runner never silently applies the generic Deriv default (0.15%).
 FP_PER_TRADE_RISK_PCT = float(os.environ.get("ABUTRON_FP_PER_TRADE_PCT", "0.10"))
-FP_PORTFOLIO_CAP_PCT = float(os.environ.get("ABUTRON_FP_PORTFOLIO_CAP_PCT", "0.20"))
+# Input is percentage points (20.0 -> fraction 0.20) for RiskGate's
+# reported portfolio risk-fraction check; the owner drawdown limit is
+# separately enforced by the existing risk infrastructure.
+FP_PORTFOLIO_CAP_PCT = float(os.environ.get("ABUTRON_FP_PORTFOLIO_CAP_PCT", "20.0"))
 
 
 def _account_paths(account_suffix: str) -> dict:

@@ -182,8 +182,12 @@ def write_preset(suffix: str) -> list:
     # per-trade risk. The template ships 0.15 (Deriv); FP 0512's
     # existing activation policy uses 0.10. Never silently apply the
     # generic Deriv preset to an FP account.
-    merged["InpRiskFraction"] = str(FP_PER_TRADE_RISK_PCT / 100.0)
-    merged["InpRiskFractionPct"] = str(FP_PER_TRADE_RISK_PCT)
+    # MQL5's InpRiskFraction is already a PERCENT, not a fraction:
+    # the EA enforces accountEquity * InpRiskFraction / 100.0.
+    # InpRiskFractionPct is an integer display field in basis points:
+    # 15 means 0.15%, so 0.10% maps to 10, not floating-point 0.1.
+    merged["InpRiskFraction"] = str(FP_PER_TRADE_RISK_PCT)
+    merged["InpRiskFractionPct"] = str(round(FP_PER_TRADE_RISK_PCT * 100))
 
     content = _render_preset(merged)
     written = []
