@@ -110,9 +110,7 @@ exists or is armed.
 
 - The isolated full Python suite and new synthetic account/nonce,
   positive/negative cost-contract tests must pass.
-- CI workflow `.github/workflows/fp-v305-native-cost-compile.yml`
-  compiles the data-only MQL5 exporter with official signed MetaEditor
-  without broker access, archives EX5 and SHA-256. It never deploys.
+- CI workflow `.github/workflows/fp-v305-native-cost-compile.yml` has compiled the source with official signed MetaEditor (0 errors, 0 warnings). The exact QA EX5 artifact was downloaded and verified against SHA-256 `2928de2045af743629dd2916ff29e41fe8e96d4d49d23895bf24b36177db717e`. Its value is pinned in `mql5/AbutronFPMarketsNativeFeedParallelV305.ex5.sha256.txt`. This is NOT the currently installed FP feed binary and was not deployed.
 - **Do not reuse the existing V305 production EX5 checksum for a newly
   compiled artifact.** Compiled binary hashes must be verified separately.
 - The existing FP 0512 order bridge is **currently armed**, though recent
