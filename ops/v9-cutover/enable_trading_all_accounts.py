@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import re
 import json
 import os
 import sqlite3
@@ -66,6 +67,17 @@ EXECUTION_KEYS = {
 EXPECTED_EX5_SHA = (
     "1ced14ee506d5f3f978b3b2b26e785f9d640376d7bb89649136c54dab55fb855"
 )
+
+
+CI_SHA_FILE = REPO_ROOT / "mql5/ApexNativeWriter.ex5.sha256.txt"
+
+
+def verify_compiled_release_pin() -> None:
+    """Require the tested CI-built EX5 SHA and deployment pin to agree."""
+    payload = CI_SHA_FILE.read_text(encoding="utf-8")
+    hashes = re.findall("[a-fA-F0-9]{64}", payload)
+    if len(hashes) != 1 or hashes[0].lower() != EXPECTED_EX5_SHA.lower():
+        raise ValueError("EX5_CI_SHA_DIFFERS_FROM_DEPLOYMENT_PIN")
 
 
 def verify_ex5_sha(suffix: str) -> str:
@@ -228,6 +240,7 @@ def run_execute_cycle(suffix: str) -> dict:
         "--mode", "execute",
     ]
     import subprocess
+    started_ns = time.time_ns()
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
     status_path = Path(_account_paths(suffix)["data_root"]) / "status.json"
     # Only trust status.json if the subprocess exited successfully.
@@ -240,12 +253,14 @@ def run_execute_cycle(suffix: str) -> dict:
             "stderr": result.stderr[:500],
             "returncode": result.returncode,
         }
-    if status_path.is_file():
+    if status_path.is_file() and status_path.stat().st_mtime_ns >= started_ns:
         status = json.loads(status_path.read_text())
+        if str(status.get("account_suffix")) != suffix:
+            return {"status": "EXECUTE_CYCLE_ACCOUNT_MISMATCH"}
         status["returncode"] = result.returncode
         return status
     return {
-        "status": "EXECUTE_CYCLE_OUTPUT",
+        "status": "EXECUTE_CYCLE_STALE_OR_MISSING_STATUS",
         "stdout": result.stdout[:500],
         "stderr": result.stderr[:500],
         "returncode": result.returncode,
@@ -267,6 +282,23 @@ def main() -> int:
     print(f"  CRM: {CRM_DB}")
     print(f"  Preset template: {PRESET_TEMPLATE}")
     print()
+
+    # Check the new CI-compiled binary pin before changing any presets.
+    try:
+        verify_compiled_release_pin()
+    except (OSError, ValueError) as exc:
+        print(f"  EX5 compiled/deployment pin mismatch: {type(exc).__name__}: {exc}")
+        return 1
+
+    # Check every installed EX5 before touching any account-bound preset.
+    # If the CI artifact, source pins and deployed binaries are out of sync,
+    # leave the existing trading configuration completely untouched.
+    for suffix in ACCOUNTS:
+        try:
+            verify_ex5_sha(suffix)
+        except (OSError, ValueError) as exc:
+            print(f"  [{suffix}] EX5 not ready: {type(exc).__name__}: {exc}")
+            return 1
 
     # 1. Resolve connection IDs and update preset files (preserving
     #    account-bound inputs)
