@@ -65,7 +65,7 @@ EXECUTION_KEYS = {
 # before deployment -- the enablement script verifies it here so a
 # mismatched binary is caught before any execute cycle runs.
 EXPECTED_EX5_SHA = (
-    "1ced14ee506d5f3f978b3b2b26e785f9d640376d7bb89649136c54dab55fb855"
+    "b6b63afeb7c4939a2bea1f40cfad58d8288af4009d8dc4e2534d7196162b91f3"
 )
 
 
