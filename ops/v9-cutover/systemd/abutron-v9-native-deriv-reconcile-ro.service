@@ -1,0 +1,25 @@
+[Unit]
+Description=ABUTRON V9 Deriv three-account broker-native protected exposure and deal reconciliation
+After=local-fs.target
+Conflicts=abutron-deriv-three-native-reconcile-ro.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=PYTHONPATH=/opt/abutron-v9-execution-repair/V9-10794e2/src
+ExecStart=/usr/bin/python3 -B /opt/abutron-v9-native-runtime/native_deriv_reconciliation.py
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-deriv-multi-native-reconciliation
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+ProtectControlGroups=yes
+MemoryMax=180M
+TasksMax=20
+TimeoutStartSec=20
