@@ -21,7 +21,7 @@ from abutron.reconciliation.native_crm_6207 import signed_native_exposure
 from abutron.risk.owner_native_authority import CurrentBrokerOwnerRisk
 
 CRM = "/var/lib/apex-signup/accounts.sqlite3"
-EA_SHA = "1CED14EE506D5F3F978B3B2B26E785F9D640376D7BB89649136C54DAB55FB855"
+EA_SHA = "1ced14ee506d5f3f978b3b2b26e785f9d640376d7bb89649136c54dab55fb855"
 
 
 def _account_paths(account_suffix: str) -> dict:
