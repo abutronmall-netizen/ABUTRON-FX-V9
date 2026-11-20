@@ -156,8 +156,8 @@ def _make_candidate(candidate_id="cand-001", symbol="EURUSD.r",
         risk_fraction=0.15,
         stop_risk_usd=15.0,
         volume=1.0,
-        stop_loss=1.0990,
-        take_profit=1.1030,
+        stop_loss=1.0990 if direction == "BUY" else 1.1010,
+        take_profit=1.1030 if direction == "BUY" else 1.0970,
         price=1.1002,
         entry_type="CONFIRM",
         trigger_price=1.1002,
@@ -206,11 +206,30 @@ def _adapter(mgr=None):
 
 
 class _MockDispatcher:
-    def dispatch_account(self, connection_id):
+    def dispatch_account(self, connection_id, candidate_ids=None):
         return {
             "connection_id": connection_id, "sent": 1, "ack": 1,
             "unknown": 0, "rejected": 0, "details": [],
         }
+
+
+def _native_spec(symbol):
+    return {"symbol": symbol, "bid":1.1001, "ask":1.1003,
+            "tick_age_ms":0, "tick_size":0.0001, "point":0.0001,
+            "min_lots":0.01, "max_lots":10, "volume_step":0.01,
+            "stops_level_points":2, "freeze_level_points":2,
+            "pnl_probe_displacement_ticks":10,
+            "buy_probe_native_ordercalcprofit_usd":-1.0,
+            "sell_probe_native_ordercalcprofit_usd":-1.0,
+            "broker_tick_value_loss":1.0}
+
+
+def _run_native_reservation(*args, **kw):
+    # Synthetic broker contract evidence only: no native writer attached.
+    return run_agentic_pass(*args, native_specs={
+        "EURUSD.r":_native_spec("EURUSD.r"),
+        "GBPUSD.r":_native_spec("GBPUSD.r")},
+        owner_open_risk_usd=0.0, owner_equity_usd=10000.0, **kw)
 
 
 # =========================================================================== #
@@ -233,7 +252,7 @@ def test_candidates_persisted_as_reserved(monkeypatch):
         authorized_by="owner", authorized_at=time.time(),
         connections={CID}, reason="test persistence")
 
-    result = run_agentic_pass(
+    result = _run_native_reservation(
         CID, broker=BROKER, owner_id="owner1",
         engine=engine, adapter=_adapter(),
         override=ov, dispatcher=_MockDispatcher())
@@ -262,7 +281,7 @@ def test_persisted_candidate_has_correct_fields(monkeypatch):
         authorized_by="owner", authorized_at=time.time(),
         connections={CID}, reason="test fields")
 
-    run_agentic_pass(
+    _run_native_reservation(
         CID, broker=BROKER, owner_id="owner1",
         engine=engine, adapter=_adapter(),
         override=ov, dispatcher=_MockDispatcher())
@@ -270,12 +289,12 @@ def test_persisted_candidate_has_correct_fields(monkeypatch):
     row = fake._candidates["cand-002"]
     assert row["symbol"] == "EURUSD.r"
     assert row["direction"] == "BUY"
-    assert row["volume"] == 1.0
-    assert row["stop_loss"] == 1.0990
-    assert row["take_profit"] == 1.1030
+    assert 0 < row["volume"] < 1.0
+    assert row["stop_loss"] < row["price"]
+    assert row["take_profit"] > row["price"]
     assert row["connection_id"] == CID
     assert row["owner_id"] == "owner1"
-    assert row["replay_key"] == "EURUSD.r:2026-11-19T10:00:00Z:BUY"
+    assert row["replay_key"] == CID + ":EURUSD.r:2026-11-19T10:00:00Z:BUY"
 
 
 def test_multiple_candidates_all_persisted(monkeypatch):
@@ -298,7 +317,7 @@ def test_multiple_candidates_all_persisted(monkeypatch):
         authorized_by="owner", authorized_at=time.time(),
         connections={CID}, reason="test multiple")
 
-    result = run_agentic_pass(
+    result = _run_native_reservation(
         CID, broker=BROKER, owner_id="owner1",
         engine=engine, adapter=_adapter(),
         override=ov, dispatcher=_MockDispatcher())
@@ -325,7 +344,7 @@ def test_duplicate_replay_key_skipped(monkeypatch):
         authorized_by="owner", authorized_at=time.time(),
         connections={CID}, reason="test dup")
 
-    run_agentic_pass(
+    _run_native_reservation(
         CID, broker=BROKER, owner_id="owner1",
         engine=engine1, adapter=_adapter(),
         override=ov, dispatcher=_MockDispatcher())
@@ -335,7 +354,7 @@ def test_duplicate_replay_key_skipped(monkeypatch):
                             replay_key="EURUSD.r:2026-11-19T10:00:00Z:BUY")
     engine2 = _CandidateEngine([cand2])
 
-    result2 = run_agentic_pass(
+    result2 = _run_native_reservation(
         CID, broker=BROKER, owner_id="owner1",
         engine=engine2, adapter=_adapter(),
         override=ov, dispatcher=_MockDispatcher())
@@ -353,7 +372,7 @@ def test_hold_no_candidates_no_persistence(monkeypatch):
     }
     fake = _patch_db(monkeypatch, acct)
 
-    result = run_agentic_pass(
+    result = _run_native_reservation(
         CID, broker=BROKER, owner_id="owner1",
         engine=_HoldEngine(), adapter=_adapter(),
         override=OperatorOverride(
@@ -380,7 +399,7 @@ def test_persistence_logged(monkeypatch):
         authorized_by="owner", authorized_at=time.time(),
         connections={CID}, reason="test log")
 
-    run_agentic_pass(
+    _run_native_reservation(
         CID, broker=BROKER, owner_id="owner1",
         engine=engine, adapter=_adapter(),
         override=ov, dispatcher=_MockDispatcher())
