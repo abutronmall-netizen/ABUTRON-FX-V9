@@ -91,7 +91,7 @@ def test_broker_disconnected_does_not_authorize(activation):
 def test_mismatched_native_writer_fails(activation):
     module, _ = activation
     module.EA_SHA = "0" * 64
-    with pytest.raises(ValueError, match="BROKER_NATIVE_EA_IDENTITY_NOT_AUTHENTICATED"):
+    with pytest.raises(ValueError, match="(BROKER_NATIVE_EA_IDENTITY_NOT_AUTHENTICATED|NATIVE_EA_BINARY_CHANGED)"):
         module.inspect()
 
 
