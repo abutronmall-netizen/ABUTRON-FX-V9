@@ -17,6 +17,9 @@ jobs:
     name: Compile MQL5 with signed MetaQuotes MetaEditor (no broker)
     runs-on: windows-2022
     timeout-minutes: 22
+    outputs:
+      apex_ex5_sha256: ${{ steps.compile.outputs.apex_ex5_sha256 }}
+      apex_probe_ex5_sha256: ${{ steps.compile_probe.outputs.apex_probe_ex5_sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +56,7 @@ jobs:
           Write-Host 'Official MetaEditor installed to isolated runner temp directory.'
 
       - name: Native compilation with compiler diagnostics
+        id: compile
         shell: pwsh
         timeout-minutes: 5
         run: |
@@ -89,7 +93,8 @@ jobs:
           "ApexNativeWriter.ex5 SHA256 $hash" |
             Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeWriter.ex5.sha256.txt')
           Write-Host "Native EX5 built in CI. SHA256=$hash"
-          Write-Host 'NO LIVE, DEMO OR PRODUCTION MT5 ACCOUNT ATTACHED.'
+          Write-Host "NO LIVE, DEMO OR PRODUCTION MT5 ACCOUNT ATTACHED."
+          Set-Output "apex_ex5_sha256=$hash"
 
       - name: Retain native compiler diagnostics (never auto deploy EX5)
         if: always()
@@ -118,6 +123,7 @@ jobs:
           python scripts/generate_issue38_exposure_probe.py --source mql5/ApexNativeWriter.mq5 --output mql5/ApexNativeExposureProbe.mq5
 
       - name: Native compile no-order DEMO exposure probe
+        id: compile_probe
         shell: pwsh
         timeout-minutes: 5
         run: |
@@ -147,6 +153,7 @@ jobs:
             Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeExposureProbe.ex5.sha256.txt')
           Write-Host $report
           Write-Host "NO_ORDER_EXPOSURE_PROBE_SHA256=$hash"
+          Set-Output "apex_probe_ex5_sha256=$hash"
 
       - name: Archive NO-ORDER exposure probe for isolated DEMO evidence
         if: success()
