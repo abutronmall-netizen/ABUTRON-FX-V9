@@ -93,8 +93,8 @@ jobs:
           "ApexNativeWriter.ex5 SHA256 $hash" |
             Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeWriter.ex5.sha256.txt')
           Write-Host "Native EX5 built in CI. SHA256=$hash"
-          Write-Host "NO LIVE, DEMO OR PRODUCTION MT5 ACCOUNT ATTACHED."
-          Set-Output "apex_ex5_sha256=$hash"
+          Write-Host 'NO LIVE, DEMO OR PRODUCTION MT5 ACCOUNT ATTACHED.'
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "apex_ex5_sha256=$hash"
 
       - name: Retain native compiler diagnostics (never auto deploy EX5)
         if: always()
@@ -153,7 +153,7 @@ jobs:
             Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeExposureProbe.ex5.sha256.txt')
           Write-Host $report
           Write-Host "NO_ORDER_EXPOSURE_PROBE_SHA256=$hash"
-          Set-Output "apex_probe_ex5_sha256=$hash"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "apex_probe_ex5_sha256=$hash"
 
       - name: Archive NO-ORDER exposure probe for isolated DEMO evidence
         if: success()
