@@ -1,0 +1,110 @@
+name: FP V305 Native Cost MetaEditor Compile (QA Only)
+
+on:
+  push:
+    branches: [fix/fp-v305-native-cost-20261120]
+    paths:
+      - 'mql5/AbutronFPMarketsNativeFeedParallelV305.mq5'
+      - '.github/workflows/fp-v305-native-cost-compile.yml'
+  pull_request:
+    branches: [arena/a097f5f5-abutron-fx-v9, main]
+    paths:
+      - 'mql5/AbutronFPMarketsNativeFeedParallelV305.mq5'
+      - '.github/workflows/fp-v305-native-cost-compile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-fp-v305-data-only:
+    name: Compile FP V305 data-only EA with signed MetaEditor
+    runs-on: windows-2022
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm no trade/order operation was added
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $p='mql5/AbutronFPMarketsNativeFeedParallelV305.mq5'
+          if (-not (Test-Path -LiteralPath $p)) { throw "FP source missing" }
+          $src=Get-Content -LiteralPath $p -Raw
+          if ($src -match '(?i)\b(OrderSend|OrderCheck|TRADE_ACTION_DEAL|TRADE_ACTION_PENDING|PositionModify)\s*\(') {
+            throw 'Order-writing function found in FP data-only exporter'
+          }
+          if ($src -notmatch 'OrderCalcProfit\(' -or $src -notmatch 'PublishV9Cost\(') {
+            throw 'Broker-native cost probe or publisher missing'
+          }
+
+      - name: Obtain official installer and verify Authenticode signer
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference='Stop'
+          $setup=Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          Invoke-WebRequest -Uri 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe' -OutFile $setup
+          $signature=Get-AuthenticodeSignature -FilePath $setup
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
+              $signature.SignerCertificate.Subject -notmatch 'MetaQuotes') {
+            throw 'MetaQuotes installer signature invalid'
+          }
+
+      - name: Install isolated MetaEditor
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference='Stop'
+          $setup=Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          $install=Join-Path $env:RUNNER_TEMP 'AbutronFPV305CompilerQA'
+          New-Item -ItemType Directory -Force -Path $install | Out-Null
+          $args=@('/auto', ('/path:"{0}"' -f $install))
+          $proc=Start-Process -FilePath $setup -ArgumentList $args -Wait -PassThru
+          if (-not (Test-Path (Join-Path $install 'metaeditor64.exe'))) {
+            throw "MetaEditor missing (installer exit $($proc.ExitCode))"
+          }
+
+      - name: Compile FP cost source and record checksum
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference='Stop'
+          $compiler=Join-Path $env:RUNNER_TEMP 'AbutronFPV305CompilerQA/metaeditor64.exe'
+          $source=Join-Path $env:GITHUB_WORKSPACE 'mql5/AbutronFPMarketsNativeFeedParallelV305.mq5'
+          $log=[IO.Path]::ChangeExtension($source,'.log')
+          $binary=[IO.Path]::ChangeExtension($source,'.ex5')
+          & $compiler "/compile:$source" '/log'
+          $until=(Get-Date).AddMinutes(3)
+          $report=''
+          while ((Get-Date) -lt $until) {
+            if (Test-Path -LiteralPath $log) {
+              $report=Get-Content -LiteralPath $log -Encoding Unicode -Raw
+              if ($report -match '(?mi)^Result:') { break }
+            }
+            Start-Sleep -Milliseconds 750
+          }
+          Write-Host $report
+          if ($report -notmatch '(?mi)Result:\s*0 errors,\s*0 warnings') {
+            throw 'FP V305 MetaEditor compilation did not pass cleanly'
+          }
+          if (-not (Test-Path -LiteralPath $binary)) {
+            throw 'FP V305 EX5 binary missing after compiler success'
+          }
+          $hash=(Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          "AbutronFPMarketsNativeFeedParallelV305.ex5 SHA256 $hash" |
+            Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5/AbutronFPMarketsNativeFeedParallelV305.ex5.sha256.txt')
+          Write-Host "FP_V305_READ_ONLY_EX5_SHA256=$hash"
+          Write-Host 'NO BROKER PROFILE, NO LIVE OR DEMO ACCOUNTS ATTACHED. NO DEPLOYMENT.'
+
+      - name: Upload compiler report and cost-source EX5 for QA only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abutron-fp-v305-cost-metaeditor-qa
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            mql5/AbutronFPMarketsNativeFeedParallelV305.log
+            mql5/AbutronFPMarketsNativeFeedParallelV305.ex5.sha256.txt
+            mql5/AbutronFPMarketsNativeFeedParallelV305.ex5

@@ -1,223 +1,130 @@
-# FP Markets V305 Exporter Extension — Cost-Report Contract
+# FP Markets V305 — Native execution-cost export and V9 intake
 
-**Status:** Source-only specification. **No production change.** The
-extended exporter is not yet compiled or deployed. This document defines
-the exact JSON contract the extended `AbutronFPMarketsNativeFeedParallelV305.mq5`
-must publish for V9's `DemoNativeCRM` to accept it as genuine FP
-broker-cost evidence.
+**Status (20 November 2026): SOURCE-ONLY. NO FP DEMO/LIVE DEPLOYMENT.**
+Exact existing Ubuntu data-only exporter source:
+`/opt/apex-client-mt5/fpmarkets-feed/AbutronFPMarketsNativeFeedParallelV305.mq5`
+(base SHA-256 `88baf5415d4e855f14c682dd77f370a645f5208e6b46a3d09b0a28d58b9f4872`).
+The new implementation is version-controlled at
+`mql5/AbutronFPMarketsNativeFeedParallelV305.mq5`; existing production
+source/EX5, charts, bridges and FP LIVE 9392 have **not** been changed.
 
-**Scope:** FP Markets DEMO 0512. The existing feed, order bridge, and
-LIVE 9392 remain unchanged. This extension only adds a cost-report
-publisher to the existing feed EA — it does not add order functions.
+## Existing MT5 source and export flow
 
-## 1. Contract summary
+The authenticated FP V305 feed has a broker session heartbeat, and a
+per-session **32-character export nonce**. It already publishes
+`ABUTRON_FP_CATALOG_V305_<nonce>.txt` and
+`ABUTRON_FP_QUOTES_V305_<nonce>.txt`, plus native bars at a 60-second
+cadence. The 13 account-resolved symbols are:
 
-V9 reads a cost-report JSON file from the account's cost-report path
-(`ABUTRON_FP_COST_REPORT`, default
-`/var/lib/abutron-fp-v4-0512/v4-native-execution-cost-0512.json`).
-`DemoNativeCRM.snapshot()` validates it read-only. The contract is:
+`XAUUSD.r, BTCUSD, EURUSD.r, GBPUSD.r, USDJPY.r, AUDUSD.r, US100,
+US30, US500, GER40, XTIUSD, USDCHF.r, NZDUSD.r`.
 
-| Field | Type | Required | Meaning |
-|---|---|---|---|
-| `account_suffix` | string | yes | Must match the account suffix (e.g. `"0512"`) |
-| `environment` | string | yes | Must be exactly `"DEMO"` |
-| `native_bid_ask_and_ordercalcprofit_verified` | boolean | yes | Must be JSON `true`, derived from actual broker probes |
-| `account_equity_usd` | float | yes | Current `ACCOUNT_EQUITY`, must be > 0 |
-| `instruments` | object | yes | Dict of symbol → spec dict |
+**Do not confuse** the FP heartbeat/export nonce or session-owner UUID
+with the separate CRM connection ID; the native cost intake binds the
+logged-in account/server to the latter through the actual CRM database.
 
-Each entry in `instruments` must contain at least:
+## Native source addition
 
-| Field | Type | Required | MQL5 source |
-|---|---|---|---|
-| `tick_size` | float | yes | `SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE)` |
-| `contract_size` | float | recommended | `SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP)` |
-| `volume_min` | float | recommended | `SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN)` |
-| `volume_step` | float | recommended | `SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP)` |
-| `volume_max` | float | recommended | `SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX)` |
-| `stops_level` | int | recommended | `SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL)` |
-| `freeze_level` | int | recommended | `SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL)` |
-| `digits` | int | recommended | `SymbolInfoInteger(sym, SYMBOL_DIGITS)` |
+The data-only exporter now publishes
+`MQL5/Files/ABUTRON_FP_COST_V1_<nonce>.json` on its own 20-second
+timer, without changing the catalog/bars/quotes 60-second cadence.
+This remains a feed, **not** an order writer. It contains no
+`OrderSend`, `OrderCheck`, trade-position modification or order
+activation code. It only samples MT5 broker data:
 
-Additional spec fields are accepted and passed through to V9's
-`native_specs` (used by the market-data adapter and dispatcher).
+| Field | Native source |
+|---|---|
+| `tick_size` | `SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE)` |
+| `contract_size` | `SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE)` |
+| `volume_min`, `volume_step`, `volume_max` | `SYMBOL_VOLUME_*` |
+| `point`, `digits` | `SYMBOL_POINT`, `SYMBOL_DIGITS` |
+| `stops_level`, `freeze_level` | `SYMBOL_TRADE_STOPS_LEVEL`, `SYMBOL_TRADE_FREEZE_LEVEL` |
+| `bid`, `ask`, `tick_epoch` | `SymbolInfoTick` |
+| `buy_probe_native_ordercalcprofit_usd` | `OrderCalcProfit(ORDER_TYPE_BUY, symbol, minlot, ask, ask - 10*tick_size, pnl)` |
+| `sell_probe_native_ordercalcprofit_usd` | `OrderCalcProfit(ORDER_TYPE_SELL, symbol, minlot, bid, bid + 10*tick_size, pnl)` |
+| `account_equity_usd`, `account_currency` | `ACCOUNT_EQUITY`, `ACCOUNT_CURRENCY` |
+| session identity | heartbeat nonce, owner UUID, broker server, MT5 login and DEMO mode |
 
-## 2. The 13 FP symbols
+`native_bid_ask_and_ordercalcprofit_verified` is **derived**, never
+hardcoded: it is `true` only if all 13 symbols have fresh bid/ask,
+valid volume/contract/tick specifications and negative BUY and SELL
+`OrderCalcProfit` results. If an instrument is unavailable or stale
+(e.g. an inactive GER40 quote), this boolean is `false`; the consumer
+does not present partial data as complete current execution costs.
 
-Confirmed on the live FP 0512 terminal. These are actual FP Markets
-symbols, not copied Deriv specifications:
+The exporter calls `FileOpen`, `FileWriteString(handle,...)`,
+`FileFlush`, `FileClose` and `FileMove(tmp,0,final,FILE_REWRITE)`.
+**MQL5 file operations stay in the terminal's MQL5/Files sandbox**.
+They do **not** directly create `/var/lib/...` files. The previous
+specification's `FileWriteString(path,json)` and `FileRename()`
+pseudo-calls have been replaced with proper MQL5 APIs.
 
-```
-XAUUSD.r, BTCUSD, EURUSD.r, GBPUSD.r, USDJPY.r,
-AUDUSD.r, US100, US30, US500, GER40, XTIUSD,
-USDCHF.r, NZDUSD.r
-```
+The native probe computes hypothetical stop P/L only. It does not place
+an order, prove current margin acceptance or establish a real broker
+order/SL/TP/trailing modification.
 
-The exporter should iterate these symbols (or discover them from the
-broker's symbol list) and probe each one. V9 derives its trading
-symbol list from `sorted(instruments.keys())`.
+## V9 Python intake
 
-## 3. The verification flag — never fabricated
+`src/abutron/feeds/fp_native_cost.py` reads this export **only**
+from the explicitly configured FP DEMO terminal directory. It validates:
 
-`native_bid_ask_and_ordercalcprofit_verified` must be `true` **only**
-when every instrument probe has succeeded. It is a derived boolean,
-not a hardcoded value. The exporter must set it to `false` (or omit
-it) if any probe fails — V9 will reject the report with
-`BROKER_NATIVE_ORDER_CONTRACT_NOT_AVAILABLE`.
+- CRM connection exists, FP Markets, DEMO, CONNECTED and expected suffix.
+- Exactly one fresh native heartbeat; matching nonce, session-owner
+  token, broker server, DEMO and `NO_ORDER_FUNCTIONS`.
+- Same-cycle catalog and quote headers and the catalog's exact set of
+  13 FP symbol mappings.
+- Cost JSON's native source, account login, server, heartbeat owner,
+  nonce, suffix, DEMO environment, USD account currency and nonzero equity.
+- File and native sample freshness, complete 13/13 instrument probes,
+  actual negative OrderCalcProfit amounts, and cross-consistency of
+  symbol contract/volume/digits/trade-mode with the V305 catalog.
 
-The probes that must succeed for the flag to be `true`:
+Only on success can `refresh_fp_v9_cost_report()` atomically
+materialize a `0600` root-owned V9 consumer JSON with the existing
+`DemoNativeCRM` contract:
+`account_suffix`, `environment`,
+`native_bid_ask_and_ordercalcprofit_verified: true`,
+`account_equity_usd` and `instruments`.
 
-1. **Bid/ask quote** — `SymbolInfoTick(sym, tick)` returns valid
-   `tick.bid > 0` and `tick.ask > 0`.
-2. **OrderCalcProfit stop-risk** — `OrderCalcProfit(type, sym, vol,
-   price, sl, pnl)` returns `pnl < 0` (a valid stop-loss distance).
-3. **Tick size** — `SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE) > 0`.
-4. **Volume specs** — `SYMBOL_VOLUME_MIN`, `SYMBOL_VOLUME_STEP` return
-   valid positive values.
+`production_fp_demo.py` calls the reader **only when**
+`ABUTRON_FP_FEED_FILES` is explicitly configured. Otherwise its
+existing cost-report behavior remains unchanged. This is a component
+of the existing runner; **no new autonomous supervisor, gate or service**
+was introduced.
 
-If any symbol's probes fail, the entire report's flag must be `false`.
-V9 rejects partial or fabricated reports.
+For future staging (not a current deployment command):
 
-## 4. MQL5 extension pattern
-
-The V305 exporter is a feed EA (no `OrderSend`). The extension adds a
-cost-report publisher to its existing timer loop. The pattern follows
-the existing exporters' conventions (`ApexOrderFlowExportV3.mq5`,
-`ApexMarketFeedV3.mq5`):
-
-```mql5
-// --- Cost-report publishing (V9 integration) ---
-
-string g_cost_report_path = "";  // set from InpCostReportPath input
-static string g_cost_json = "";
-
-string JsonEscape(string value)
-{
-   StringReplace(value, "\\", "\\\\");
-   StringReplace(value, "\"", "\\\"");
-   StringReplace(value, "\r", "");
-   StringReplace(value, "\n", "");
-   return value;
-}
-
-string CostReportJson()
-{
-   string instruments = "";
-   bool all_verified = true;
-
-   // Iterate the 13 FP symbols.
-   string symbols[] = {"XAUUSD.r","BTCUSD","EURUSD.r","GBPUSD.r",
-                       "USDJPY.r","AUDUSD.r","US100","US30","US500",
-                       "GER40","XTIUSD","USDCHF.r","NZDUSD.r"};
-   for(int i = 0; i < ArraySize(symbols); i++)
-   {
-      string sym = symbols[i];
-      if(!SymbolSelect(sym, true))
-      {
-         all_verified = false;
-         continue;
-      }
-      MqlTick tick;
-      double tick_size = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-      double vol_min   = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
-      double vol_step  = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
-      double vol_max   = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
-      long   stops     = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
-      long   freeze    = SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL);
-      long   digits    = SymbolInfoInteger(sym, SYMBOL_DIGITS);
-
-      // Verify bid/ask.
-      if(!SymbolInfoTick(sym, tick) || tick.bid <= 0 || tick.ask <= 0)
-      {
-         all_verified = false;
-         continue;
-      }
-
-      // Verify OrderCalcProfit stop-risk with a 1-lot probe.
-      double pnl = 0.0;
-      double ask = tick.ask;
-      if(!OrderCalcProfit(ORDER_TYPE_BUY, sym, vol_min, ask,
-                          ask - 10.0 * tick_size, pnl) || pnl >= 0)
-      {
-         all_verified = false;
-         continue;
-      }
-
-      // Append instrument spec to JSON.
-      if(i > 0) instruments += ",";
-      instruments += "\"" + JsonEscape(sym) + "\":{"
-                     + "\"tick_size\":" + DoubleToString(tick_size, 8) + ","
-                     + "\"volume_min\":" + DoubleToString(vol_min, 8) + ","
-                     + "\"volume_step\":" + DoubleToString(vol_step, 8) + ","
-                     + "\"volume_max\":" + DoubleToString(vol_max, 8) + ","
-                     + "\"stops_level\":" + IntegerToString(stops) + ","
-                     + "\"freeze_level\":" + IntegerToString(freeze) + ","
-                     + "\"digits\":" + IntegerToString(digits)
-                     + "}";
-   }
-
-   string suffix = "";
-   long login = (long)AccountInfoInteger(ACCOUNT_LOGIN);
-   // Derive suffix from login (e.g. 7410512 -> "0512").
-   suffix = StringSubstr(IntegerToString(login), StringLen(IntegerToString(login)) - 4);
-
-   return "{\"account_suffix\":\"" + suffix + "\","
-        + "\"environment\":\"DEMO\","
-        + "\"native_bid_ask_and_ordercalcprofit_verified\":"
-        + (all_verified ? "true" : "false") + ","
-        + "\"account_equity_usd\":"
-        + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ","
-        + "\"instruments\":{" + instruments + "}}";
-}
-
-void PublishCostReport()
-{
-   if(g_cost_report_path == "") return;
-   string json = CostReportJson();
-   string tmp = g_cost_report_path + ".tmp";
-   if(FileWriteString(tmp, json) > 0)
-   {
-      FileRename(tmp, g_cost_report_path);
-   }
-}
+```bash
+# Only after a staged FP DEMO 0512 runtime, signed V9 order writer,
+# genuine native feed-cost source and account-specific paths exist:
+ABUTRON_FP_FEED_FILES=/var/lib/private/abutron-client-mt5-<0512-CID>/terminal/MQL5/Files
+ABUTRON_FP_COST_REPORT=/var/lib/abutron-fp-v4-0512/v4-native-execution-cost-0512.json
 ```
 
-## 5. Freshness requirement
+The resulting report will be **root-owned only when the V9 runner is
+run as root**. This source change does not create the cost report on
+the actual server and is not evidence that the new V9 FP writer
+exists or is armed.
 
-`DemoNativeCRM` enforces a **65-second TTL** on the cost report. The
-exporter's timer interval must produce a fresh report within this
-window. If the V305 exporter's current interval exceeds 65 seconds, it
-must be reduced (or a dedicated cost-publish timer added) so the report
-is always current.
+## Build, validation and deployment boundaries
 
-The report's file mtime is what V9 checks — the `FileRename` in
-`PublishCostReport()` updates it atomically.
+- The isolated full Python suite and new synthetic account/nonce,
+  positive/negative cost-contract tests must pass.
+- CI workflow `.github/workflows/fp-v305-native-cost-compile.yml`
+  compiles the data-only MQL5 exporter with official signed MetaEditor
+  without broker access, archives EX5 and SHA-256. It never deploys.
+- **Do not reuse the existing V305 production EX5 checksum for a newly
+  compiled artifact.** Compiled binary hashes must be verified separately.
+- The existing FP 0512 order bridge is **currently armed**, though recent
+  dispatcher cycles were blocked with zero orders. Its order path,
+  trading control, existing native receipts and profile must remain
+  unchanged during source-only work.
+- An eventual source/EA update to the existing FP feed, V9 0512
+  dedicated order writer, single-writer cutover, and any use on FP
+  DEMO 1636/1622/2582 require their own explicitly authorized
+  operational steps. **FP LIVE 9392 stays untouched and OFF**.
 
-## 6. Deployment sequence (not yet authorized)
-
-When the V305 extension is ready for deployment on Ubuntu:
-
-1. Add the V305 exporter source to the repo (`mql5/`).
-2. Apply the cost-report extension from this document.
-3. Compile the `.ex5`; record its SHA-256.
-4. Pin the SHA-256 in the V9 runner / enablement script.
-5. Deploy to the FP 0512 terminal (feed EA only — no order functions).
-6. Verify the cost-report JSON satisfies the contract tests
-   (`tests/test_fp_cost_contract.py`).
-7. Run V9 preflight against the published cost report.
-
-**The existing FP 0512 order bridge remains armed and unchanged during
-all steps above.** The one-writer cutover (disarm bridge → arm V9) is
-a separate, separately-authorized deployment step.
-
-## 7. Test coverage
-
-The contract is enforced by `tests/test_fp_cost_contract.py` (15
-tests):
-
-- **Accepted:** all 13 symbols, tick_size flows to native_specs,
-  equity flows to account, instruments carry additional specs.
-- **Rejected:** wrong suffix, wrong environment, verification flag
-  false, verification flag as string, instruments not a dict, missing
-  equity, zero equity, missing verification flag, stale report (TTL).
-- **Runner-side:** tick_size extraction for receipt reconciliation,
-  skipping instruments without tick_size.
+The 65-second `DemoNativeCRM` consumer TTL is met by a 20-second native
+cost-export cadence **only if** the broker instruments are genuinely
+updating, the data-only EA runs, and the subsequent root-owned V9
+materialization is performed on a real staged runtime.

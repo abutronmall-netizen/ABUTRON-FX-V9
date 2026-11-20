@@ -161,6 +161,16 @@ def run(account_suffix: str, mode: str) -> dict:
         native_cost_report=paths["cost"],
         qa_data_dir=str(paths["qa_root"] / "terminal"),
         qa_health=str(paths["qa_root"] / "issue38-health.json"))
+    # Optional genuine FP V305 feed intake, account-bound and DEMO only.
+    # Without this explicit setting, the existing root-owned report path
+    # is used unchanged. No order dispatch or account switch is touched.
+    native_feed_files = os.environ.get("ABUTRON_FP_FEED_FILES", "")
+    if native_feed_files:
+        from ..feeds.fp_native_cost import refresh_fp_v9_cost_report
+        refresh_fp_v9_cost_report(
+            feed_files=native_feed_files, crm_db=CRM_DB,
+            connection_id=cid, expected_suffix=account_suffix,
+            target=paths["cost"])
     snapshot = binding.snapshot()
     acct = snapshot["account"]
     assert acct["environment"] == "demo"
