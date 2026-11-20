@@ -34,12 +34,17 @@ def _activation_table(account_suffix: str) -> str:
 
 
 class DemoNativeCRM:
-    """Native CRM binding for a single Deriv DEMO account.
+    """Native CRM binding for a single DEMO account.
+
+    Supports Deriv and FP Markets DEMO accounts. The ``broker``
+    parameter selects which broker's CRM connections and native
+    reports are consumed; it defaults to ``"Deriv"`` for backward
+    compatibility with the existing Deriv DEMO runners.
 
     Parameters:
         account_suffix: The account reference suffix (e.g. "6207",
-            "7593", "9244"). Used for table names, path derivation,
-            and account identity checks.
+            "7593", "9244", "0512"). Used for table names, path
+            derivation, and account identity checks.
         connection_id: The 32-char CRM connection ID.
         crm_db: Path to the CRM SQLite database.
         native_owner_report: Path to the owner-wide native risk report.
@@ -48,15 +53,21 @@ class DemoNativeCRM:
             (containing MQL5/Files and MQL5/Experts).
         qa_health: Path to the QA health report (diagnostic only).
         expected_ea_sha: Expected SHA-256 of the compiled EA binary.
+        broker: Broker name ("Deriv" or "FP Markets"). Defaults to
+            "Deriv" for backward compatibility.
     """
 
     def __init__(self, *, account_suffix: str = "6207",
                  connection_id: str,
                  crm_db: str, native_owner_report: str,
                  native_cost_report: str, qa_data_dir: str, qa_health: str,
-                 expected_ea_sha: str = EX5_SHA):
+                 expected_ea_sha: str = EX5_SHA,
+                 broker: str = "Deriv"):
+        if broker not in ("Deriv", "FP Markets"):
+            raise ValueError(f"UNSUPPORTED_BROKER: {broker}")
         self.account_suffix = account_suffix
         self.connection_id = connection_id
+        self.broker = broker
         self.crm_db = Path(crm_db)
         self.native_owner_report = native_owner_report
         self.native_cost_report = Path(native_cost_report)
@@ -96,7 +107,7 @@ class DemoNativeCRM:
                    WHERE c.id=?""", (cid,)).fetchone()
             if row is None:
                 raise CRMBindingError("CRM_CONNECTION_NOT_REGISTERED")
-            if not (row["environment"] == "DEMO" and row["broker"] == "Deriv"
+            if not (row["environment"] == "DEMO" and row["broker"] == self.broker
                     and str(row["account_reference"]).endswith(suffix)
                     and row["status"] == "CONNECTED" and row["worker_binding"]
                     and row["owner_status"] == "approved"):
@@ -163,7 +174,7 @@ class DemoNativeCRM:
             raise CRMBindingError("BROKER_ACCOUNT_EQUITY_UNAVAILABLE")
         account = dict(
             connection_id=cid, owner_id=str(row["account_id"]),
-            broker="Deriv", mt5_login=int(row["account_reference"]),
+            broker=self.broker, mt5_login=int(row["account_reference"]),
             environment="demo", server=str(row["broker_server"]),
             desired_on=1, effective_on=1,
             conn_status="CONNECTED",
