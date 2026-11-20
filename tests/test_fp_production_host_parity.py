@@ -120,7 +120,7 @@ def test_enablement_rejects_missing_fp_writer_before_preset_write(tmp_path,monke
                                    "data_root":str(tmp_path/f"data{s}")})
     writes=[]
     monkeypatch.setattr(m,"write_preset",lambda s:writes.append(s))
-    assert m.main()==1
+    assert m.main([])==1
     assert writes==[]
 
 
@@ -138,7 +138,7 @@ def test_enablement_never_changes_first_account_if_second_not_ready(tmp_path,mon
     monkeypatch.setattr(m,"verify_ex5_sha",lambda s: "verified")
     writes=[]
     monkeypatch.setattr(m,"write_preset",lambda s:writes.append(s))
-    assert m.main()==1
+    assert m.main([])==1
     assert writes==[]
     assert first.read_text()==original
 
@@ -168,3 +168,83 @@ def test_fp_status_rejects_wrong_account(tmp_path,monkeypatch):
         return SimpleNamespace(returncode=0,stdout="",stderr="")
     monkeypatch.setattr("subprocess.run",run)
     assert m.run_execute_cycle("0512")["status"]=="EXECUTE_CYCLE_ACCOUNT_MISMATCH"
+
+
+def test_enablement_supports_single_account_selector(tmp_path, monkeypatch):
+    """--account 0512 must restrict enablement to 0512 alone."""
+    m = load_enablement()
+    first = tmp_path / "fp0512/terminal/MQL5/Presets/PR37WriterExposureOnly.set"
+    first.parent.mkdir(parents=True)
+    original = "InpConnectionId=" + CID + "\nInpBrokerServer=FPMarkets-Demo\n" \
+               "InpActivationSeed=test-only-seed\nInpExposureOnly=false\n"
+    first.write_text(original)
+    (tmp_path / "data0512").mkdir()
+    monkeypatch.setattr(m, "resolve_connection_id", lambda s: CID)
+    monkeypatch.setattr(m, "_account_paths",
+                        lambda s: {"qa_root": tmp_path / f"fp{s}",
+                                   "data_root": str(tmp_path / f"data{s}")})
+    monkeypatch.setattr(m, "verify_ex5_sha", lambda s: "verified")
+    writes = []
+    monkeypatch.setattr(m, "write_preset", lambda s: (writes.append(s), ["preset"])[1])
+    executed = []
+    monkeypatch.setattr(m, "run_execute_cycle", lambda s: executed.append(s) or {
+        "status": "V9_NATIVE_DISPATCH_EVALUATED", "native_orders_sent": 0})
+    assert m.main(["--account", "0512"]) == 0
+    assert writes == ["0512"]
+    assert executed == ["0512"]
+
+
+def test_enablement_rejects_unknown_account_selector(tmp_path, monkeypatch):
+    """--account with an unknown suffix must fail before any action."""
+    m = load_enablement()
+    writes = []
+    monkeypatch.setattr(m, "write_preset", lambda s: (writes.append(s), ["preset"])[1])
+    assert m.main(["--account", "9999"]) == 1
+    assert writes == []
+
+
+def test_enablement_no_selector_processes_all_four(tmp_path, monkeypatch):
+    """Without --account, all four DEMO accounts are targeted."""
+    m = load_enablement()
+    for suffix in ("0512", "1636", "1622", "2582"):
+        preset = tmp_path / f"fp{suffix}/terminal/MQL5/Presets/PR37WriterExposureOnly.set"
+        preset.parent.mkdir(parents=True, exist_ok=True)
+        preset.write_text(
+            "InpConnectionId=" + CID + "\nInpBrokerServer=FPMarkets-Demo\n"
+            "InpActivationSeed=test-only-seed\nInpExposureOnly=false\n")
+        (tmp_path / f"data{suffix}").mkdir(exist_ok=True)
+    monkeypatch.setattr(m, "resolve_connection_id", lambda s: CID)
+    monkeypatch.setattr(m, "_account_paths",
+                        lambda s: {"qa_root": tmp_path / f"fp{s}",
+                                   "data_root": str(tmp_path / f"data{s}")})
+    monkeypatch.setattr(m, "verify_ex5_sha", lambda s: "verified")
+    writes = []
+    monkeypatch.setattr(m, "write_preset", lambda s: (writes.append(s), ["preset"])[1])
+    monkeypatch.setattr(m, "run_execute_cycle", lambda s: {
+        "status": "V9_NATIVE_DISPATCH_EVALUATED", "native_orders_sent": 0})
+    assert m.main([]) == 0
+    assert writes == ["0512", "1636", "1622", "2582"]
+
+
+def test_fp_risk_override_applied_to_preset(tmp_path, monkeypatch):
+    """The FP-authorized per-trade risk overrides the Deriv template default."""
+    m = load_enablement()
+    preset = tmp_path / "fp0512/terminal/MQL5/Presets/PR37WriterExposureOnly.set"
+    preset.parent.mkdir(parents=True)
+    original = "InpConnectionId=" + CID + "\nInpBrokerServer=FPMarkets-Demo\n" \
+               "InpActivationSeed=test-only-seed\nInpExposureOnly=false\n" \
+               "InpRiskFraction=0.15\nInpRiskFractionPct=15\n"
+    preset.write_text(original)
+    (tmp_path / "data0512").mkdir()
+    monkeypatch.setattr(m, "resolve_connection_id", lambda s: CID)
+    monkeypatch.setattr(m, "_account_paths",
+                        lambda s: {"qa_root": tmp_path / f"fp{s}",
+                                   "data_root": str(tmp_path / f"data{s}")})
+    monkeypatch.setattr(m, "verify_ex5_sha", lambda s: "verified")
+    monkeypatch.setattr(m, "run_execute_cycle", lambda s: {
+        "status": "V9_NATIVE_DISPATCH_EVALUATED", "native_orders_sent": 0})
+    assert m.main(["--account", "0512"]) == 0
+    written = preset.read_text()
+    assert "InpRiskFraction=0.001" in written
+    assert "InpRiskFractionPct=0.1" in written
+    assert "InpRiskFraction=0.15" not in written

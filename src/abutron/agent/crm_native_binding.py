@@ -23,6 +23,15 @@ from ..risk.owner_native_authority import CurrentBrokerOwnerRisk, NativeOwnerRis
 
 EX5_SHA = "b6b63afeb7c4939a2bea1f40cfad58d8288af4009d8dc4e2534d7196162b91f3"
 
+# Broker-authorized per-trade risk and portfolio ceiling (percent).
+# FP Markets DEMO accounts use the existing 0512 activation policy
+# (0.10% per trade, 20% portfolio drawdown ceiling). Deriv DEMO uses
+# 0.15% / 20%. These are read from env so the runner never silently
+# applies a generic default across brokers.
+DERIV_PER_TRADE_RISK_PCT = float(os.environ.get("ABUTRON_DERIV_PER_TRADE_PCT", "0.15"))
+FP_PER_TRADE_RISK_PCT = float(os.environ.get("ABUTRON_FP_PER_TRADE_PCT", "0.10"))
+PORTFOLIO_CAP_PCT = float(os.environ.get("ABUTRON_PORTFOLIO_CAP_PCT", "0.20"))
+
 
 class CRMBindingError(ValueError):
     pass
@@ -198,7 +207,9 @@ class DemoNativeCRM:
             activation_revision=str(revision),
             ea_sha256=self.expected_ea_sha,
             equity=account_eq, account_currency="USD",
-            per_trade_risk_pct=0.15, portfolio_cap_pct=0.20,
+            per_trade_risk_pct=(FP_PER_TRADE_RISK_PCT if self.broker == "FP Markets"
+                                else DERIV_PER_TRADE_RISK_PCT),
+            portfolio_cap_pct=PORTFOLIO_CAP_PCT,
             symbols=("Volatility 50 Index.0" if self.broker == "Deriv"
                      else ",".join(sorted(cost["instruments"]))),
             native_positions_verified=1,

@@ -1,30 +1,36 @@
 #!/usr/bin/python3
 """Enable V9 native order dispatch on FP Markets DEMO accounts.
 
-Activates the trading path on the FP Markets DEMO accounts
-(0512, 1636, 1622, 2582):
+Activates the trading path on FP Markets DEMO accounts one at a time,
+supporting the 0512 -> 1636 -> 1622 -> 2582 sequential rollout.
 
 1. Verifies the deployed ApexNativeWriter.ex5 matches the pinned
    SHA-256 (the EA is broker-agnostic and shared with Deriv DEMO).
-2. Updates the execution preset on each account's FP QA terminal,
+2. Updates the execution preset on the account's FP QA terminal,
    PRESERVING the account-bound inputs (InpConnectionId,
    InpBrokerServer, InpActivationSecret, InpActivationSeed). Only the
    execution flags (InpExposureOnly=false, InpTrailingEnabled=true,
    trade magic, risk fraction) are written from the template.
-3. Runs one execute cycle per account to verify the dispatch path.
+3. Runs one execute cycle for the account to verify the dispatch path.
 
-Risk invariants (0.15%/trade, 20% ceiling, R:R >= 1.50, exposure
-certification, at-most-once) are NOT bypassed. No operator override
-is created: the DEMO exposure certification satisfies the gate.
+Risk invariants are NOT bypassed. No operator override is created: the
+DEMO exposure certification satisfies the gate.
+
+Use --account to target a single DEMO account (the recommended rollout
+mode). Without --account, all four DEMO accounts are processed.
 
 This script only operates on FP Markets DEMO accounts. LIVE FP
 Markets (9392) is never touched and requires separate authorization.
 
 Usage (as root on the Ubuntu host):
+    # Single-account rollout (0512 first)
+    python3 ops/v9-cutover/enable_trading_fp_demo.py --account 0512
+    # All DEMO accounts
     python3 ops/v9-cutover/enable_trading_fp_demo.py
 """
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import hashlib
 import json
@@ -35,7 +41,12 @@ import time
 from pathlib import Path
 
 CRM_DB = "/var/lib/apex-signup/accounts.sqlite3"
-ACCOUNTS = ["0512", "1636", "1622", "2582"]
+FP_DEMO_ACCOUNTS = ["0512", "1636", "1622", "2582"]
+
+# Authorized FP Markets DEMO per-trade risk (percent). Aligned to the
+# existing FP 0512 activation policy. Configurable via env so the
+# runner never silently applies the generic Deriv default.
+FP_PER_TRADE_RISK_PCT = float(os.environ.get("ABUTRON_FP_PER_TRADE_PCT", "0.10"))
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRESET_TEMPLATE = REPO_ROOT / "ops/v9-cutover/PR37WriterExposureOnly.set"
@@ -167,6 +178,12 @@ def write_preset(suffix: str) -> list:
     for key in EXECUTION_KEYS:
         if key in template_values:
             merged[key] = template_values[key]
+    # Override the Deriv-default risk fraction with the FP-authorized
+    # per-trade risk. The template ships 0.15 (Deriv); FP 0512's
+    # existing activation policy uses 0.10. Never silently apply the
+    # generic Deriv preset to an FP account.
+    merged["InpRiskFraction"] = str(FP_PER_TRADE_RISK_PCT / 100.0)
+    merged["InpRiskFractionPct"] = str(FP_PER_TRADE_RISK_PCT)
 
     content = _render_preset(merged)
     written = []
@@ -224,18 +241,37 @@ ACCEPTABLE_STATUSES = (
 )
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Enable V9 native order dispatch on FP Markets DEMO accounts.")
+    parser.add_argument(
+        "--account", default=None,
+        help="Single FP Markets DEMO account suffix to enable (e.g. 0512). "
+             "Omit to process all four DEMO accounts.")
+    args = parser.parse_args(argv)
+
+    if args.account is not None:
+        accounts = [args.account]
+        if args.account not in FP_DEMO_ACCOUNTS:
+            print(f"  ERROR: {args.account} is not a known FP Markets DEMO "
+                  f"account. Valid: {', '.join(FP_DEMO_ACCOUNTS)}")
+            return 1
+    else:
+        accounts = list(FP_DEMO_ACCOUNTS)
+
     print(f"[{dt.datetime.now(dt.timezone.utc).isoformat()}] "
-          f"Enabling V9 trading on {len(ACCOUNTS)} FP Markets DEMO accounts")
+          f"Enabling V9 trading on {len(accounts)} FP Markets DEMO account(s)"
+          + (f": {', '.join(accounts)}" if args.account else ""))
     print(f"  CRM: {CRM_DB}")
     print(f"  Preset template: {PRESET_TEMPLATE}")
+    print(f"  Per-trade risk: {FP_PER_TRADE_RISK_PCT}% (FP-authorized)")
     print()
 
-    # Verify every DEMO CRM binding, preset and binary before writing any
-    # account's execution configuration. Existing feed-only terminals will
-    # fail here without affecting their running service.
+    # Verify every target DEMO CRM binding, preset and binary before
+    # writing any account's execution configuration. Existing feed-only
+    # terminals will fail here without affecting their running service.
     connection_ids = {}
-    for suffix in ACCOUNTS:
+    for suffix in accounts:
         try:
             cid = resolve_connection_id(suffix)
             paths = _account_paths(suffix)
@@ -259,7 +295,7 @@ def main() -> int:
 
     # Only update execution flags, leaving all identity and authorization
     # values intact. This is DEMO-only and never creates an override.
-    for suffix in ACCOUNTS:
+    for suffix in accounts:
         try:
             paths = write_preset(suffix)
             print(f"  [{suffix}] account-bound presets updated: {len(paths)}")
@@ -268,11 +304,12 @@ def main() -> int:
             return 1
 
     print(f"\n  No operator override created. Risk invariants: NOT bypassed "
-          f"(0.15%/trade, 20% ceiling, R:R >= 1.50, exposure certification)")
+          f"(per-trade {FP_PER_TRADE_RISK_PCT}%, 20% ceiling, "
+          f"R:R >= 1.50, exposure certification)")
 
     print("\n  Running V9 execute cycle per account:")
     all_ok = True
-    for suffix in ACCOUNTS:
+    for suffix in accounts:
         try:
             status = run_execute_cycle(suffix)
             st = status.get("status", "UNKNOWN")
@@ -288,8 +325,8 @@ def main() -> int:
 
     print()
     if all_ok:
-        print("V9 trading enabled on all FP Markets DEMO accounts. "
-              "Dispatch path active.")
+        target = accounts[0] if args.account else "all FP Markets DEMO"
+        print(f"V9 trading enabled on {target}. Dispatch path active.")
         print("Risk invariants enforced. No LIVE changes.")
         return 0
     print("Some accounts had issues. Check status.json per account.")

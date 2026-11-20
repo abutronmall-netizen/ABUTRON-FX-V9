@@ -41,6 +41,12 @@ BROKER = "FP Markets"
 # FP Markets DEMO account suffixes (from CRM / session manager).
 FP_DEMO_ACCOUNTS = ("0512", "1636", "1622", "2582")
 
+# Authorized FP Markets DEMO per-trade risk (percent). The existing FP
+# 0512 activation policy uses 0.10% per trade. Configurable via env so
+# the runner never silently applies the generic Deriv default (0.15%).
+FP_PER_TRADE_RISK_PCT = float(os.environ.get("ABUTRON_FP_PER_TRADE_PCT", "0.10"))
+FP_PORTFOLIO_CAP_PCT = float(os.environ.get("ABUTRON_FP_PORTFOLIO_CAP_PCT", "0.20"))
+
 
 def _account_paths(account_suffix: str) -> dict:
     """Derive the standard path layout for an FP Markets DEMO account.
@@ -164,7 +170,8 @@ def run(account_suffix: str, mode: str) -> dict:
         raise ValueError("V9_TRAINED_BRAIN_NOT_AVAILABLE")
     engine = AgenticDecisionEngine(
         brain_substrate=brain,
-        risk_gate=RiskGate(per_trade_pct=0.0015, portfolio_cap_pct=0.02),
+        risk_gate=RiskGate(per_trade_pct=FP_PER_TRADE_RISK_PCT / 100.0,
+                           portfolio_cap_pct=FP_PORTFOLIO_CAP_PCT / 100.0),
         live=False)
     manager = Mt5TerminalManager(root=str(paths["qa_root"]))
     manager.bind_demo_data_source(
