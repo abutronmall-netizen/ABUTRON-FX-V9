@@ -69,3 +69,10 @@ See env.example. Environment-based identities must be provided to the parameteri
 Run python3 ops/ubuntu-v9/verify_bundle.py to check uploaded Python syntax and reject known private-literal patterns. Also run the repository's existing test and privacy CI before merging. This validator cannot prove broker connectivity, order execution, trailing or source authenticity.
 
 This bundle deliberately DOES NOT stop, restart, enable or disable any Ubuntu service.
+
+
+## Redacted legacy implementation references (NONDEPLOYABLE)
+
+To make a real V9 replacement implementable, the source bundle also includes account-identifier-redacted reference versions of the existing APEX MT5 manager, its Deriv V4 and FP V8 feed workers, the customer-wide native risk publisher, and the previous owner-exposure publisher under ops/ubuntu-v9/legacy-adapters/nondeployable-reference/. These reference files are **not exact production copies and must not be installed**: private CRM IDs, logins and sensitive literal assignments have been replaced with nonfunctional placeholders. Their purpose is to preserve session, identity, broker feed and risk-publisher implementation details for the V9 migration. They do not constitute a new executable V9 manager or risk service.
+
+The current live manager and writer services must remain attached until the replacement is independently tested. Check effective unit drop-ins and credentials on the server at cutover; never copy encrypted MT5 credentials into GitHub.
