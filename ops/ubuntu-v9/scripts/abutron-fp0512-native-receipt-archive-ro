@@ -1,0 +1,188 @@
+#!/usr/bin/python3
+# Migration export: production account identity is loaded from secure environment.
+"""Preserve immutable FP0512 DEMO native receipt evidence across MT5 restarts.
+
+This archival process does NOT grant trading, reconstruct receipts, alter source
+terminal files or claim independent broker acknowledgment. Private root storage.
+"""
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import tempfile
+
+CID=__import__("os").environ["ABUTRON_CRM_CONNECTION_ID_0512"]
+ROOT=Path("/var/lib/private/abutron-client-mt5-"+CID)
+OUT=Path("/var/lib/abutron-fp0512-native-receipt-archive")
+FIELDS=("receipts","evidence","optionc_v2","evidence_events")
+HEX32=re.compile(r"^[a-f0-9]{32}$")
+HEX64TXT=re.compile(r"^[a-f0-9]{64}\.txt$")
+EVENT_NAME=re.compile(r"^([a-f0-9]{64})\.([0-9]{10})\.([0-9]{1,20})\.([0-9]{1,10})\.txt$")
+LIMIT=100000
+
+def secure_regular_bytes(file,max_size):
+    s=file.lstat()
+    if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or s.st_size<1 or s.st_size>max_size:
+        raise ValueError("UNSAFE_OR_OVERSIZED_SOURCE")
+    fd=os.open(file,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        a=os.fstat(fd);value=os.read(fd,max_size+1);b=os.fstat(fd)
+        if len(value)!=a.st_size or (a.st_dev,a.st_ino,a.st_size,a.st_mtime_ns)!=(b.st_dev,b.st_ino,b.st_size,b.st_mtime_ns):
+            raise ValueError("SOURCE_CHANGED_DURING_READ")
+        return value
+    finally:os.close(fd)
+
+def preserve(dest,content):
+    digest=hashlib.sha256(content).hexdigest()
+    if dest.exists() or dest.is_symlink():
+        previous=secure_regular_bytes(dest,2_000_000)
+        if previous!=content:
+            raise ValueError("IMMUTABLE_ARCHIVE_CONFLICT")
+        return "existing",digest
+    fd,tmp=tempfile.mkstemp(prefix=".receipt-stage-",dir=str(dest.parent))
+    try:
+        with os.fdopen(fd,'wb') as f:
+            os.fchmod(f.fileno(),0o600)
+            f.write(content);f.flush();os.fsync(f.fileno())
+        # Do not replace an existing archived record. Atomic hard-link then unlink temporary.
+        os.link(tmp,dest,follow_symlinks=False)
+        return "created",digest
+    except FileExistsError:
+        if secure_regular_bytes(dest,2_000_000)!=content:
+            raise ValueError("ARCHIVE_CONCURRENT_CONFLICT")
+        return "existing",digest
+    finally:
+        if os.path.lexists(tmp):os.unlink(tmp)
+
+
+def preserve_variant(session, group, filename, blob):
+    """Keep both original and changed source bytes without overwriting either.
+
+    A changed file with the same native evidence ID is NOT a broker ACK and
+    must never replace the original archived evidence. Preserve every exact
+    content generation privately under its source ID and its own SHA256.
+    """
+    root=session/"source-drift-variants"
+    for folder in (root,root/group,root/group/filename):
+        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+            raise ValueError("SOURCE_DRIFT_VARIANT_DIRECTORY_UNSAFE")
+        folder.mkdir(mode=0o700, exist_ok=True)
+        st=folder.stat()
+        if st.st_uid!=0 or st.st_mode&0o077:
+            raise ValueError("SOURCE_DRIFT_VARIANT_DIRECTORY_PERMISSIONS")
+    hash_hex=hashlib.sha256(blob).hexdigest()
+    kind,sha=preserve(root/group/filename/(hash_hex+".txt"),blob)
+    return kind,sha
+
+
+def process():
+    work=ROOT/"terminal"/"MQL5"/"Files"
+    h=ROOT/"worker-health.json"
+    if not h.is_file():
+        return {"status":"NO_WORKER_HEALTH","archived":0,"checked_at_utc":dt.datetime.now(dt.timezone.utc).isoformat()}
+    d=json.loads(secure_regular_bytes(h,30000))
+    nonce=d.get("nonce")
+    if (d.get("id")!=CID or d.get("broker")!="FP Markets" or d.get("mode")!="DEMO"
+        or d.get("server")!="FPMarketsSC-Demo" or not isinstance(nonce,str) or not HEX32.fullmatch(nonce)):
+        raise ValueError("FP0512_DEMO_WORKER_IDENTITY_INVALID")
+    if OUT.is_symlink() or not OUT.is_dir() or OUT.stat().st_uid!=0 or OUT.stat().st_mode&0o077:
+        raise ValueError("ARCHIVE_ROOT_IDENTITY_INVALID")
+    session=OUT/nonce
+    session.mkdir(mode=0o700,exist_ok=True)
+    if session.is_symlink() or session.stat().st_uid!=0 or session.stat().st_mode&0o077:
+        raise ValueError("ARCHIVE_SESSION_IDENTITY_INVALID")
+    copied=0
+    counts={}
+    manifest=[]
+    source_conflicts=[]
+    for group in FIELDS:
+        source=work/"ABUTRON_FP"/group
+        if not source.exists():
+            counts[group]=0;continue
+        if source.is_symlink() or not source.is_dir():
+            raise ValueError("NATIVE_SOURCE_DIR_INVALID")
+        files=list(source.glob("*.txt"))
+        if len(files)>LIMIT:raise ValueError("NATIVE_EVIDENCE_COUNT_LIMIT")
+        dst=session/group
+        dst.mkdir(mode=0o700,exist_ok=True)
+        if dst.is_symlink() or dst.stat().st_mode&0o077:raise ValueError("ARCHIVE_SUBDIR_INVALID")
+        for file in files:
+            event_match=(EVENT_NAME.fullmatch(file.name) if group=="evidence_events" else None)
+            if (event_match is None and group=="evidence_events") or (
+                group!="evidence_events" and not HEX64TXT.fullmatch(file.name)):
+                raise ValueError("NATIVE_EVIDENCE_FILENAME_INVALID")
+            blob=secure_regular_bytes(file,2_000_000)
+            if group=="evidence_events":
+                lines=blob.decode("utf-8-sig").splitlines()
+                if (len(lines)!=19 or lines[:5]!=[
+                    "APEX_FP_BROKER_POSITION_V1",event_match.group(1),
+                    nonce,__import__("os").environ["ABUTRON_FP_DEMO_LOGIN_0512"],"FPMarketsSC-Demo"]):
+                    raise ValueError("NATIVE_GENERATION_BROKER_ACCOUNT_OR_SCHEMA_INVALID")
+            if group=="receipts":
+                lines=blob.decode("utf-8-sig").splitlines()
+                if (len(lines)!=10 or lines[0]!="APEX_FP_NATIVE_V1"
+                    or lines[1]!=file.stem or lines[2] not in ("ACK","BLOCKED","UNKNOWN")
+                    or lines[7:]!=[nonce,__import__("os").environ["ABUTRON_FP_DEMO_LOGIN_0512"],"FPMarketsSC-Demo"]
+                    or not all(s.isdecimal() for s in lines[4:7])):
+                    raise ValueError("NATIVE_RECEIPT_SCHEMA_INVALID")
+            try:
+                kind,sha=preserve(dst/file.name,blob)
+            except ValueError as exc:
+                if str(exc)!="IMMUTABLE_ARCHIVE_CONFLICT" or group=="evidence_events":
+                    # Generation IDs are immutable; changed bytes under an
+                    # already archived ID MUST fail, never become a variant.
+                    raise
+                # Preserve the original immutable canonical record unchanged.
+                # Seal the mutated source by SHA without treating it as
+                # broker-authoritative or a new original ACK.
+                old=secure_regular_bytes(dst/file.name,2_000_000)
+                oldsha=hashlib.sha256(old).hexdigest()
+                kind,sha=preserve_variant(session,group,file.name,blob)
+                source_conflicts.append({
+                    "group":group,"source_name_sha256":
+                        hashlib.sha256(file.name.encode()).hexdigest(),
+                    "original_archived_sha256":oldsha,
+                    "source_variant_sha256":sha,
+                    "variant_created_this_cycle":kind=="created"})
+            if kind=="created":copied+=1
+            manifest.append((group,file.name,sha))
+        counts[group]=len(files)
+    # Never claim archived receipts are independently broker verified.
+    result={"schema":"abutron.fp0512.native_immutable_receipt_archive.ro.v1",
+           "status":("SOURCE_DRIFT_VARIANTS_SEALED_ACK_NOT_CERTIFIED" if
+                     source_conflicts else "ORIGINAL_NATIVE_RECEIPTS_ARCHIVED"),
+           "source_conflicting_original_ids":len(source_conflicts),
+           "source_variant_digests":source_conflicts,
+           "all_current_source_records_match_first_original":
+                len(source_conflicts)==0,
+           "native_event_generations_preserved":counts.get("evidence_events",0),
+           "native_event_generation_broker_ack_certified":False,
+           "native_event_stream_complete_from_inception_certified":False,
+           "checked_at_utc":dt.datetime.now(dt.timezone.utc).isoformat(),
+           "account_masked":"••••0512","environment":"DEMO",
+           "session_nonce_sha256":hashlib.sha256(nonce.encode()).hexdigest(),
+           "source_counts":counts,"newly_preserved_files":copied,
+           "archived_source_file_count":len(manifest),
+           "broker_ack_certified_by_archive":False,
+           "trading_or_crm_changed":False,"broker_orders_sent":0}
+    p=OUT/"latest.json"
+    fd,t=tempfile.mkstemp(prefix=".receipt-latest-",dir=str(OUT))
+    try:
+        with os.fdopen(fd,'w') as f:
+            os.fchmod(f.fileno(),0o600);json.dump(result,f,sort_keys=True,separators=(",",":"))
+            f.write("\n");f.flush();os.fsync(f.fileno())
+        os.replace(t,p)
+    finally:
+        if os.path.exists(t):os.unlink(t)
+    return result
+
+def main():
+    OUT.mkdir(parents=True,mode=0o700,exist_ok=True)
+    with (OUT/".lock").open("a+") as f:
+        fcntl.flock(f,fcntl.LOCK_EX)
+        print(json.dumps(process(),sort_keys=True))
+if __name__=="__main__":main()
