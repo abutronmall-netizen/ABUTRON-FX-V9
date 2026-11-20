@@ -883,7 +883,7 @@ def main():
  except (OSError,ValueError,UnicodeError):
   print("FP_SIDECAR_READONLY_ADDON_NOT_STAGED",file=sys.stderr)
  auth=runtime/"auth.ini"
- auth.write_text("[Common]\r\nLogin="+login+"\r\nPassword="REDACTED"password"]+
+ auth.write_text("[Common]\r\nLogin="+login+"\r\nPassword="+doc["password"]+
   "\r\nServer="+server+"\r\nKeepPrivate=0\r\nProxyEnable=0\r\n"+
   "[Experts]\r\nEnabled=1\r\nAllowLiveTrading="+("1" if broker=="FP Markets" and mode=="DEMO" else "0")+"\r\nAllowDllImport=0\r\n"+
   "[StartUp]\r\nExpert=ABUTRON\\AbutronFPMarketsNativeFeedEA\r\n"+
