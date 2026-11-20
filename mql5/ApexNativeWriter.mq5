@@ -98,13 +98,14 @@ void OnTimer()
 void ExportNativeData()
 {
    string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
+   string exportNonce = Nonce();  // One export cycle, one matching nonce
 
    // --- Account identity -------------------------------------------
-   string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + Nonce() + ".txt";
+   string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + exportNonce + ".txt";
    string idJson = StringFormat(
       "{\"connection_id\":\"%s\",\"login\":%d,\"broker\":\"%s\",\"server\":\"%s\",\"nonce\":\"%s\",\"challenge\":\"%s\",\"worker_health_ts\":\"%s\"}",
       InpConnectionId, AccountInfoInteger(ACCOUNT_LOGIN),
-      "native", InpBrokerServer, Nonce(), Challenge(), TimeStampToStr(TimeCurrent()));
+      "native", InpBrokerServer, exportNonce, Challenge(), TimeStampToStr(TimeCurrent()));
    WriteTextFile(identity, idJson);
 
    // --- Closed M5 bars (last 120) -----------------------------------
@@ -134,7 +135,7 @@ void ExportNativeData()
    if(StringLen(barsJson) > 0 && StringSubstr(barsJson, StringLen(barsJson)-1, 1) == ",")
       barsJson = StringSubstr(barsJson, 0, StringLen(barsJson)-1);
    barsJson += "]}";
-   string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + Nonce() + ".txt";
+   string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + exportNonce + ".txt";
    WriteTextFile(barsFile, barsJson);
 
    // --- Authenticated quote snapshot (bid/ask/tick geometry) -------
@@ -142,7 +143,7 @@ void ExportNativeData()
    // from the broker's own SymbolInfoDouble at export time, bound to
    // the same nonce/login/server/session. Never derive quotes from
    // bar close.
-   string quotesFile = dir + "ABUTRON_NATIVE_QUOTES_V2_" + Nonce() + ".txt";
+   string quotesFile = dir + "ABUTRON_NATIVE_QUOTES_V2_" + exportNonce + ".txt";
    string qJson = "{\"quotes\":[";
    string qs = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,"
       "\"spread\":%.0f,\"tick_size\":%.5f,\"point\":%.5f,\"observed_at\":\"%s\"},",
@@ -165,7 +166,7 @@ void ExportNativeData()
    string ofJson = StringFormat(
       "{\"schema\":\"ABUTRON_ORDER_FLOW_V2\",\"symbol\":\"%s\","
       "\"nonce\":\"%s\",\"source\":\"broker_trade_ticks\",\"trades\":[",
-      _Symbol, Nonce());
+      _Symbol, exportNonce);
    int closedBarCount = ArraySize(rates);
    if(closedBarCount > 0)
    {
@@ -204,7 +205,7 @@ void ExportNativeData()
       StringSubstr(ofJson, StringLen(ofJson) - 1, 1) == ",")
       ofJson = StringSubstr(ofJson, 0, StringLen(ofJson) - 1);
    ofJson += "]}";
-   string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + Nonce() + ".txt";
+   string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + exportNonce + ".txt";
    WriteTextFile(oflowFile, ofJson);
 
    // --- Broker-native exposure snapshot (Issue #36) -----------------
