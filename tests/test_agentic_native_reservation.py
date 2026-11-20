@@ -48,3 +48,39 @@ def test_no_proven_broker_geometry_never_reserves(monkeypatch):
                            adapter=_adapter(),dispatcher=Dispatcher())
     assert result.dispatch_reason=="NATIVE_BROKER_ORDER_GEOMETRY_MISSING"
     assert result.reserved_candidate_ids==[]
+
+
+def test_two_simultaneous_symbols_share_one_owner_risk_budget(monkeypatch):
+    """New reservations consume headroom; it cannot be reused by the next symbol."""
+    from types import SimpleNamespace
+    from test_agent_runtime_gating import _Candidate
+
+    account = dict(connection_id=CID, broker=BROKER, mt5_login=7410512,
+                   server="DerivDemo", owner_id="owner1",
+                   environment="demo", effective_on=1, equity=10000)
+    db = _patch_db(monkeypatch, account)
+    reserved = []
+    db.add_candidate = lambda row: reserved.append(row) or True
+    class TwinEngine(_PositiveEngine):
+        def run_decision_pass(self, **kw):
+            base = {key:getattr(_Candidate,key) for key in
+                    ("symbol","direction","conviction","reason_code",
+                     "candidate_id","volume","stop_loss",
+                     "take_profit","trigger_price","price","risk_fraction")}
+            return [SimpleNamespace(**base),
+                    SimpleNamespace(**dict(base, candidate_id="cand-002",
+                                           symbol="GBPUSD.r"))]
+    class Dispatcher:
+        def dispatch_account(self, connection_id, candidate_ids=None):
+            assert candidate_ids == ["cand-001"]
+            return dict(sent=0,ack=0,unknown=0,rejected=0,details=[])
+    another = native_spec()
+    another["symbol"] = "GBPUSD.r"
+    result = run_agentic_pass(
+        CID, engine=TwinEngine(), adapter=_adapter(),
+        dispatcher=Dispatcher(),
+        native_specs={"EURUSD.r":native_spec(), "GBPUSD.r":another},
+        owner_open_risk_usd=198.5, owner_equity_usd=10000)
+    assert len(reserved)==1
+    assert len(result.reserved_candidate_ids)==1
+    assert 198.5 + sum(row["stop_risk_usd"] for row in reserved) <= 200.000001

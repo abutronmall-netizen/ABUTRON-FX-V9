@@ -307,9 +307,12 @@ def run_agentic_pass(
             return result
         try:
             seed = int(native_writer["activation_seed"])
-            native_rev = hmac_sign(os.environ["ABUTRON_ACTIVATION_SECRET"],
-                                   connection_id + "|" + str(seed))
-        except (KeyError, ValueError, TypeError):
+            existing_secret = bool(native_writer.get("use_existing_secret", False))
+            secret = (SingleWriterGateway.read_existing_secret(
+                native_writer["mql5_files_dir"]) if existing_secret else
+                os.environ["ABUTRON_ACTIVATION_SECRET"])
+            native_rev = hmac_sign(secret, connection_id + "|" + str(seed))
+        except (KeyError, ValueError, TypeError, OSError):
             result.dispatch_blocked = True
             result.dispatch_reason = "NATIVE_EA_ACTIVATION_SEED_NOT_BOUND"
             return result
@@ -321,6 +324,7 @@ def run_agentic_pass(
             activation_revision=native_rev,
             broker=broker,
             mql5_files_dir=native_writer["mql5_files_dir"],
+            existing_secret=existing_secret,
         )
         if not status.armed:
             result.dispatch_blocked = True
@@ -332,12 +336,15 @@ def run_agentic_pass(
         NativeSizingError, plan_native_agentic_order)
     import json
     from ..config import utc_now
+    # Reserve against one shared owner budget. Two simultaneous symbols must
+    # not each consume the same remaining stop-risk headroom.
+    reserved_owner_risk_usd = float(owner_open_risk_usd)
     for cand in candidates:
         try:
             plan = plan_native_agentic_order(
                 SimpleNamespace(**cand), native_specs[cand["symbol"]],
                 equity_usd=float(account.get("equity", 0.0)),
-                owner_open_risk_usd=float(owner_open_risk_usd),
+                owner_open_risk_usd=reserved_owner_risk_usd,
                 owner_equity_usd=float(owner_equity_usd))
         except (KeyError, ValueError, TypeError, NativeSizingError):
             log.append(make_event(
@@ -368,6 +375,7 @@ def run_agentic_pass(
                    reason_code="V9_BROKER_NATIVE_PLAN",
                    created_at=utc_now(), updated_at=utc_now())
         if engine_db.add_candidate(row):
+            reserved_owner_risk_usd += float(plan["estimated_stop_risk_usd"])
             result.reserved_candidate_ids.append(cand["candidate_id"])
             result.persisted_candidate_ids.append(cand["candidate_id"])
             log.append(make_event(

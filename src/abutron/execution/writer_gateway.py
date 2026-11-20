@@ -75,6 +75,7 @@ class SingleWriterGateway:
         self._armed: Dict[str, WriterStatus] = {}
         self._locks_guard = threading.Lock()
         self._native_files_dirs: Dict[str, str] = {}
+        self._secrets: Dict[str, str] = {}
 
     def _lock_for(self, connection_id: str) -> threading.Lock:
         with self._locks_guard:
@@ -85,9 +86,38 @@ class SingleWriterGateway:
     # ------------------------------------------------------------------
     # Arming (native writer readiness)
     # ------------------------------------------------------------------
+    @staticmethod
+    def read_existing_secret(mql5_files_dir: str) -> str:
+        """Read the already-running EA's HMAC secret, without changing it."""
+        from pathlib import Path
+        import stat
+        folder = Path(mql5_files_dir)
+        st = folder.lstat()
+        if (folder.name != "Files" or folder.parent.name != "MQL5" or
+                not stat.S_ISDIR(st.st_mode) or st.st_mode & 0o022):
+            raise ValueError("NATIVE_FILES_DIR_UNTRUSTED")
+        path = folder / "ABUTRON_ACTIVATION_SECRET.txt"
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fs = os.fstat(fd)
+            if (not stat.S_ISREG(fs.st_mode) or fs.st_uid != st.st_uid or
+                    fs.st_mode & 0o077 or fs.st_size > 256):
+                raise ValueError("NATIVE_EA_SECRET_FILE_UNTRUSTED")
+            raw = os.read(fd, 257)
+        finally:
+            os.close(fd)
+        try:
+            secret = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            raise ValueError("NATIVE_EA_SECRET_ENCODING_INVALID") from None
+        if len(secret) < 16 or len(secret) > 256 or any(x.isspace() for x in secret):
+            raise ValueError("NATIVE_EA_SECRET_INVALID")
+        return secret
+
     def arm(self, *, connection_id: str, ea_path: str,
             expected_sha256: str, activation_revision: str,
-            broker: str, mql5_files_dir: str = "") -> WriterStatus:
+            broker: str, mql5_files_dir: str = "",
+            existing_secret: bool = False) -> WriterStatus:
         ok, actual = verify_file_pin(ea_path, expected_sha256)
         if not ok:
             self.log.append(make_event(
@@ -108,7 +138,14 @@ class SingleWriterGateway:
         # native writer can verify request signatures. Provisioning
         # failure is logged and downgrades the arm — the EA will reject
         # all orders without a valid secret, so arming is incomplete.
-        secret_ok = self.provision_secret(connection_id, mql5_files_dir)
+        if existing_secret:
+            try:
+                self._secrets[connection_id] = self.read_existing_secret(mql5_files_dir)
+                secret_ok = True
+            except (OSError, ValueError):
+                secret_ok = False
+        else:
+            secret_ok = self.provision_secret(connection_id, mql5_files_dir)
         if status.armed and not secret_ok:
             status.armed = False
             status.revision_ok = False
@@ -184,6 +221,7 @@ class SingleWriterGateway:
             return False
 
     def disarm(self, connection_id: str) -> None:
+        self._secrets.pop(connection_id, None)
         if connection_id in self._armed:
             self._armed[connection_id].armed = False
             self._armed[connection_id].lock_held = False
@@ -205,7 +243,8 @@ class SingleWriterGateway:
         status = self.status(connection_id)
         if not status.armed or not status.revision_ok:
             return {"outcome": "REJECTED", "reason": "NATIVE_WRITER_NOT_ARMED"}
-        secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "")
+        secret = self._secrets.get(connection_id) or os.getenv(
+            "ABUTRON_ACTIVATION_SECRET", "")
         if not secret:
             return {"outcome": "REJECTED", "reason": "NATIVE_SIGNING_SECRET_MISSING"}
 
