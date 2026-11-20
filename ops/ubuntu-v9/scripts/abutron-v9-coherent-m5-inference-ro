@@ -1,0 +1,142 @@
+#!/usr/bin/python3
+"""Run broker native closed-candle append, then V9 trained inference, in order.
+
+READ ONLY. This controller never starts any dispatcher, activation service,
+manager socket, market order, CRM writer or risk switch.
+"""
+from __future__ import annotations
+import datetime as dt
+import json
+import sqlite3
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+SOURCE_SERVICE="abutron-precision-history.service"
+SNAPSHOT_SERVICE="abutron-ai-history-snapshot.service"
+BRAIN_SERVICE="abutron-v9-trained-brain-readonly.service"
+REPORT=Path("/var/lib/abutron-v9-brain/decisions/latest.json")
+SNAPSHOT=Path("/var/lib/apex/precision-history-ai-snapshot/closed-candles.sqlite3")
+STATUS=Path("/var/lib/abutron-v9-brain/execution-input-coherence.json")
+EXPECTED_MODEL="2667997b1498aae316c4103ec1f3d0bd2efb805f034836455ed10019284302df"
+EXPECTED_RELEASE="a88f373001ee1b8fcc934a1e3d068ed5b90f947b"
+
+
+def call(service):
+    if service not in (SOURCE_SERVICE,SNAPSHOT_SERVICE,BRAIN_SERVICE):
+        raise RuntimeError("NON_READONLY_SERVICE_NOT_ALLOWED")
+    x=subprocess.run(["/usr/bin/systemctl","start",service],
+                     text=True,capture_output=True,timeout=58,check=False)
+    if x.returncode!=0:
+        raise RuntimeError("READ_ONLY_SERVICE_FAILED:"+service+
+                           ":exit="+str(x.returncode))
+
+
+def atomic_report(result):
+    STATUS.parent.mkdir(parents=True,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(prefix=".v9-input-",dir=str(STATUS.parent))
+    try:
+        os.fchmod(fd,0o600)
+        with os.fdopen(fd,"w") as f:
+            json.dump(result,f,sort_keys=True,separators=(",",":"))
+            f.write("\n")
+            f.flush();os.fsync(f.fileno())
+        os.replace(tmp,STATUS)
+    finally:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+
+
+def verify_current_model():
+    snap=SNAPSHOT.stat()
+    if (SNAPSHOT.is_symlink() or snap.st_mode&0o022 or
+        not -2<=time.time()-snap.st_mtime<=55 or
+        not 1_000_000<=snap.st_size<=100_000_000):
+        raise RuntimeError("BROKER_NATIVE_M5_AI_SNAPSHOT_NOT_CURRENT")
+    with sqlite3.connect("file:"+str(SNAPSHOT)+"?mode=ro",uri=True,timeout=8) as db:
+        db.execute("PRAGMA query_only=ON")
+        if (db.execute("PRAGMA journal_mode").fetchone()!=('delete',) or
+            db.execute("PRAGMA quick_check").fetchone()!=('ok',) or
+            db.execute("SELECT count(DISTINCT symbol) FROM candles WHERE timeframe='M5'").fetchone()[0]!=13):
+            raise RuntimeError("BROKER_NATIVE_M5_AI_SNAPSHOT_INTEGRITY_FAIL")
+    st=REPORT.stat()
+    if (REPORT.is_symlink() or st.st_uid!=0 or st.st_mode&0o022
+        or not -2<=time.time()-st.st_mtime<=25 or st.st_size>=150000):
+        raise RuntimeError("TRAINED_MODEL_REPORT_MISSING_OR_STALE")
+    x=json.loads(REPORT.read_text())
+    if (x.get("model_sha256")!=EXPECTED_MODEL or
+        x.get("release_commit")!=EXPECTED_RELEASE or
+        x.get("model_loaded") is not True or x.get("trained") is not True or
+        x.get("model_features")!=49 or x.get("model_symbols")!=26 or
+        x.get("deriv_current")!=13 or
+        x.get("orders_submitted")!=0 or
+        x.get("native_order_dispatch")!="NOT_CONNECTED"):
+        raise RuntimeError("TRAINED_V9_SOURCE_IDENTITY_OR_FEATURES_UNVERIFIED")
+    rows=[z for z in x.get("symbols",[]) if z.get("broker")=="Deriv"]
+    if (len(rows)!=13 or len({z.get("symbol") for z in rows})!=13 or
+        any(z.get("state")!="CURRENT_NATIVE_M5" or
+            z.get("trained_model") is not True or
+            z.get("features_count")!=49 or
+            z.get("loss_pattern_guard_blockers") is None
+            for z in rows)):
+        raise RuntimeError("DERIV_V9_M5_PREDICTION_NOT_CURRENT")
+    return {
+        "release_commit":EXPECTED_RELEASE,
+        "model_sha256":EXPECTED_MODEL,
+        "generated_utc":x["generated_utc"],
+        "deriv_current":x["deriv_current"],
+        "fp_current":x.get("fp_current"),
+        "current_deriv_symbols":len(rows),
+    }
+
+
+def main():
+    if len(sys.argv)>1:
+        if sys.argv==[sys.argv[0],"--selftest"]:
+            assert (SOURCE_SERVICE,SNAPSHOT_SERVICE,BRAIN_SERVICE)==(
+                "abutron-precision-history.service",
+                "abutron-ai-history-snapshot.service",
+                "abutron-v9-trained-brain-readonly.service")
+            print("READ_ONLY_DEPENDENCY_CHAIN_PASS")
+            return 0
+        print("ARGUMENTS_INVALID");return 2
+    start=time.monotonic()
+    steps=[]
+    try:
+        call(SOURCE_SERVICE);steps.append("NATIVE_CLOSED_M5_UPDATED")
+        call(SNAPSHOT_SERVICE);steps.append("NATIVE_AI_SQLITE_SNAPSHOT_VERIFIED")
+        call(BRAIN_SERVICE);steps.append("TRAINED_V9_INFERRED")
+        proof=verify_current_model()
+        result=dict(
+            state="V9_DEMO_NATIVE_SIGNAL_FEED_READY",
+            checks=steps,
+            source_broker="Deriv",
+            execution_account="DEMO_6207_ONLY",
+            broker_order_transport="V9_DIRECTION_GATE_THEN_EXISTING_V4_NATIVE",
+            read_only_coordinator=True,
+            native_order_send_called=False,
+            live_trading_changed=False,
+            **proof)
+        exit_code=0
+    except Exception as exc:
+        result={
+            "state":"V9_DEMO_SIGNAL_FEED_BLOCKED",
+            "checks":steps,
+            "error":type(exc).__name__+":"+str(exc)[:160],
+            "read_only_coordinator":True,
+            "native_order_send_called":False,
+            "live_trading_changed":False,
+        }
+        exit_code=2
+    result["checked_utc"]=dt.datetime.now(dt.timezone.utc).isoformat()
+    result["elapsed_ms"]=round((time.monotonic()-start)*1000)
+    atomic_report(result)
+    print(json.dumps(result,sort_keys=True,separators=(",",":")))
+    return exit_code
+
+
+if __name__=="__main__":
+    sys.exit(main())
