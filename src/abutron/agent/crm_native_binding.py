@@ -89,11 +89,21 @@ class Demo6207NativeCRM:
                  activation["ack_revision"]==revision and ack_current)
         if not enabled:
             raise CRMBindingError("CRM_DEMO_6207_ORDER_SWITCH_OFF_OR_ACK_STALE")
-        native=self._recent_json(self.qa_health,ttl=75)
-        if (native.get("status")!="SIGNED_NATIVE_EXPOSURE_VERIFIED" or
-                native.get("signature_verified") is not True or
-                native.get("native_probe_sha256")!=self.expected_ea_sha):
-            raise CRMBindingError("MT5_NATIVE_ACCOUNT_AUTHENTICATION_UNAVAILABLE")
+        # The old QA report refreshes every 300 seconds and therefore is not
+        # a reliable authority for a 30-second V9 execution cycle. Authenticate
+        # the actual current HMAC-signed MT5 position feed instead.
+        from ..execution.writer_gateway import SingleWriterGateway
+        from ..reconciliation.native_crm_6207 import signed_native_exposure
+        native_files=str(self.qa_data_dir/"MQL5/Files")
+        try:
+            signed_native_exposure(
+                native_files,cid=cid,login=int(row["account_reference"]),
+                server=str(row["broker_server"]),
+                secret=SingleWriterGateway.read_existing_secret(native_files),ttl=70)
+        except (OSError,ValueError,TypeError) as exc:
+            raise CRMBindingError(
+                "MT5_NATIVE_SIGNED_BROKER_EXPOSURE_NOT_CURRENT:"
+                +type(exc).__name__) from exc
         cost=self._recent_json(self.native_cost_report,ttl=65,root_only=True)
         if (cost.get("account_suffix")!="6207" or
                 cost.get("environment")!="DEMO" or
