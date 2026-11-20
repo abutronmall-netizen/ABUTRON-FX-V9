@@ -326,3 +326,18 @@ def test_activation_module_paths():
     paths_6207 = mod._account_paths("6207")
     assert str(paths_6207["cost_report"]) == "/var/lib/abutron-v4-broker-crm-supervisor-6207/v4-native-execution-cost-6207.json"
     assert "abutron-v4-broker-crm-supervisor-6207" in str(paths_6207["owner_report"])
+
+def test_v9_native_runner_uses_proven_account_sized_dispatch(monkeypatch):
+    from abutron.agent import runtime
+    from unittest.mock import Mock
+    marker=object()
+    native=Mock(return_value=marker)
+    monkeypatch.setattr(runtime, "_run_native_agentic_pass",native)
+    result=runtime.run_agentic_pass(
+        "a"*32, broker="Deriv", owner_id="owner",
+        native_specs={"Volatility 50 Index.0": {"tick_size": 0.01}},
+        native_writer={"ea_path":"account-specific"},
+        owner_open_risk_usd=0.0, owner_equity_usd=1000.0)
+    assert result is marker
+    assert native.call_args.kwargs["native_writer"]["ea_path"] == "account-specific"
+    assert native.call_args.kwargs["native_specs"]["Volatility 50 Index.0"]["tick_size"] == 0.01
