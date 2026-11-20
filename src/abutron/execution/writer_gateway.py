@@ -292,8 +292,10 @@ class SingleWriterGateway:
                 "created_at": utc_now(),
             }
             outcome, receipt_ref = self._deliver_to_ea(request, request_timeout)
+            native_reason = (str(receipt_ref.get("reason", ""))
+                             if isinstance(receipt_ref, dict) else "")
             return {"outcome": outcome, "receipt_ref": receipt_ref,
-                    "request_id": nonce}
+                    "request_id": nonce, "reason": native_reason}
         finally:
             lock.release()
 

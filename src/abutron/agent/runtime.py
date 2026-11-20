@@ -129,6 +129,7 @@ def run_agentic_pass(
     owner_open_risk_usd: Optional[float] = None,
     owner_equity_usd: Optional[float] = None,
     native_writer: Optional[Dict[str, str]] = None,
+    owner_native_authority: Any = None,
 ) -> AgenticRuntimeResult:
     """Run one full agentic pass: real data -> brain -> gated dispatch.
 
@@ -397,7 +398,8 @@ def run_agentic_pass(
     if dispatcher is None:
         dispatcher = NativeDispatcher(
             event_log=log, gateway=gateway,
-            receipt_mgr=ReceiptManager(event_log=log))
+            receipt_mgr=ReceiptManager(event_log=log),
+            owner_native_authority=owner_native_authority)
 
     dispatch_result = dispatcher.dispatch_account(
         connection_id, candidate_ids=result.reserved_candidate_ids)
