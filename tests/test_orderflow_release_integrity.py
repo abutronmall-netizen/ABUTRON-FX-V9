@@ -107,6 +107,27 @@ def test_mql5_orderflow_json_has_quoted_comma_delimiters():
     assert "_Symbol" in src[src.index("Order flow: genuine trade ticks"):src.index("Broker-native exposure snapshot")]
 
 
+def test_mql5_concatenation_emits_parseable_bound_orderflow_json():
+    """Check emitted JSON semantics, not merely delimiter substrings."""
+    source=(ROOT/"mql5/ApexNativeWriter.mq5").read_text()
+    expression=source.split("string ofJson =",1)[1].split(";",1)[0]
+    fields={
+        "InpConnectionId":"a"*32,
+        "cycleNonce":"nonce123",
+        "source":"trade_ticks",
+        "tradesJson":'[{"symbol":"X","price":101.0,"size":2.0,"side":"buy","time":"2026.11.20 19:00:00"}]',
+    }
+    pieces=[]
+    for token in expression.split("+"):
+        token=token.strip()
+        pieces.append(json.loads(token) if token.startswith('"') else fields[token])
+    result=json.loads("".join(pieces))
+    assert result["connection_id"]=="a"*32
+    assert result["nonce"]=="nonce123"
+    assert result["source"]=="trade_ticks"
+    assert len(result["trades"])==1
+
+
 def test_compiled_source_sha_must_equal_deploy_pin(tmp_path,monkeypatch):
     mod=load_script()
     p=tmp_path/"EX5.sha256.txt";p.write_text("ApexNativeWriter.ex5 SHA256 " + "a"*64+"\\n")

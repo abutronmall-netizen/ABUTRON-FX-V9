@@ -230,9 +230,9 @@ void ExportNativeData()
 
    string source = (genuineCount > 0) ? "trade_ticks" : "candle_derived";
    string ofJson = "{\"connection_id\":\"" + InpConnectionId +
-                   ",\"nonce\":\"" + cycleNonce +
-                   ",\"source\":\"" + source +
-                   ",\"trades\":" + tradesJson + "}";
+                   "\",\"nonce\":\"" + cycleNonce +
+                   "\",\"source\":\"" + source +
+                   "\",\"trades\":" + tradesJson + "}";
    string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + cycleNonce + ".txt";
    WriteTextFile(oflowFile, ofJson);
    string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";
