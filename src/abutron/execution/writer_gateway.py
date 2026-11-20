@@ -74,6 +74,8 @@ class SingleWriterGateway:
         self._locks: Dict[str, threading.Lock] = {}
         self._armed: Dict[str, WriterStatus] = {}
         self._locks_guard = threading.Lock()
+        self._native_files_dirs: Dict[str, str] = {}
+        self._secrets: Dict[str, str] = {}
 
     def _lock_for(self, connection_id: str) -> threading.Lock:
         with self._locks_guard:
@@ -84,9 +86,38 @@ class SingleWriterGateway:
     # ------------------------------------------------------------------
     # Arming (native writer readiness)
     # ------------------------------------------------------------------
+    @staticmethod
+    def read_existing_secret(mql5_files_dir: str) -> str:
+        """Read the already-running EA's HMAC secret, without changing it."""
+        from pathlib import Path
+        import stat
+        folder = Path(mql5_files_dir)
+        st = folder.lstat()
+        if (folder.name != "Files" or folder.parent.name != "MQL5" or
+                not stat.S_ISDIR(st.st_mode) or st.st_mode & 0o022):
+            raise ValueError("NATIVE_FILES_DIR_UNTRUSTED")
+        path = folder / "ABUTRON_ACTIVATION_SECRET.txt"
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fs = os.fstat(fd)
+            if (not stat.S_ISREG(fs.st_mode) or fs.st_uid != st.st_uid or
+                    fs.st_mode & 0o077 or fs.st_size > 256):
+                raise ValueError("NATIVE_EA_SECRET_FILE_UNTRUSTED")
+            raw = os.read(fd, 257)
+        finally:
+            os.close(fd)
+        try:
+            secret = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            raise ValueError("NATIVE_EA_SECRET_ENCODING_INVALID") from None
+        if len(secret) < 16 or len(secret) > 256 or any(x.isspace() for x in secret):
+            raise ValueError("NATIVE_EA_SECRET_INVALID")
+        return secret
+
     def arm(self, *, connection_id: str, ea_path: str,
             expected_sha256: str, activation_revision: str,
-            broker: str, mql5_files_dir: str = "") -> WriterStatus:
+            broker: str, mql5_files_dir: str = "",
+            existing_secret: bool = False) -> WriterStatus:
         ok, actual = verify_file_pin(ea_path, expected_sha256)
         if not ok:
             self.log.append(make_event(
@@ -101,11 +132,20 @@ class SingleWriterGateway:
                                   expected_sha256, activation_revision,
                                   True, False, utc_now())
         self._armed[connection_id] = status
+        if mql5_files_dir:
+            self._native_files_dirs[connection_id] = mql5_files_dir
         # Provision the HMAC secret to the EA via MQL5/Files so the
         # native writer can verify request signatures. Provisioning
         # failure is logged and downgrades the arm — the EA will reject
         # all orders without a valid secret, so arming is incomplete.
-        secret_ok = self.provision_secret(connection_id, mql5_files_dir)
+        if existing_secret:
+            try:
+                self._secrets[connection_id] = self.read_existing_secret(mql5_files_dir)
+                secret_ok = True
+            except (OSError, ValueError):
+                secret_ok = False
+        else:
+            secret_ok = self.provision_secret(connection_id, mql5_files_dir)
         if status.armed and not secret_ok:
             status.armed = False
             status.revision_ok = False
@@ -142,17 +182,34 @@ class SingleWriterGateway:
                 reason_code="SECRET_PROVISION_FAILED",
                 payload={"error": "no mql5_files_dir"}))
             return False
-        secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation")
+        secret = os.getenv("ABUTRON_ACTIVATION_SECRET", "")
+        if not secret:
+            return False
         try:
-            os.makedirs(mql5_files_dir, exist_ok=True)
-            path = os.path.join(mql5_files_dir,
-                                "ABUTRON_ACTIVATION_SECRET.txt")
-            # Write with restrictive permissions (owner read/write only)
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            from pathlib import Path
+            import stat
+            import tempfile
+            folder = Path(mql5_files_dir)
+            st = folder.lstat()
+            if (folder.name != "Files" or folder.parent.name != "MQL5"
+                    or not stat.S_ISDIR(st.st_mode) or st.st_mode & 0o022):
+                return False
+            path = folder / "ABUTRON_ACTIVATION_SECRET.txt"
+            if path.is_symlink():
+                return False
+            fd, tmp = tempfile.mkstemp(prefix=".abutron-secret-", dir=folder)
             try:
-                os.write(fd, (secret + "\n").encode())
+                with os.fdopen(fd, "wb") as output:
+                    os.fchmod(output.fileno(), 0o600)
+                    os.fchown(output.fileno(), st.st_uid, st.st_gid)
+                    output.write((secret + "\n").encode())
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(tmp, path)
             finally:
-                os.close(fd)
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            self._secrets[connection_id] = secret
             self.log.append(make_event(
                 "writer.secret_provisioned", connection_id=connection_id,
                 execution_state="ARMED", reason_code="SECRET_PROVISIONED"))
@@ -168,9 +225,10 @@ class SingleWriterGateway:
         if connection_id in self._armed:
             self._armed[connection_id].armed = False
             self._armed[connection_id].lock_held = False
-            self.log.append(make_event(
-                "writer.disarm", connection_id=connection_id,
-                execution_state="DISARMED", reason_code="FP_SINGLE_WRITER_DISARMED"))
+        self._secrets.pop(connection_id, None)
+        self.log.append(make_event(
+            "writer.disarm", connection_id=connection_id,
+            execution_state="DISARMED", reason_code="FP_SINGLE_WRITER_DISARMED"))
 
     def status(self, connection_id: str) -> WriterStatus:
         return self._armed.get(connection_id) or WriterStatus(
@@ -182,28 +240,23 @@ class SingleWriterGateway:
     def send_order(self, *, connection_id: str, candidate: Dict[str, Any],
                    account: Dict[str, Any], broker: str,
                    request_timeout: float = 10.0) -> Dict[str, Any]:
-        """Send a native order for one candidate, under the account lock.
+        """Send one signed request only when a real native EA is armed.
 
-        Aggressive mode: the arming / SHA256-pin gates are ADVISORY — a
-        disarmed or mismatched writer is logged but does NOT block order
-        submission (fail-closed writer gating removed). The per-account lock
-        is retained for correctness (no duplicate sends in-process).
+        Fail-closed: a disarmed or mismatched writer REJECTS the order
+        (no advisory bypass). The HMAC signing secret must be available
+        — either provisioned during arming or read from the running EA's
+        existing secret file. The per-account lock is retained for
+        correctness (no duplicate sends in-process).
 
         Returns a dict with outcome: 'ACK' | 'UNKNOWN' | 'REJECTED'.
         """
         status = self.status(connection_id)
-        if not status.armed:
-            self.log.append(make_event(
-                "writer.send_advisory_disarmed", connection_id=connection_id,
-                broker=broker, order_request_id=candidate.get("candidate_id"),
-                execution_state="DISPATCHED",
-                reason_code="FP_SINGLE_WRITER_DISARMED_ADVISORY"))
-        if not status.revision_ok:
-            self.log.append(make_event(
-                "writer.send_advisory_mismatch", connection_id=connection_id,
-                broker=broker, order_request_id=candidate.get("candidate_id"),
-                execution_state="DISPATCHED",
-                reason_code="BINARY_SOURCE_MISMATCH_ADVISORY"))
+        if not status.armed or not status.revision_ok:
+            return {"outcome": "REJECTED", "reason": "NATIVE_WRITER_NOT_ARMED"}
+        secret = self._secrets.get(connection_id) or os.getenv(
+            "ABUTRON_ACTIVATION_SECRET", "")
+        if not secret:
+            return {"outcome": "REJECTED", "reason": "NATIVE_SIGNING_SECRET_MISSING"}
 
         lock = self._lock_for(connection_id)
         if not lock.acquire(blocking=False):
@@ -244,25 +297,48 @@ class SingleWriterGateway:
                 # Canonical: nonce|candidate_id|connection_id|symbol|
                 #           direction|volume|stop_loss|take_profit
                 "signed": hmac_sign(
-                    os.getenv("ABUTRON_ACTIVATION_SECRET", "apex-activation"),
+                    secret,
                     _canonical_order(nonce, candidate, connection_id)),
                 "created_at": utc_now(),
             }
             outcome, receipt_ref = self._deliver_to_ea(request, request_timeout)
+            native_reason = (str(receipt_ref.get("reason", ""))
+                             if isinstance(receipt_ref, dict) else "")
             return {"outcome": outcome, "receipt_ref": receipt_ref,
-                    "request_id": nonce}
+                    "request_id": nonce, "reason": native_reason}
         finally:
             lock.release()
 
     def _deliver_to_ea(self, request: Dict[str, Any],
                        timeout: float) -> tuple:
-        """Deliver the signed request to the native EA via the manager socket.
+        """Deliver the signed request to the native EA.
 
-        In this deployment the manager socket is a local Unix socket; the
-        manager proxies to the per-account terminal. If the socket is not
+        Primary path: local Unix socket (MANAGER_SOCK). The manager
+        proxies to the per-account terminal. If the socket is not
         present (offline dev / test), the outcome is UNKNOWN — never a
         fabricated ACK.
+
+        Fallback path: when a native MQL5/Files directory is configured
+        for this connection, attempt a native file handoff (write the
+        signed request to the terminal's MQL5/Files handoff directory
+        and read the receipt). This supports deployments where the
+        terminal manager runs in an isolated Wine environment without a
+        local socket bridge.
         """
+        # Native file handoff fallback when a terminal files dir is set.
+        native_dir = self._native_files_dirs.get(
+            str(request.get("connection_id")), "")
+        if native_dir:
+            try:
+                from .native_file_handoff import NativeFileHandoff
+                return NativeFileHandoff(
+                    native_dir,
+                    connection_id=str(request["connection_id"]),
+                    mt5_login=int(request["mt5_login"]),
+                ).send(request, timeout=timeout)
+            except (OSError, ValueError, TypeError, ImportError) as exc:
+                return "REJECTED", {"reason": "NATIVE_FILE_HANDOFF_FAILED",
+                                    "error_type": type(exc).__name__}
         try:
             if not os.path.exists(MANAGER_SOCK):
                 return "UNKNOWN", None
