@@ -444,7 +444,8 @@ double NormalizeLots(double v, string symbol)
 {
    double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
    if(step <= 0.0)  step = 0.01;
-   // Broker-step floor with float representation tolerance; never round a genuine fractional step up.\n   double lots = MathFloor(v / step + 1.0e-9) * step;
+   // Broker-step floor with float representation tolerance; never round a genuine fractional step up.
+   double lots = MathFloor(v / step + 1.0e-9) * step;
    int decimals = (int)MathRound(-MathLog10(step));
    if(decimals < 0)   decimals = 0;
    if(decimals > 8)   decimals = 8;
