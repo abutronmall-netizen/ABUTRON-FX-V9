@@ -1,149 +1,50 @@
-"""Tests for the EA regression fixes (UTF-8, magic, trailing).
-
-Reproduces the two regressions introduced by the faulty EX5 rebuild:
-
-1. UTF-8 request reading: the FileOpen for the pending request file
-   omitted FILE_ANSI | CP_UTF8, causing MQL5 to misread the UTF-8 JSON
-   and lose the request_id. The fix restores the explicit UTF-8
-   configuration.
-
-2. Missing trade-magic and trailing-stop: the faulty rebuild omitted
-   the MAGIC define, req.magic assignment, and the entire trailing-stop
-   implementation (ApplyTrailingStops, trail tracking arrays, OnTimer
-   call). The fix restores all of these.
-
-These tests assert the source contains the required patterns. They do
-NOT compile MQL5 — compilation is verified by the CI workflow.
-"""
+"""Regression checks for the restored production-known EA plus lot-step correction."""
 from __future__ import annotations
+import importlib.util
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1]
+SRC=ROOT/"mql5/ApexNativeWriter.mq5"
 
-import pathlib
+def text(): return SRC.read_text()
 
-import pytest
-
-MQL5_SRC = pathlib.Path(__file__).parent.parent / "mql5" / "ApexNativeWriter.mq5"
-
-
-@pytest.fixture(scope="module")
-def source():
-    return MQL5_SRC.read_text()
-
-
-# --------------------------------------------------------------------- #
-# UTF-8 request reading fix
-# --------------------------------------------------------------------- #
-
-def test_pending_request_fileopen_uses_utf8(source):
-    """The pending-request FileOpen must include FILE_ANSI | CP_UTF8."""
-    assert "FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in source, (
-        "ProcessOrderRequests must read the pending request with "
-        "FILE_ANSI | CP_UTF8 — the faulty rebuild omitted this, causing "
-        "misread UTF-8 JSON and lost request IDs")
-
-
-def test_last_file_fileopen_uses_utf8(source):
-    """The order-flow last-file FileOpen must also use UTF-8."""
-    assert "FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in source
-
-
-def test_no_bare_fileopen_file_txt_for_reading(source):
-    """No FileOpen for reading should omit FILE_ANSI | CP_UTF8."""
-    # Check that every FILE_READ FileOpen includes FILE_ANSI
-    for line in source.splitlines():
+def test_utf8_pending(): assert "FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in text()
+def test_utf8_order_flow(): assert "FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in text()
+def test_valid_filehandle_check(): assert "if(h == INVALID_HANDLE) { return; }" in text()
+def test_no_ansi_bare_reads():
+    for line in text().splitlines():
         if "FileOpen(" in line and "FILE_READ" in line and "FILE_WRITE" not in line:
-            assert "FILE_ANSI" in line, (
-                f"FileOpen read call without FILE_ANSI: {line.strip()}")
-
-
-# --------------------------------------------------------------------- #
-# Trade-magic fix
-# --------------------------------------------------------------------- #
-
-def test_magic_define_present(source):
-    """The MAGIC define must be present."""
-    assert "#define MAGIC 73113051" in source, (
-        "MAGIC define must be restored — the faulty rebuild omitted it")
-
-
-def test_order_request_sets_magic(source):
-    """The order request must set req.magic = MAGIC."""
-    assert "req.magic     = MAGIC;" in source, (
-        "OrderSend request must set req.magic — the faulty rebuild omitted it")
-
-
-def test_order_request_sets_comment(source):
-    """The order request must set a comment for traceability."""
-    assert 'req.comment   = "ABUTRON V9 DEMO";' in source
-
-
-# --------------------------------------------------------------------- #
-# Trailing-stop fix
-# --------------------------------------------------------------------- #
-
-def test_trail_tracking_arrays_present(source):
-    """The trailing-stop tracking arrays must be declared."""
-    for var in ["g_trail_ticket", "g_trail_symbol", "g_trail_dir",
-                "g_trail_k", "g_trail_stop", "g_trail_entry",
-                "g_trail_active"]:
-        assert var in source, f"Missing trail tracking array: {var}"
-
-
-def test_apply_trailing_stops_function_present(source):
-    """The ApplyTrailingStops function must be defined."""
-    assert "void ApplyTrailingStops()" in source, (
-        "ApplyTrailingStops must be restored — the faulty rebuild "
-        "omitted the entire trailing-stop implementation")
-
-
-def test_ontimer_calls_apply_trailing(source):
-    """OnTimer must call ApplyTrailingStops."""
-    assert "ApplyTrailingStops();" in source
-    # Verify it's called within the non-exposure-only branch
-    ontimer_section = source[source.index("void OnTimer()"):
-                             source.index("void OnTimer()") + 200]
-    assert "ApplyTrailingStops" in ontimer_section
-
-
-def test_ack_registers_position_for_trailing(source):
-    """The ACK path must register the position for trailing management."""
-    assert "g_trail_ticket[idx] = res.order;" in source, (
-        "ACK path must store the position ticket for trailing")
-    assert "g_trail_symbol[idx] = symbol;" in source
-    assert "g_trail_dir[idx]    = dirn;" in source
-    assert "g_trail_k[idx]      = trailK;" in source
-    assert "g_trail_stop[idx]   = trailSt;" in source
-
-
-def test_trailing_uses_modifyorder(source):
-    """The trailing function must use ModifyOrder (TRADE_ACTION_SLTP)."""
-    assert "TRADE_ACTION_SLTP" in source, (
-        "ApplyTrailingStops must use TRADE_ACTION_SLTP to modify the SL")
-    assert "mreq.sl        = trailStop;" in source
-    assert "mreq.order     = ticket;" in source, (
-        "ApplyTrailingStops must set mreq.order (MQL5 MqlTradeRequest "
-        "uses 'order', not 'ticket') for the SLTP modify")
-
-
-def test_trailing_never_widens(source):
-    """The trailing function must check that the new stop is tighter."""
-    assert "tighter" in source
-    assert 'dir == "BUY"' in source
-
-
-def test_trailing_magic_check(source):
-    """The trailing function must verify position magic before managing."""
-    assert "PositionGetInteger(POSITION_MAGIC) != MAGIC" in source, (
-        "ApplyTrailingStops must verify the position magic before managing")
-
-
-def test_ondeinit_clears_trail_arrays(source):
-    """OnDeinit must free the trail tracking arrays."""
-    ondeinit_section = source[source.index("void OnDeinit"):
-                              source.index("void OnDeinit") + 200]
-    assert "ArrayFree(g_trail_ticket)" in ondeinit_section
-
-
-def test_lot_normalization_epsilon_preserved(source):
-    """The lot-normalization epsilon fix must still be present."""
-    assert "MathFloor(v / step + 1.0e-9) * step" in source, (
-        "The lot-normalization epsilon fix from 6ce32ac must be retained")
+            assert "FILE_ANSI" in line
+def test_working_trade_magic(): assert "InpTradeMagic     = 20261120" in text()
+def test_order_magic_bound(): assert "req.magic     = InpTradeMagic;" in text()
+def test_position_scoped_trailing(): assert "POSITION_MAGIC) != InpTradeMagic" in text()
+def test_trailing_called_on_timer():
+    assert "ManageAgenticTrailingStops();" in text()[text().index("void OnTimer()"):text().index("void ExportNativeData()")]
+def test_trailing_survives_restart_by_scanning_positions(): assert "PositionsTotal()" in text()[text().index("void ManageAgenticTrailingStops()"):]
+def test_trailing_broker_sl_tp(): 
+    s=text()
+    assert "modify.action = TRADE_ACTION_SLTP;" in s
+    assert "modify.position = ticket;" in s
+    assert "modify.tp = tp;" in s
+    assert "modify.magic = InpTradeMagic;" in s
+def test_trailing_readback():
+    s=text()
+    assert "PositionGetDouble(POSITION_SL)" in s
+    assert "BROKER_READBACK_VERIFIED" in s
+    assert "WriteAgenticTrailingReceipt" in s
+def test_trailing_tightening_only():
+    s=text()
+    assert "target <= oldSL + tickSize" in s and "target >= oldSL - tickSize" in s
+def test_trailing_preset_enabled(): assert "InpTrailingEnabled = true" in text()
+def test_epsilon_lot_floor(): assert "MathFloor(v / step + 1.0e-9) * step" in text()
+def test_real_native_order_check(): assert "OrderCheck(req, nativeCheck)" in text()
+def test_no_order_probe_generator():
+    p=ROOT/"scripts/generate_issue38_exposure_probe.py"
+    spec=importlib.util.spec_from_file_location("noorder_probe",p)
+    mod=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    probe=mod.make_probe(text())
+    assert "OrderSend(" not in probe
+    assert "ProcessOrderRequests(" not in probe
+    assert "ManageAgenticTrailingStops(" not in probe
+    assert "TRADE_ACTION_SLTP" not in probe
+    assert "void ExportNativeData()" in probe
