@@ -123,8 +123,27 @@ def scan():
                     native_history_file=hist,
                     native_reconciliation_file=recon,account_suffix=suffix)
             except (OSError,ValueError,TypeError) as exc:
-                broker_offset=None
-                entry["clock_proof_blocker"]=str(exc)[:120]
+                # Fallback: use the V305 native cost report's broker-clock
+                # offset when native history/reconciliation files are
+                # unavailable (FP_NATIVE_SOURCE_FileNotFoundError).
+                cost_report=os.environ.get("ABUTRON_FP_COST_REPORT","")
+                v305_error=None
+                if cost_report:
+                    try:
+                        from abutron.feeds.native_market_v3 import (
+                            v305_cost_clock_offset)
+                        broker_offset=v305_cost_clock_offset(
+                            cost_report_file=cost_report,
+                            account_suffix=suffix)
+                        entry["clock_source"]="V305_COST_REPORT"
+                    except (OSError,ValueError,TypeError) as exc2:
+                        v305_error=str(exc2)[:120]
+                if v305_error is not None:
+                    broker_offset=None
+                    entry["clock_proof_blocker"]=(
+                        f"history:{str(exc)[:60]};v305:{v305_error}")
+                elif v305_error is None and broker_offset is None:
+                    entry["clock_proof_blocker"]=str(exc)[:120]
             for symbol in sorted(set(symbols))[:25]:
                 detail=read_v3(worker_root=str(root),connection_id=cid,
                     login=login,server="FPMarketsSC-Demo",symbol=symbol,

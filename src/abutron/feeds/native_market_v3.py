@@ -156,6 +156,45 @@ def trusted_fp_demo_clock_offset(
     raise ValueError("FP_CLOCK_NATIVE_RECONCILIATION_EXHAUSTED")
 
 
+def v305_cost_clock_offset(
+    *, cost_report_file: str, account_suffix: str
+) -> int:
+    """Return the broker clock offset from a V305 native cost report.
+
+    This is a fallback clock source for FP Markets DEMO accounts when
+    the native history / reconciliation files are unavailable (e.g.
+    FP_NATIVE_SOURCE_FileNotFoundError). The V305 exporter measures the
+    broker-server clock against UTC and publishes the offset in its
+    cost report JSON. The offset must be a whole number of hours and
+    within the allowed range; anything else is rejected fail-closed.
+
+    The cost report must be root-owned, regular, fresh (65s TTL), and
+    must carry a genuine broker-probe verification flag.
+    """
+    if not re.fullmatch(r"[0-9]{4}", account_suffix):
+        raise ValueError("FP_CLOCK_ACCOUNT_SUFFIX_INVALID")
+    cost_path = Path(cost_report_file)
+    try:
+        blob = _read_bound(cost_path, max_bytes=1_500_000, max_age=65,
+                           expected_uid=0)
+    except OSError as exc:
+        raise ValueError("FP_CLOCK_V305_COST_NOT_AVAILABLE: "
+                         + type(exc).__name__) from exc
+    try:
+        cost = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("FP_CLOCK_V305_COST_NOT_AVAILABLE") from exc
+    if (cost.get("account_suffix") != account_suffix
+            or cost.get("environment") != "DEMO"
+            or cost.get("native_bid_ask_and_ordercalcprofit_verified") is not True
+            or "broker_clock_offset_seconds" not in cost):
+        raise ValueError("FP_CLOCK_V305_COST_NOT_AVAILABLE")
+    offset = cost["broker_clock_offset_seconds"]
+    if type(offset) is not int or offset not in (0, 3600, 7200, 10800, 14400):
+        raise ValueError("FP_CLOCK_V305_OFFSET_INVALID")
+    return offset
+
+
 def native_mt5_chart_attached(worker_root: Path, symbol: str) -> bool:
     """Independent native terminal-log chart-load proof (never self-attested by V3).
 
