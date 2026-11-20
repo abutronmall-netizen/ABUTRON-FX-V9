@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule read-only ABUTRON V9 DEMO native market proof monitoring
+[Timer]
+OnBootSec=4min
+OnUnitInactiveSec=300s
+AccuracySec=15s
+Persistent=false
+Unit=abutron-v9-native-market-v3-ro.service
+[Install]
+WantedBy=timers.target

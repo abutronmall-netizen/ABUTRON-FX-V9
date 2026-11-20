@@ -1,0 +1,33 @@
+[Unit]
+Description=ABUTRON V9 isolated candidate-only paper trade retraining (NO ORDERS)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90f947b/data/brains/unified_m5/nexus_brain.json
+
+[Service]
+Type=oneshot
+User=apexagent
+Group=apexagent
+WorkingDirectory=/var/lib/abutron-v9-papertrain
+ExecStart=/usr/bin/python3 -B /usr/local/lib/abutron-v9-papertrain/run_candidate.py
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=HOME=/var/lib/abutron-v9-papertrain
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/abutron-v9-papertrain
+CPUQuota=150%
+MemoryMax=3G
+MemorySwapMax=0
+TasksMax=30
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=1150

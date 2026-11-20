@@ -1,0 +1,12 @@
+[Unit]
+Description=Continuously reconcile historical DEMO 6207 broker-native no-send preflight evidence and real min-lot costs
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=45s
+AccuracySec=5s
+Unit=abutron-v9-demo6207-evidence-progress-ro.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

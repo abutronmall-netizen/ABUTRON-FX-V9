@@ -1,0 +1,12 @@
+[Unit]
+Description=Retrain isolated V9 candidate after genuine broker close, every five minutes
+
+[Timer]
+OnBootSec=300s
+OnUnitInactiveSec=300s
+AccuracySec=10s
+Persistent=false
+Unit=abutron-v9-realtrade-candidate.service
+
+[Install]
+WantedBy=timers.target

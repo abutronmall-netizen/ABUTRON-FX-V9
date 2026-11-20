@@ -1,0 +1,12 @@
+[Unit]
+Description=ABUTRON trained FP Markets DEMO 0512/1636 M5 decision refresh every 35 seconds
+
+[Timer]
+OnBootSec=65s
+OnUnitInactiveSec=35s
+AccuracySec=2s
+Persistent=false
+Unit=abutron-v9-fp-demo-native-inference-ro.service
+
+[Install]
+WantedBy=timers.target

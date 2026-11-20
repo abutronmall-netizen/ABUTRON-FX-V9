@@ -1,0 +1,13 @@
+[Unit]
+Description=ABUTRON V9 FP DEMO native market V3 read-only proof monitor
+After=local-fs.target
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/abutron-v9-native-market-v3
+ExecStart=/opt/abutron-v9-brain/.venv-a88f373/bin/python -B /opt/abutron-v9-native-market-v3/scripts/native_market_v3_status_ro.py
+TimeoutStartSec=60s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-v9-native-market-v3

@@ -1,0 +1,34 @@
+[Unit]
+Description=ABUTRON V9 PR11 a88f373 trained full-signal NexusBrain broker-native inference (READ ONLY)
+After=abutron-precision-history.service
+ConditionPathExists=/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90f947b/data/brains/unified_m5/nexus_brain.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90f947b
+Environment=PYTHONPATH=/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90f947b/src
+Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-v9-brain
+Environment=ABUTRON_V9_NATIVE_CANDLES_DB=/var/lib/apex/precision-history-ai-snapshot/closed-candles.sqlite3
+Environment=ABUTRON_BRAIN_DIR=/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90f947b/data/brains/unified_m5
+Environment=ABUTRON_LIVE_TRADING_ENABLED=false
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/opt/abutron-v9-brain/.venv-a88f373/bin/python -B /opt/abutron-v9-brain/bin/native_unified_fullsignal_readonly_a88f373.py
+TimeoutStartSec=45
+MemoryMax=450M
+CPUQuota=60%
+TasksMax=32
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ReadWritePaths=/var/lib/abutron-v9-brain

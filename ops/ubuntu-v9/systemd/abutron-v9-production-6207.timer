@@ -1,0 +1,12 @@
+[Unit]
+Description=ABUTRON V9 Agentic DEMO 6207 native decision, protected order, trailing reconciliation cycle
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=30s
+AccuracySec=2s
+Persistent=true
+Unit=abutron-v9-production-6207.service
+
+[Install]
+WantedBy=timers.target

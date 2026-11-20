@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh real broker closed-trade feedback every minute
+
+[Timer]
+OnBootSec=130s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Persistent=false
+Unit=abutron-v9-broker-closed-feedback-ro.service
+
+[Install]
+WantedBy=timers.target

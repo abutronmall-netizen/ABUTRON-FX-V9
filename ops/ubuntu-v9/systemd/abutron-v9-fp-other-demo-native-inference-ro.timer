@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh native V9 trained FP Markets 1622/2582 DEMO inference every minute
+
+[Timer]
+OnBootSec=120s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Persistent=false
+Unit=abutron-v9-fp-other-demo-native-inference-ro.service
+
+[Install]
+WantedBy=timers.target

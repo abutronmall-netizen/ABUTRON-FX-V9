@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically train owner-isolated V9 candidate models only from causally aligned broker-closed positions
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=30min
+AccuracySec=1min
+Persistent=false
+Unit=abutron-v9-all-owner-causal-candidate-trainer.service
+
+[Install]
+WantedBy=timers.target

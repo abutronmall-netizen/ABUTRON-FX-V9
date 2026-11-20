@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh trained ABUTRON V9 DEMO M5 signal feed every 35 seconds
+
+[Timer]
+OnBootSec=75s
+OnUnitInactiveSec=35s
+AccuracySec=2s
+Unit=abutron-v9-coherent-m5-inference-ro.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

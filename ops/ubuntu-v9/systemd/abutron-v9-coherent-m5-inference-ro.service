@@ -1,0 +1,20 @@
+[Unit]
+Description=ABUTRON V9 coherent native M5 candles -> trained brain DEMO signal feed (NO ORDERS)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-v9-coherent-m5-inference-ro
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-v9-brain
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX
+UMask=0077
+MemoryMax=160M
+TasksMax=24
+TimeoutStartSec=100
