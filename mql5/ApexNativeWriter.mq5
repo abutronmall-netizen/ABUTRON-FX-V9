@@ -23,7 +23,13 @@
 //| InpActivationSecret input.                                        |
 //+------------------------------------------------------------------+
 #property copyright "ABUTRON FX V9"
-#property version   "1.10"
+#property version   "1.11"
+
+// V9 trade magic — identifies positions opened by this EA so the
+// trailing loop only manages its own positions and never touches
+// unrelated broker positions. Restored from the previously deployed
+// binary; absent from the faulty rebuild.
+#define MAGIC 73113051
 
 input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
@@ -36,6 +42,20 @@ input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
 input ENUM_TIMEFRAMES InpExportPeriod = PERIOD_M5;  // native export timeframe
 
 string g_activation_secret = "";                // resolved at OnInit
+
+// Trailing-stop state: tracks positions opened by this EA so the
+// OnTimer loop can tighten the broker SL toward the trail stop.
+// Restored from the previously deployed binary; the faulty rebuild
+// omitted this entirely (trail_k/trail_stop were read and signed but
+// never applied). The brain computes the Chandelier trail; the EA
+// only executes the trail via ModifyOrder, never widening the stop.
+ulong   g_trail_ticket[];     // position tickets managed by this EA
+string  g_trail_symbol[];     // symbols
+string  g_trail_dir[];        // BUY / SELL
+double  g_trail_k[];          // ATR multiple
+double  g_trail_stop[];       // current trail stop price
+double  g_trail_entry[];      // entry price (for profit check)
+bool    g_trail_active[];     // whether the trail has room to tighten
 
 int OnInit()
 {
@@ -76,6 +96,14 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   // Clear trailing-stop tracking state.
+   ArrayFree(g_trail_ticket);
+   ArrayFree(g_trail_symbol);
+   ArrayFree(g_trail_dir);
+   ArrayFree(g_trail_k);
+   ArrayFree(g_trail_stop);
+   ArrayFree(g_trail_entry);
+   ArrayFree(g_trail_active);
 }
 
 void OnTimer()
@@ -83,7 +111,10 @@ void OnTimer()
    ExportNativeData();
    // DEMO exposure QA is strictly read-only unless explicitly reconfigured.
    if(!InpExposureOnly)
+   {
       ProcessOrderRequests();
+      ApplyTrailingStops();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -157,7 +188,7 @@ void ExportNativeData()
    string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";
    if(FileIsExist(lastFile))
    {
-      int h = FileOpen(lastFile, FILE_READ | FILE_TXT);
+      int h = FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
       if(h > 0)
       {
          string s = FileReadString(h);
@@ -293,7 +324,10 @@ void ProcessOrderRequests()
    if(!FileIsExist(pending)) return;
 
    // Open and read the pending request
-   int h = FileOpen(pending, FILE_READ | FILE_TXT);
+   // Python writes UTF-8 JSON. MQL5 FILE_TXT without FILE_ANSI defaults to
+   // UTF-16, which misreads the request and loses the request_id. The
+   // previously working binary used FILE_ANSI with CP_UTF8 — restore it.
+   int h = FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
    if(h <= 0) { FileDelete(pending); return; }
    string body = FileReadString(h);
    FileClose(h);
@@ -371,6 +405,8 @@ void ProcessOrderRequests()
    req.tp        = tp;
    req.type      = (dirn == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    req.deviation = 10;
+   req.magic     = MAGIC;
+   req.comment   = "ABUTRON V9 DEMO";
 
    // Validate actual broker stop-risk, not raw AI position_size * price.
    // InpRiskFraction is the configured per-trade PERCENT, e.g. 0.15%.
@@ -410,6 +446,23 @@ void ProcessOrderRequests()
          // Real broker ACK — write native receipt with ticket/deal
          WriteReceipt(reqId, res.order, "ACK", "NATIVE_ACK",
                       res.price, res.volume, sl, tp, IntegerToString((long)res.deal));
+         // Register the position for trailing-stop management.
+         // Only manage positions opened by THIS EA (magic-tagged).
+         ArrayResize(g_trail_ticket, ArraySize(g_trail_ticket) + 1);
+         ArrayResize(g_trail_symbol, ArraySize(g_trail_symbol) + 1);
+         ArrayResize(g_trail_dir, ArraySize(g_trail_dir) + 1);
+         ArrayResize(g_trail_k, ArraySize(g_trail_k) + 1);
+         ArrayResize(g_trail_stop, ArraySize(g_trail_stop) + 1);
+         ArrayResize(g_trail_entry, ArraySize(g_trail_entry) + 1);
+         ArrayResize(g_trail_active, ArraySize(g_trail_active) + 1);
+         int idx = ArraySize(g_trail_ticket) - 1;
+         g_trail_ticket[idx] = res.order;
+         g_trail_symbol[idx] = symbol;
+         g_trail_dir[idx]    = dirn;
+         g_trail_k[idx]      = trailK;
+         g_trail_stop[idx]   = trailSt;
+         g_trail_entry[idx]  = res.price;
+         g_trail_active[idx] = (trailSt > 0.0);
       }
       else
       {
@@ -426,6 +479,114 @@ void ProcessOrderRequests()
                    0.0, 0.0, sl, tp, "");
    }
    FileDelete(pending);
+}
+
+//+------------------------------------------------------------------+
+//| Apply trailing stops to managed positions                          |
+//|                                                                    |
+//| The brain computes the Chandelier trail (trail_stop = reference   |
+//| ± k*ATR) and sends it with the order. This function tightens the  |
+//| broker SL toward the trail stop on each timer tick. The trail     |
+//| NEVER widens the stop — it only moves in the favourable direction |
+//| and only when the new stop is tighter than the current one.       |
+//|                                                                    |
+//| Only positions tagged with THIS EA's magic are managed. Closed    |
+//| positions are pruned from the tracking arrays. Fail-closed: a     |
+//| ModifyOrder failure is logged and the existing stop is retained.  |
+//+------------------------------------------------------------------+
+void ApplyTrailingStops()
+{
+   for(int i = 0; i < ArraySize(g_trail_ticket); i++)
+   {
+      ulong ticket = g_trail_ticket[i];
+      if(ticket == 0)
+      {
+         ArrayRemove(g_trail_ticket, i);
+         ArrayRemove(g_trail_symbol, i);
+         ArrayRemove(g_trail_dir, i);
+         ArrayRemove(g_trail_k, i);
+         ArrayRemove(g_trail_stop, i);
+         ArrayRemove(g_trail_entry, i);
+         ArrayRemove(g_trail_active, i);
+         i--;
+         continue;
+      }
+      // Skip if the position is no longer open.
+      if(!PositionSelectByTicket(ticket))
+      {
+         ArrayRemove(g_trail_ticket, i);
+         ArrayRemove(g_trail_symbol, i);
+         ArrayRemove(g_trail_dir, i);
+         ArrayRemove(g_trail_k, i);
+         ArrayRemove(g_trail_stop, i);
+         ArrayRemove(g_trail_entry, i);
+         ArrayRemove(g_trail_active, i);
+         i--;
+         continue;
+      }
+      // Verify this is OUR position (magic-tagged).
+      if(PositionGetInteger(POSITION_MAGIC) != MAGIC)
+      {
+         ArrayRemove(g_trail_ticket, i);
+         ArrayRemove(g_trail_symbol, i);
+         ArrayRemove(g_trail_dir, i);
+         ArrayRemove(g_trail_k, i);
+         ArrayRemove(g_trail_stop, i);
+         ArrayRemove(g_trail_entry, i);
+         ArrayRemove(g_trail_active, i);
+         i--;
+         continue;
+      }
+      // Verify the symbol still matches.
+      if(PositionGetString(POSITION_SYMBOL) != g_trail_symbol[i])
+      {
+         ArrayRemove(g_trail_ticket, i);
+         ArrayRemove(g_trail_symbol, i);
+         ArrayRemove(g_trail_dir, i);
+         ArrayRemove(g_trail_k, i);
+         ArrayRemove(g_trail_stop, i);
+         ArrayRemove(g_trail_entry, i);
+         ArrayRemove(g_trail_active, i);
+         i--;
+         continue;
+      }
+
+      double trailStop = g_trail_stop[i];
+      if(!g_trail_active[i] || trailStop <= 0.0)
+         continue;
+
+      double curSl = PositionGetDouble(POSITION_SL);
+      if(curSl <= 0.0)
+         continue;
+
+      string dir = g_trail_dir[i];
+      // The trail only tightens: for BUY the trail stop must be ABOVE
+      // the current SL (higher = tighter); for SELL it must be BELOW.
+      // A trail that would widen the stop is never applied.
+      bool tighter = (dir == "BUY") ? (trailStop > curSl)
+                                   : (trailStop < curSl);
+      if(!tighter)
+         continue;
+
+      // Build a ModifyOrder request for the SL only. TP is unchanged.
+      MqlTradeRequest mreq;
+      MqlTradeResult  mres;
+      ZeroMemory(mreq);
+      ZeroMemory(mres);
+      mreq.action    = TRADE_ACTION_SLTP;
+      mreq.ticket    = ticket;
+      mreq.sl        = trailStop;
+      mreq.deviation = 10;
+
+      if(OrderSend(mreq, mres) &&
+         mres.retcode == TRADE_RETCODE_DONE)
+      {
+         // Trail applied — update the stored stop to the new value.
+         g_trail_stop[i] = trailStop;
+      }
+      // If ModifyOrder fails, the existing broker stop is retained.
+      // Fail-closed: never widen, never remove the protective stop.
+   }
 }
 
 //+------------------------------------------------------------------+
