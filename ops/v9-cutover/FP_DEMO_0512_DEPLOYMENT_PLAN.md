@@ -1,201 +1,76 @@
-# FP Markets DEMO 0512 — V9 Native-Writer Integration Plan
+# FP Markets DEMO 0512 — V9 Native Writer Integration Plan
 
-**Status:** Code complete and tested (804 tests, 4 skipped). PR #59
-corrections merged. **Not yet deployed.** This plan covers the
-Ubuntu-side steps to establish the first FP DEMO V9 trading writer
-on account **0512**, then verify a genuine broker-acknowledged order
-before expanding to 1636, 1622, 2582.
+**Status: NOT DEPLOYED.** Corrected against read-only Ubuntu evidence on **20 November 2026 (22:39 SAST)**. The source branch contains commit `5f0dfea` and the merged PR #59 fixes; the reported 804 tests passing / 4 skipped are **source-level results**, not broker execution proof.
 
-**Scope:** DEMO only. LIVE 9392 is never touched by this plan.
+**Scope:** FP Markets **DEMO 0512 first**, then 1636 → 1622 → 2582 individually. Existing FP feed services, order bridges, CRM controls, original broker receipts and Deriv DEMO are to remain intact. **FP LIVE 9392 remains OFF and unchanged.** Editing this document does not authorize changes on Ubuntu.
 
-## Background
+## 1. Verified existing FP infrastructure
 
-FP Markets already has a working **feed/data layer**:
+| Account | CRM / existing switch | Current terminal / new V9 writer |
+|---|---|---|
+| DEMO 0512 | CONNECTED, desired ON, effective ON | Existing active `abutron-client-mt5-<CRM CID>/terminal` feed; **new V9 writer absent** |
+| DEMO 1636 | CONNECTED, desired ON, effective ON | Active FP feed; **new V9 writer absent** |
+| DEMO 1622 | CONNECTED, desired ON, effective ON | Active FP feed; **new V9 writer absent** |
+| DEMO 2582 | CONNECTED, desired ON, effective ON | Active FP feed; **new V9 writer absent** |
+| LIVE 9392 | CONNECTED, desired OFF, effective OFF | Data feed only; outside this plan |
 
-- `mt5_session_manager.py` + `worker_feed_v8_fp_handoff.py` manage
-  FP MT5 terminal sessions running `AbutronFPMarketsNativeFeedV2.ex5`
-  (no-order feed EA).
-- FP DEMO accounts (0512, 1636, 1622, 2582) are connected with active
-  feed workers and CRM trade controls ON.
-- An existing FP execution/reconciliation service runs at
-  `/var/lib/abutron-fp-execution/` (schema
-  `abutron.fpmarkets.execution.native_reconciliation.readonly.v1`).
+Resolve account-bound CRM IDs at runtime from `/var/lib/apex-signup/accounts.sqlite3`. Do **not** commit account connection IDs, seeds, passwords, or keys.
 
-The **V9 ApexNativeWriter** (`b6b63afe…`) is a **new, separate**
-trading writer. It must be deployed to a **dedicated** FP trading
-terminal — it does not replace or compete with the existing feed/order
-bridge. The V9 runner (`production_fp_demo.py`) drives the
-decision-to-execution cycle on top of the existing CRM controls and
-broker-native data.
+The existing execution environment includes:
 
-## Prerequisites (verify on Ubuntu before deploying)
+- Feed worker `/opt/apex-client-mt5/worker_feed_v8_fp_handoff.py`. For 0512, the actual terminal is under `/var/lib/private/abutron-client-mt5-<0512 CRM CID>/terminal/`. This is **not** an installation target for the new V9 EA; do not overwrite the live feed chart or EA.
+- Existing 0512 writer/router `/opt/apex-client-mt5/fpmarkets-execution/fp_signal_order_router_apex11_0512.py`, activation `fp_demo_activation_ack.py`, and reconciliation `fp_native_reconcile_readonly.py`. Systemd units `fp-demo-single-writer-preflight.service`, `fp-demo-native-activation-ack.service`, and `fp-native-reconcile-readonly.service` are scheduled **oneshots**, commonly inactive between successful timer runs.
+- Evidence directories `/var/lib/abutron-fp-execution/activation/`, `order-router/`, `reconciliation/`, and `dual-account-reconciliation/`; FP broker-native history `/var/lib/apex/operator-live/fp-native-history.json`.
+- Shared owner exposure `/var/lib/abutron-v4-broker-crm-supervisor-6207/customer-wide-risk-evidence.json`. Use current authentic records; do not copy old values into new reports.
 
-1. **CRM trade control for 0512 is ON.** The runner checks
-   `apex_trade_controls` (desired_enabled=1, effective_enabled=1).
-   The PR #59 correction uses this existing table — no new activation
-   table is needed.
+**Absent at last check:** proposed `/var/lib/private/abutron-pr37-direct-writer-fp-demo0512-qa`, `/var/lib/abutron-v9-production-fp-0512`, and `/var/lib/abutron-fp-v4-0512/v4-native-execution-cost-0512.json`. These are **proposed future paths**, not existing deployed components. The other three DEMO accounts also lack their proposed V9 writer/data-root paths.
 
-2. **FP broker-native instrument specs exist.** The runner derives
-   FP symbols from the cost report's `instruments` dict (PR #59
-   correction). Verify the FP cost report contains instrument
-   specifications with `tick_size` for the symbols to be traded.
+## 2. Source/runtime discrepancies that must be corrected
 
-3. **The `b6b63afe…` EX5 artifact is available** on the Ubuntu host
-   (the same artifact deployed to Deriv DEMO — the EA is
-   broker-agnostic).
+1. **Wrong production import path.** `/opt/abutron-v9-execution-repair/V9-10794e2/src/abutron/agent/production_fp_demo.py` is **not installed**. The new module exists in the source worktree. Do not run the previous preflight command from that older Deriv checkout; it cannot establish FP readiness.
+2. **The enablement script is not 0512-only.** `ops/v9-cutover/enable_trading_fp_demo.py` hardcodes all four DEMO accounts. Its all-account precheck and subsequent preset writes cannot implement the requested **0512 → 1636 → 1622 → 2582** one-account-at-a-time rollout. Add an explicit account selector and test that only the authorized account is changed before using it.
+3. **CRM activation uses existing controls.** FP uses `apex_trade_controls` (both desired and effective state). The Deriv-style `abutron_v4_0512_activation_revision` table **does not exist** in FP. PR #59 correctly distinguishes them. Do not create parallel FP activation tables or re-toggle customer switches.
+4. **Native execution cost is not history.** The FP cost-report default above does not exist. `fp-native-history.json` and read-only native reconciliation are useful evidence but do not, by themselves, satisfy `DemoNativeCRM`'s contract for current account equity, verified bid/ask + OrderCalcProfit, instrument `tick_size`, `account_suffix` and `environment`. Adapt the existing FP-native source or implement the missing cost producer using genuine current values. **Never fabricate a verification flag.**
+5. **FP symbol mapping.** Use the current account's broker-native `instruments` mapping, symbol spelling, tick/lot steps and supported asset classes; never use Deriv's `Volatility 50 Index.0` on FP. PR #59 fixes source symbol selection, but real instrument reports and quote coverage are not yet verified on the new writer.
+6. **Risk settings need precise continuity.** The new FP runner specifies `RiskGate(per_trade_pct=0.0015, portfolio_cap_pct=0.02)` while the existing 0512 activation code references a **0.10% per-trade** configuration. A **2% aggregate open stop-risk** number is not interchangeable with a **20% portfolio drawdown ceiling**. Preserve the actually authorized FP position-sizing and protective SL/TP/trailing settings; do not silently change them by applying a generic Deriv preset.
+7. **Per-account runtime context.** The FP runner reads `ABUTRON_DATA_ROOT` for its event log. The engine DB, receipt ledger, signed writer and cost/owner paths must all belong to 0512. Verify the trained V9 model and its SHA in the **actual** runtime checkout before executing. Do not reuse another account's engine or secrets.
+8. **Order-writer ownership.** The existing FP 0512 router/order bridge may already own order dispatch. Before attaching an order-capable `ApexNativeWriter`, inspect current routing and agree on a single execution writer for 0512. A second terminal does not inherently prevent duplicate dispatch; do not add a new supervisory/veto architecture, and do not disable the established writer blindly.
+9. **Release integrity.** The specific push-CI EX5 SHA-256 is `b6b63afeb7c4939a2bea1f40cfad58d8288af4009d8dc4e2534d7196162b91f3`. Use the exact verified binary, not a separately recompiled file with an assumed equal hash. Account-binding and secret provisioning must be proven from the actual FP DEMO session, without publishing secrets.
 
-## Deployment steps (one account at a time: 0512 first)
+## 3. 0512-first integration sequence
 
-### Step 1 — Establish the FP 0512 V9 trading terminal
+### A. Offline corrections (current permitted scope)
 
-Create a dedicated FP trading terminal (analogous to Deriv's QA
-terminal). This is separate from the FP feed terminal.
+- Read the existing 0512 native order-router, bridge, activation publisher and reconciliation output; identify the present order-writing authority.
+- Connect `production_fp_demo.py` to genuine FP native instrument/cost evidence and existing CRM controls. Preserve the existing FP account and owner risk policy.
+- Provide a **single-account** 0512 option for the enablement runner; verify the FP preset and release SHA before any write; reject stale or foreign-account status. The source tests alone do not establish that an MT5 terminal is ready.
+- Verify isolated FP data root/engine paths, model availability and the current owner-account association. Keep the original feed and LIVE settings unchanged.
 
-```
-QA_ROOT=/var/lib/private/abutron-pr37-direct-writer-fp-demo0512-qa
-```
+### B. Account-specific staging on Ubuntu (requires explicit production-change authorization)
 
-Under `QA_ROOT/terminal/`:
+1. Record the existing 0512 worker/bridge/preset/binary/receipt state and rollback procedure. Do not overwrite the active FP feed terminal.
+2. Use `/var/lib/private/abutron-pr37-direct-writer-fp-demo0512-qa` for a **new dedicated terminal only if confirmed necessary** for the agreed one-writer topology. Bind it to 0512's real CRM ID and broker server, provision its own authorized secret securely, and use a mode-`0600` account-bound preset. Never use the blank template.
+3. Establish account-specific runtime state under `/var/lib/abutron-v9-production-fp-0512` and a current FP native cost report from real broker data. Do not treat creating a directory as operational readiness.
+4. Start the new writer only within the agreed 0512 execution routing arrangement. Verify fresh signed account, bars, quotes, position snapshots, native owner exposure, and the actual release SHA.
+5. Execute **0512 preflight only** from the correctly installed FP source and matching `ABUTRON_DATA_ROOT`. Its result must explicitly state `BRAIN_DECISION_EVALUATED_EXECUTION_NOT_INVOKED` with real candle/quote counts and **no orders**.
 
-1. **Deploy ApexNativeWriter.ex5** to
-   `MQL5/Experts/ABUTRON/ApexNativeWriter.ex5`. Verify SHA-256:
-   `b6b63afeb7c4939a2bea1f40cfad58d8288af4009d8dc4e2534d7196162b91f3`
+### C. 0512 DEMO execution evidence
 
-2. **Provision the activation secret** at
-   `MQL5/Files/ABUTRON_ACTIVATION_SECRET.txt` (the EA refuses to
-   start without it). Use the existing FP activation secret/seed.
+- Use the **0512-only**, tested execution path. Do not invoke the current four-account enablement script. No forced test trades. A `V9_NATIVE_DISPATCH_EVALUATED` cycle with zero orders is not broker-fill proof.
+- If a genuine V9 signal results in an order, reconcile the exact CRM/request identity and broker ACK/REJECTED with ticket/deal, FP symbol, volume and protective SL/TP. Preserve true UNKNOWN receipts without blind retries.
+- Verify a broker-confirmed trailing SL modification only after a genuine qualifying DEMO position. Compilation alone does not verify trailing.
+- Read `ABUTRON_ORDER_FLOW_V2_<nonce>.txt` only for the authenticated account/cycle. Record `trade_ticks` only if actual FP trade-side flags and volumes were exported; otherwise label `candle_derived` as an estimate.
 
-3. **Create an account-bound preset** at
-   `MQL5/Presets/PR37WriterExposureOnly.set` with the REAL 0512
-   values:
-   - `InpConnectionId` = 0512's CRM connection ID (32-char)
-   - `InpBrokerServer` = 0512's broker server (e.g. `FPMarkets-Demo`)
-   - `InpActivationSeed` = the FP activation seed
-   - `InpActivationSecret` = (or file-provisioned)
-   - `InpExposureOnly=false` (enables dispatch)
-   - `InpTrailingEnabled=true`, `InpTradeMagic=20261120`,
-     `InpTrailingAtrMult=2.0`, `InpRiskFraction=0.15`
+### D. Subsequent DEMO accounts
 
-   **Do NOT use the blank template.** The enablement script preserves
-   existing account-bound values; apply a real preset first.
+After 0512 has independently verified native order/protection evidence, repeat the same process **1636 → 1622 → 2582**, one at a time. Each has distinct existing worker and order-writer history. Reuse the tested code, **not** 0512's identity, credentials, EA state, receipts or cost assertions.
 
-4. **Create the MQL5/Files directory** for native exports.
+## 4. LIVE 9392 — excluded
 
-5. **Verify the terminal authenticates** and the EA starts (check
-   `issue38-health.json` and signed native exposure files appearing in
-   `MQL5/Files/`).
+FP LIVE 9392 remains **CONNECTED for data, desired OFF, effective OFF**. No LIVE account, service, EA, owner-risk limit or control change belongs in this 0512 plan. LIVE execution is a separately authorized task. Do not assert a particular `live_intents` table or future deployment gate exists without checking the current production schema.
 
-### Step 2 — Establish the V9 data directory and reports
+## 5. Rollback and evidence standard
 
-```
-DATA_ROOT=/var/lib/abutron-v9-production-fp-0512
-```
+For any subsequently authorized 0512 deployment, preserve exact before/after EA and preset hashes, the existing router's authority, native receipt/engine state and service configuration. If the new path fails, undo **only** the new 0512 V9 integration, leaving established FP feeds and history intact. Keep Deriv DEMO and LIVE unchanged. No fabricated broker confirmations, no unrequested trading veto layers.
 
-1. Create `DATA_ROOT/` (the runner writes `status.json` here).
-
-2. **FP cost report** at the configured path (default:
-   `/var/lib/abutron-fp-v4-0512/v4-native-execution-cost-0512.json`).
-   Must contain:
-   - `account_suffix`: "0512"
-   - `environment`: "DEMO"
-   - `native_bid_ask_and_ordercalcprofit_verified`: true
-   - `instruments`: {symbol: {tick_size: ...}, ...}
-   - `account_equity_usd`: <current equity>
-
-3. **FP owner report** at the configured path (default: shared
-   supervisor report). Must contain owner equity and per-connection
-   equity for 0512.
-
-   Both paths are configurable via `ABUTRON_FP_COST_REPORT` and
-   `ABUTRON_FP_OWNER_REPORT` env vars.
-
-### Step 3 — Run preflight (shadow decision pass, no orders)
-
-```
-cd /opt/abutron-v9-execution-repair/V9-10794e2
-sudo env PYTHONDONTWRITEBYTECODE=1 \
-PYTHONPATH=/opt/abutron-v9-execution-repair/V9-10794e2/src \
-python3 -B -m abutron.agent.production_fp_demo \
-    --account 0512 --mode preflight
-```
-
-**Verify:** `status.json` shows
-`BRAIN_DECISION_EVALUATED_EXECUTION_NOT_INVOKED` with candle/quote
-counts and candidate count. No orders are placed in preflight.
-
-### Step 4 — Run the enablement script (verifies, then enables)
-
-```
-cd /opt/abutron-v9-execution-repair/V9-10794e2
-sudo env PYTHONDONTWRITEBYTECODE=1 \
-PYTHONPATH=/opt/abutron-v9-execution-repair/V9-10794e2/src \
-python3 -B ops/v9-cutover/enable_trading_fp_demo.py
-```
-
-The script (PR #59 corrected) now:
-1. **Verifies all accounts first** — CRM binding, account-bound
-   preset, data root, EX5 SHA — before writing ANY preset.
-2. **Updates execution flags only** — preserves all account-bound
-   inputs and file mode (0600).
-3. **Runs one execute cycle per account** — checks subprocess exit
-   code, rejects stale/wrong-account status.json.
-
-**If 0512 is not ready, the script fails before touching any
-account's preset** — no partial configuration.
-
-### Step 5 — Verify a genuine broker-acknowledged order
-
-After the execute cycle, inspect:
-
-1. **`status.json`** for 0512:
-   - `status`: `V9_NATIVE_DISPATCH_EVALUATED`
-   - `native_orders_sent`: count of ACK receipts
-   - `native_unknown_receipts`: must be 0
-   - `dispatch_blocked`: false
-
-2. **Broker-native receipts** in the CRM/engine receipt store —
-   verify each order has a genuine broker ACK with correct ticket,
-   symbol, volume, SL, and TP.
-
-3. **Protective stops** — verify the broker position's SL/TP match
-   the dispatched order (via `reconcile_engine_receipts`).
-
-4. **Trailing stops** — if a position is open, verify the trailing
-   stop management is active (the EA's `ManageAgenticTrailingStops`).
-
-5. **Order-flow provenance** — inspect the order-flow export
-   (`ABUTRON_ORDER_FLOW_V2_*.txt`) to determine whether FP Markets
-   provides genuine `trade_ticks` or falls back to `candle_derived`.
-
-## Expansion criteria (1636, 1622, 2582)
-
-Only after 0512 passes Step 5 verification:
-
-1. Repeat Steps 1–5 for **1636**, then **1622**, then **2582**,
-   one account at a time.
-2. Each account gets its own QA terminal, data directory, cost
-   report, and account-bound preset.
-3. The enablement script handles all four in sequence, but each
-   must pass verification before the next is touched.
-
-## LIVE 9392 — separate path, not this plan
-
-LIVE 9392 requires:
-- Explicit LIVE authorization (real money).
-- A `live_intent` record with `authorized=1` in `live_intents`.
-- Broker-side trailing verification on FP Markets LIVE.
-- A separate LIVE deployment path (the current scripts are DEMO-only).
-
-**9392 is connected for data but trading remains OFF.** This plan
-does not touch it.
-
-## Rollback
-
-If any step fails or verification does not pass:
-
-1. Stop the V9 runner for the affected account.
-2. The existing FP feed/execution infrastructure is unaffected —
-   the V9 ApexNativeWriter is a separate terminal.
-3. Revert the preset execution flags to `InpExposureOnly=true`
-   (export-only) if needed.
-4. The Deriv DEMO accounts (6207, 7593, 9244) are unaffected.
+**Documentation updated does not mean trading deployed:** As of this audit, FP 0512 still lacks the new dedicated V9 writer, V9 data root and native cost-report integration. The first operational milestone is a verified single-writer 0512 integration; only then proceed to genuine DEMO execution evidence.
