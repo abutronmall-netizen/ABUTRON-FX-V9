@@ -13,7 +13,10 @@ from pathlib import Path
 def make_probe(source: str) -> str:
     timer = """   // DEMO exposure QA is strictly read-only unless explicitly reconfigured.
    if(!InpExposureOnly)
-      ProcessOrderRequests();"""
+   {
+      ProcessOrderRequests();
+      ApplyTrailingStops();
+   }"""
     assert source.count(timer) == 1, "Unexpected OnTimer layout"
     source = source.replace(
         timer,
