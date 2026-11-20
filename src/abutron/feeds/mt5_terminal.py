@@ -623,11 +623,16 @@ class Mt5TerminalManager:
                 return None
         export["quotes"] = quotes
         # Read order-flow trades if present (ApexNativeWriter exports
-        # ABUTRON_ORDER_FLOW_V2_<nonce>.txt with candle-derived activity).
-        # Exclude the ABUTRON_ORDER_FLOW_V2_LAST.txt marker (a bare
-        # timestamp, not JSON) from the glob match.
+        # ABUTRON_ORDER_FLOW_V2_<nonce>.txt with trade ticks or
+        # candle-derived fallback). Exclude the ABUTRON_ORDER_FLOW_V2_LAST.txt
+        # marker (a bare timestamp, not JSON) from the glob match.
+        # Enforce cycle binding: the order-flow file's nonce must match
+        # the identity nonce, and its connection_id must match the
+        # terminal's connection_id. This prevents consuming an order-flow
+        # file from a different account or export cycle.
         term = self._terminals.get(connection_id)
         if term is not None:
+            cycle_nonce = export["identity"].get("nonce", "")
             of_matches = [
                 p for p in glob.glob(os.path.join(term.export_dir,
                                                   "ABUTRON_ORDER_FLOW_V2_*.txt"))
@@ -635,8 +640,18 @@ class Mt5TerminalManager:
             ]
             of_file = max(of_matches, key=os.path.getmtime) if of_matches else None
             if of_file is not None:
+                # Bind to the same cycle nonce as identity/bars/quotes.
+                file_nonce = os.path.basename(of_file).split(
+                    "ABUTRON_ORDER_FLOW_V2_", 1)[-1].removesuffix(".txt")
+                if not cycle_nonce or file_nonce != cycle_nonce:
+                    return None
                 of_data = Mt5TerminalManager._parse_order_flow_file(of_file)
                 if of_data is not None:
+                    # Enforce account binding: the export's connection_id
+                    # must match the terminal being read.
+                    of_cid = of_data.get("connection_id", "")
+                    if of_cid and of_cid != connection_id:
+                        return None
                     export["orderflow"] = of_data
         return export
 

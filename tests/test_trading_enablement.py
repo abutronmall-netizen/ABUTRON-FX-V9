@@ -158,3 +158,36 @@ def test_script_risk_invariants_not_bypassed():
     assert "NOT bypassed" in content or "not bypassed" in content
     assert "0.15%" in content or "0.0015" in content
     assert "20%" in content or "0.02" in content
+
+
+def test_script_updates_both_preset_dirs():
+    """The script must update both Presets/ and presets/ case variants."""
+    content = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "terminal/MQL5/Presets" in content
+    assert "terminal/MQL5/presets" in content
+
+
+def test_script_preserves_preset_mode():
+    """The script must preserve the existing preset's permission mode
+    (0600), not widen it to 0644."""
+    content = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "stat().st_mode" in content
+    assert "0o644" not in content  # must not force 0644
+
+
+def test_script_checks_subprocess_exit_code():
+    """The script must reject a stale status.json when the subprocess
+    exits non-zero."""
+    content = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "returncode" in content
+    assert "EXECUTE_CYCLE_FAILED" in content
+    # Must check returncode before trusting status.json
+    assert "result.returncode != 0" in content
+
+
+def test_script_rejects_stale_status():
+    """A non-zero exit must not return the stale status.json content."""
+    content = SCRIPT_PATH.read_text(encoding="utf-8")
+    # The failed-exit branch returns EXECUTE_CYCLE_FAILED, not the
+    # status.json content.
+    assert "EXECUTE_CYCLE_FAILED" in content

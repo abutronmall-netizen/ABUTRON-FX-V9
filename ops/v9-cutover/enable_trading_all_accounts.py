@@ -29,6 +29,7 @@ accounts with environment='DEMO' in the CRM.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import sqlite3
@@ -56,6 +57,36 @@ EXECUTION_KEYS = {
     "InpRiskFractionPct",
     "InpExportPeriod",
 }
+
+# Expected SHA-256 of the deployed ApexNativeWriter.ex5. This must
+# match the binary on each terminal. When source changes and CI
+# compiles a new EX5, this pin must be updated to the CI-compiled SHA
+# before deployment -- the enablement script verifies it here so a
+# mismatched binary is caught before any execute cycle runs.
+EXPECTED_EX5_SHA = (
+    "1ced14ee506d5f3f978b3b2b26e785f9d640376d7bb89649136c54dab55fb855"
+)
+
+
+def verify_ex5_sha(suffix: str) -> str:
+    """Verify the deployed ApexNativeWriter.ex5 matches the pinned SHA.
+
+    Raises if the binary is missing, a symlink, or its SHA-256 does not
+    match the pin. Returns the path on success.
+    """
+    paths = _account_paths(suffix)
+    ex5 = paths["qa_root"] / "terminal/MQL5/Experts/ABUTRON/ApexNativeWriter.ex5"
+    if not ex5.is_file() or ex5.is_symlink():
+        raise FileNotFoundError(
+            f"NATIVE_EA_BINARY_MISSING_{suffix}: {ex5}")
+    actual = hashlib.sha256(ex5.read_bytes()).hexdigest()
+    if actual != EXPECTED_EX5_SHA:
+        raise ValueError(
+            f"NATIVE_EA_BINARY_CHANGED_{suffix}: deployed EX5 SHA "
+            f"{actual[:16]}... does not match pinned SHA "
+            f"{EXPECTED_EX5_SHA[:16]}... Update the pin to the "
+            f"CI-compiled SHA after recompiling, then redeploy.")
+    return str(ex5)
 
 
 def _account_paths(suffix: str) -> dict:
@@ -117,29 +148,44 @@ def _render_preset(values: dict) -> str:
     return "\n".join(lines)
 
 
-def write_preset(suffix: str) -> Path:
+def write_preset(suffix: str) -> list:
     """Update the execution preset on the account's QA terminal.
 
-    Preserves the existing account-bound inputs and only writes the
-    execution keys from the template. If no preset exists, refuses to
-    write a blank-connection preset (it would make the EA refuse to
+    Updates BOTH ``terminal/MQL5/Presets/`` and ``terminal/MQL5/presets/``
+    (production maintains both case variants). Preserves the existing
+    account-bound inputs and only writes the execution keys from the
+    template. Preserves the existing file's permission mode (typically
+    0600) rather than widening it to 0644. If no preset exists, refuses
+    to write a blank-connection preset (it would make the EA refuse to
     start) and raises.
+
+    Returns the list of preset paths actually written.
     """
     paths = _account_paths(suffix)
-    preset_dir = paths["qa_root"] / "terminal/MQL5/Presets"
-    preset_dir.mkdir(parents=True, exist_ok=True)
-    preset_path = preset_dir / "PR37WriterExposureOnly.set"
+    # Production maintains both Presets/ and presets/ case variants.
+    preset_dirs = [
+        paths["qa_root"] / "terminal/MQL5/Presets",
+        paths["qa_root"] / "terminal/MQL5/presets",
+    ]
 
     template_values = _parse_preset(PRESET_TEMPLATE.read_text(encoding="utf-8"))
 
-    if preset_path.is_file():
-        existing = _parse_preset(preset_path.read_text(encoding="utf-8"))
+    # Read the existing preset from the canonical Presets/ dir to
+    # preserve account-bound inputs and permission mode.
+    canonical_dir = preset_dirs[0]
+    canonical_path = canonical_dir / "PR37WriterExposureOnly.set"
+
+    if canonical_path.is_file():
+        existing = _parse_preset(canonical_path.read_text(encoding="utf-8"))
+        # Preserve the existing file's mode (typically 0600).
+        mode = canonical_path.stat().st_mode & 0o777
     else:
         existing = {}
+        mode = 0o600
 
     if not existing:
         raise FileNotFoundError(
-            f"NO_EXISTING_PRESET_{suffix}: {preset_path} does not exist. "
+            f"NO_EXISTING_PRESET_{suffix}: {canonical_path} does not exist. "
             "Refusing to write a preset with empty account-bound inputs "
             "(InpConnectionId/InpBrokerServer/InpActivationSecret), which "
             "would make the EA refuse to start. Apply an account-bound "
@@ -153,11 +199,19 @@ def write_preset(suffix: str) -> Path:
             merged[key] = template_values[key]
 
     content = _render_preset(merged)
-    tmp = preset_path.with_name(preset_path.name + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.chmod(0o644)
-    tmp.replace(preset_path)
-    return preset_path
+    written = []
+    for preset_dir in preset_dirs:
+        # Only write the lowercase variant if the directory exists
+        # (production may keep only one case variant).
+        if not preset_dir.is_dir():
+            continue
+        preset_path = preset_dir / "PR37WriterExposureOnly.set"
+        tmp = preset_path.with_name(preset_path.name + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.chmod(mode)
+        tmp.replace(preset_path)
+        written.append(preset_path)
+    return written
 
 
 def run_execute_cycle(suffix: str) -> dict:
@@ -176,8 +230,20 @@ def run_execute_cycle(suffix: str) -> dict:
     import subprocess
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
     status_path = Path(_account_paths(suffix)["data_root"]) / "status.json"
+    # Only trust status.json if the subprocess exited successfully.
+    # A non-zero exit means the cycle failed; a stale status.json from
+    # a previous run must not be accepted as a current result.
+    if result.returncode != 0:
+        return {
+            "status": "EXECUTE_CYCLE_FAILED",
+            "stdout": result.stdout[:500],
+            "stderr": result.stderr[:500],
+            "returncode": result.returncode,
+        }
     if status_path.is_file():
-        return json.loads(status_path.read_text())
+        status = json.loads(status_path.read_text())
+        status["returncode"] = result.returncode
+        return status
     return {
         "status": "EXECUTE_CYCLE_OUTPUT",
         "stdout": result.stdout[:500],
@@ -209,15 +275,27 @@ def main() -> int:
         try:
             cid = resolve_connection_id(suffix)
             connection_ids[suffix] = cid
-            preset_path = write_preset(suffix)
-            print(f"  [{suffix}] connection_id=resolved preset={preset_path} "
+            preset_paths = write_preset(suffix)
+            paths_str = ", ".join(str(p) for p in preset_paths)
+            print(f"  [{suffix}] connection_id=resolved presets={paths_str} "
                   f"InpExposureOnly=false InpTrailingEnabled=true "
-                  f"(account-bound inputs preserved)")
+                  f"(account-bound inputs preserved, mode preserved)")
         except Exception as exc:
             print(f"  [{suffix}] ERROR: {type(exc).__name__}: {exc}")
             return 1
 
-    # 2. Run one execute cycle per account (no operator override is
+    # 2. Verify the deployed EX5 binary matches the pinned SHA before
+    #    running any execute cycle (catches source/binary divergence).
+    print("\n  Verifying deployed EX5 SHA against pinned checksum:")
+    for suffix in ACCOUNTS:
+        try:
+            ex5_path = verify_ex5_sha(suffix)
+            print(f"  [{suffix}] EX5 OK ({ex5_path})")
+        except Exception as exc:
+            print(f"  [{suffix}] EX5 VERIFY ERROR: {type(exc).__name__}: {exc}")
+            return 1
+
+    # 3. Run one execute cycle per account (no operator override is
     #    created — the existing exposure certification satisfies the
     #    DEMO_NOT_EFFECTIVE_ON gate)
     print(f"\n  No operator override created. Existing exposure "

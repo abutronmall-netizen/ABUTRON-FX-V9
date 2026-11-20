@@ -39,6 +39,7 @@ input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
 input ENUM_TIMEFRAMES InpExportPeriod = PERIOD_M5;  // native export timeframe
 
 string g_activation_secret = "";                // resolved at OnInit
+ulong g_last_tick_ms = 0;                   // last CopyTicks collection time (ms since epoch)
 
 int OnInit()
 {
@@ -99,12 +100,18 @@ void ExportNativeData()
 {
    string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
 
+   // ONE nonce per export cycle, shared across identity, bars, quotes
+   // and order-flow files. The Python reader binds all four to the
+   // same cycle via this nonce; independent Nonce() calls per file
+   // would break cycle binding.
+   string cycleNonce = Nonce();
+
    // --- Account identity -------------------------------------------
-   string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + Nonce() + ".txt";
+   string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + cycleNonce + ".txt";
    string idJson = StringFormat(
       "{\"connection_id\":\"%s\",\"login\":%d,\"broker\":\"%s\",\"server\":\"%s\",\"nonce\":\"%s\",\"challenge\":\"%s\",\"worker_health_ts\":\"%s\"}",
       InpConnectionId, AccountInfoInteger(ACCOUNT_LOGIN),
-      "native", InpBrokerServer, Nonce(), Challenge(), TimeStampToStr(TimeCurrent()));
+      "native", InpBrokerServer, cycleNonce, Challenge(), TimeStampToStr(TimeCurrent()));
    WriteTextFile(identity, idJson);
 
    // --- Closed M5 bars (last 120) -----------------------------------
@@ -134,7 +141,7 @@ void ExportNativeData()
    if(StringLen(barsJson) > 0 && StringSubstr(barsJson, StringLen(barsJson)-1, 1) == ",")
       barsJson = StringSubstr(barsJson, 0, StringLen(barsJson)-1);
    barsJson += "]}";
-   string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + Nonce() + ".txt";
+   string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + cycleNonce + ".txt";
    WriteTextFile(barsFile, barsJson);
 
    // --- Authenticated quote snapshot (bid/ask/tick geometry) -------
@@ -142,7 +149,7 @@ void ExportNativeData()
    // from the broker's own SymbolInfoDouble at export time, bound to
    // the same nonce/login/server/session. Never derive quotes from
    // bar close.
-   string quotesFile = dir + "ABUTRON_NATIVE_QUOTES_V2_" + Nonce() + ".txt";
+   string quotesFile = dir + "ABUTRON_NATIVE_QUOTES_V2_" + cycleNonce + ".txt";
    string qJson = "{\"quotes\":[";
    string qs = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,"
       "\"spread\":%.0f,\"tick_size\":%.5f,\"point\":%.5f,\"observed_at\":\"%s\"},",
@@ -158,38 +165,77 @@ void ExportNativeData()
    qJson += "]}";
    WriteTextFile(quotesFile, qJson);
 
-   // --- Order flow: candle-derived activity since last export ------
-   // NOTE: MQL5/MT5 does not expose broker trade prints to EAs. This
-   // export is a clearly identified CANDLE-DERIVED estimate: direction
-   // from close vs open, size from tick volume. It is NOT genuine
-   // aggressor trade prints and must not be presented as real
-   // traded-volume delta. The Python side records source="candle_derived".
-   string ofJson = "{\"connection_id\":\"" + InpConnectionId + "\",\"source\":\"candle_derived\",\"trades\":[";
-   string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";
-   if(FileIsExist(lastFile))
+   // --- Order flow: genuine trade ticks, candle-derived fallback ---
+   // Prefer REAL aggressor trade ticks via CopyTicks(COPY_TICKS_TRADE).
+   // When the broker supplies trade data, MqlTick carries Last price,
+   // volume and TICK_FLAG_BUY/TICK_FLAG_SELL. If the broker does NOT
+   // provide trade prints (e.g. some synthetic indices), no trade
+   // ticks are returned and we fall back to a clearly labeled
+   // CANDLE-DERIVED estimate (direction from close vs open, size from
+   // tick volume) -- never presented as real traded-volume delta.
+   // The "source" field records which path was used so the Python side
+   // and operators can distinguish measured trades from estimates.
+   // The nonce binds this file to the same export cycle as
+   // identity/bars/quotes for cycle-level validation.
+   MqlTick ticks[];
+   // CopyTicks(symbol, ticks_array[], flags, from_ms, count)
+   int tickCount = CopyTicks(_Symbol, ticks, COPY_TICKS_TRADE,
+                             g_last_tick_ms, 0);
+   if(tickCount < 0) ArrayResize(ticks, 0);
+
+   // Collect genuine trade ticks: flag must be BUY or SELL and
+   // volume must be positive.
+   string tradesJson = "[";
+   int genuineCount = 0;
+   for(int i = 0; i < ArraySize(ticks); i++)
    {
-      int h = FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
-      if(h > 0)
+      MqlTick tk = ticks[i];
+      if(tk.volume <= 0) continue;
+      string side = "";
+      if((tk.flags & TICK_FLAG_BUY)  != 0) side = "buy";
+      else if((tk.flags & TICK_FLAG_SELL) != 0) side = "sell";
+      if(side == "") continue;
+      genuineCount++;
+      tradesJson += StringFormat(
+         "{\"symbol\":\"%s\",\"price\":%.5f,\"size\":%.2f,\"side\":\"%s\",\"time\":\"%s\"},",
+         _Symbol, tk.last, tk.volume, side,
+         TimeToString(tk.time, TIME_DATE|TIME_SECONDS));
+   }
+   if(genuineCount == 0)
+   {
+      // Broker did not provide trade prints this cycle. Fall back to
+      // candle-derived activity, clearly labeled as an estimate.
+      for(int i = 0; i < ArraySize(rates); i++)
       {
-         string s = FileReadString(h);
-         FileClose(h);
+         MqlRates r = rates[i];
+         if(r.tick_volume <= 0) continue;
+         tradesJson += StringFormat(
+            "{\"symbol\":\"%s\",\"price\":%.5f,\"size\":%.2f,\"side\":\"%s\",\"time\":\"%s\"},",
+            _Symbol, r.close, r.tick_volume / 100.0,
+            (r.close >= r.open) ? "buy" : "sell",
+            TimeToString(r.time, TIME_DATE|TIME_SECONDS));
       }
    }
-   for(int i = 0; i < ArraySize(rates); i++)
-   {
-      MqlRates r = rates[i];
-      if(r.tick_volume <= 0) continue;
-      ofJson += StringFormat(
-         "{\"symbol\":\"%s\",\"price\":%.5f,\"size\":%.2f,\"side\":\"%s\",\"time\":\"%s\"},",
-         _Symbol, r.close, r.tick_volume / 100.0,
-         (r.close >= r.open) ? "buy" : "sell",
-         TimeToString(r.time, TIME_DATE|TIME_SECONDS));
-   }
-   if(StringLen(ofJson) > 0 && StringSubstr(ofJson, StringLen(ofJson)-1, 1) == ",")
-      ofJson = StringSubstr(ofJson, 0, StringLen(ofJson)-1);
-   ofJson += "]}";
-   string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + Nonce() + ".txt";
+   // Advance the tick cursor so the next cycle collects only new ticks.
+   // MqlTick.time is seconds (datetime); CopyTicks from is milliseconds.
+   if(ArraySize(ticks) > 0)
+      g_last_tick_ms = (ulong)ticks[ArraySize(ticks)-1].time * 1000;
+   else
+      g_last_tick_ms = (ulong)TimeCurrent() * 1000;
+
+   if(StringLen(tradesJson) > 1 &&
+      StringSubstr(tradesJson, StringLen(tradesJson)-1, 1) == ",")
+      tradesJson = StringSubstr(tradesJson, 0, StringLen(tradesJson)-1);
+   tradesJson += "]";
+
+   string source = (genuineCount > 0) ? "trade_ticks" : "candle_derived";
+   string ofJson = "{\"connection_id\":\"" + InpConnectionId +
+                   "\"nonce\":\"" + cycleNonce +
+                   "\"source\":\"" + source +
+                   "\"trades\":" + tradesJson + "}";
+   string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + cycleNonce + ".txt";
    WriteTextFile(oflowFile, ofJson);
+   string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";
    WriteTextFile(lastFile, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
 
    // --- Broker-native exposure snapshot (Issue #36) -----------------

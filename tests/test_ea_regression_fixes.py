@@ -8,7 +8,13 @@ SRC=ROOT/"mql5/ApexNativeWriter.mq5"
 def text(): return SRC.read_text()
 
 def test_utf8_pending(): assert "FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in text()
-def test_utf8_order_flow(): assert "FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in text()
+def test_utf8_order_flow():
+    # The order-flow export writes via WriteTextFile (UTF-8). The
+    # UTF-8 FileOpen pattern is preserved for native export files
+    # (pending/receipts). The order-flow LAST marker is now write-only.
+    t = text()
+    assert "WriteTextFile(oflowFile, ofJson)" in t
+    assert "FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in t
 def test_valid_filehandle_check(): assert "if(h == INVALID_HANDLE) { return; }" in text()
 def test_no_ansi_bare_reads():
     for line in text().splitlines():

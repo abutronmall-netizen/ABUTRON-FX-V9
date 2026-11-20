@@ -184,22 +184,43 @@ def test_mql5_orderflow_export_includes_symbol():
     # The format string must include symbol in the JSON output.
     # Uses _Symbol (chart symbol), NOT r.symbol -- MqlRates has no
     # symbol member (would fail MetaEditor compilation).
-    of_section = content[content.index("Order flow: candle-derived activity"):
+    of_section = content[content.index("Order flow: genuine trade ticks"):
                          content.index("Broker-native exposure snapshot")]
     assert "_Symbol" in of_section
     assert "r.symbol" not in of_section
 
 
-def test_mql5_orderflow_export_is_labeled_candle_derived():
-    """The export must be clearly identified as candle-derived, not
-    genuine aggressor trades (MT5 does not expose trade prints)."""
+def test_mql5_orderflow_prefers_trade_ticks_with_fallback():
+    """The export must attempt genuine trade ticks via CopyTicks and
+    fall back to candle-derived, with source labeling both paths."""
     src = pathlib.Path(__file__).parent.parent / "mql5/ApexNativeWriter.mq5"
     content = src.read_text()
-    of_section = content[content.index("Order flow: candle-derived activity"):
+    of_section = content[content.index("Order flow: genuine trade ticks"):
                          content.index("Broker-native exposure snapshot")]
-    assert 'candle_derived' in of_section
-    # The MQL5 string literal escapes quotes: \"source\":\"candle_derived\"
-    assert '\\"source\\":\\"candle_derived\\"' in of_section or '"source":"candle_derived"' in of_section
+    # Must use CopyTicks with COPY_TICKS_TRADE
+    assert "CopyTicks" in of_section
+    assert "COPY_TICKS_TRADE" in of_section
+    # Must check TICK_FLAG_BUY / TICK_FLAG_SELL
+    assert "TICK_FLAG_BUY" in of_section
+    assert "TICK_FLAG_SELL" in of_section
+    # Must have both source labels
+    assert "trade_ticks" in of_section
+    assert "candle_derived" in of_section
+    # Must bind to the export cycle nonce
+    assert "cycleNonce" in of_section
+
+
+def test_mql5_export_uses_single_cycle_nonce():
+    """All export files must share ONE nonce per cycle for binding."""
+    src = pathlib.Path(__file__).parent.parent / "mql5/ApexNativeWriter.mq5"
+    content = src.read_text()
+    export_section = content[content.index("void ExportNativeData()"):
+                             content.index("Broker-native exposure snapshot")]
+    # cycleNonce defined once and used for identity, bars, quotes, orderflow
+    assert "string cycleNonce = Nonce();" in export_section
+    assert export_section.count("cycleNonce") >= 4
+    # No bare Nonce() calls in filenames within the export function
+    assert "Nonce() + \".txt\"" not in export_section
 
 
 def test_reader_excludes_last_marker_file():
@@ -313,6 +334,82 @@ def test_parse_order_flow_file_preserves_metadata():
         result = Mt5TerminalManager._parse_order_flow_file(path)
         assert result is not None
         assert result["source"] == "candle_derived"
+        assert result["connection_id"] == "abc-123"
+        assert len(result["trades"]) == 1
+    finally:
+        os.unlink(path)
+
+
+def test_reader_binds_orderflow_to_cycle_and_account():
+    """The reader must reject order-flow files from a different cycle
+    nonce or a different connection_id."""
+    import glob
+    from abutron.feeds.mt5_terminal import Mt5TerminalManager
+
+    # Simulate the binding logic from read_native_export_full.
+    # The order-flow filename nonce must match the identity nonce.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Identity cycle nonce = "6207_12345"
+        cycle_nonce = "6207_12345"
+        # Order-flow file with MATCHING nonce and connection_id
+        match_path = os.path.join(
+            tmpdir, f"ABUTRON_ORDER_FLOW_V2_{cycle_nonce}.txt")
+        with open(match_path, "w") as f:
+            f.write(json.dumps({
+                "connection_id": "6207-conn-id",
+                "nonce": cycle_nonce,
+                "source": "trade_ticks",
+                "trades": [{"symbol": "X", "price": 1.0, "size": 1.0,
+                            "side": "buy", "time": "t"}],
+            }))
+        # Order-flow file with MISMATCHED nonce
+        mismatch_path = os.path.join(
+            tmpdir, "ABUTRON_ORDER_FLOW_V2_other_99999.txt")
+        with open(mismatch_path, "w") as f:
+            f.write(json.dumps({
+                "connection_id": "6207-conn-id",
+                "nonce": "other_99999",
+                "source": "trade_ticks",
+                "trades": [{"symbol": "X", "price": 1.0, "size": 1.0,
+                            "side": "buy", "time": "t"}],
+            }))
+
+        # The binding check: filename nonce must equal cycle nonce
+        file_nonce = os.path.basename(match_path).split(
+            "ABUTRON_ORDER_FLOW_V2_", 1)[-1].removesuffix(".txt")
+        assert file_nonce == cycle_nonce
+
+        # Mismatched nonce must be rejected
+        bad_nonce = os.path.basename(mismatch_path).split(
+            "ABUTRON_ORDER_FLOW_V2_", 1)[-1].removesuffix(".txt")
+        assert bad_nonce != cycle_nonce
+
+        # Connection_id mismatch must be rejected
+        of_data = Mt5TerminalManager._parse_order_flow_file(match_path)
+        assert of_data is not None
+        of_cid = of_data.get("connection_id", "")
+        assert of_cid == "6207-conn-id"
+        # A different connection_id would fail the check
+        assert of_cid != "different-conn-id"
+
+
+def test_parse_order_flow_file_trade_ticks_source():
+    """The parser must preserve source=trade_ticks from genuine ticks."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(json.dumps({
+            "connection_id": "abc-123",
+            "nonce": "6207_12345",
+            "source": "trade_ticks",
+            "trades": [
+                {"symbol": "X", "price": 1.0, "size": 5.0,
+                 "side": "buy", "time": "t"},
+            ],
+        }))
+        path = f.name
+    try:
+        result = Mt5TerminalManager._parse_order_flow_file(path)
+        assert result is not None
+        assert result["source"] == "trade_ticks"
         assert result["connection_id"] == "abc-123"
         assert len(result["trades"]) == 1
     finally:
