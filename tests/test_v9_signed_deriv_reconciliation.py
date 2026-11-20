@@ -57,3 +57,11 @@ def test_ordercalcprofit_verification_required(broker_native):
     p["ordercalcprofit_verified"] = False
     with pytest.raises(ValueError, match="POSITION_MISMATCH"):
         invoke(source())
+
+def test_v9_deriv_reconcile_systemd_environment():
+    root = PATH.parents[0]
+    unit = (root / "systemd/abutron-v9-native-deriv-reconcile-ro.service").read_text()
+    assert "Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-deriv-multi-native-reconciliation" in unit
+    assert "Environment=ABUTRON_LIVE_TRADING_ENABLED=false" in unit
+    dropin = (root / "systemd/90-v9-native-source.conf").read_text()
+    assert "ExecStart=/usr/bin/python3 -B /opt/abutron-v9-native-runtime/native_deriv_reconciliation.py" in dropin

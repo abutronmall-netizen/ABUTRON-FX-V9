@@ -36,3 +36,13 @@ LIVE authorization, archived retired accounts, client switches and open broker p
 ## Expected release evidence
 
 Record the production source commit/SHA, native EA checksum, fresh 6207 account and owner HMAC evidence, CRM desired/effective/revision acknowledgment at successive timer ticks, independently authenticated protected broker position and trail changes, live portal session, and rollback result. Mark migration complete only when old APEX writers are retired **and** replacement authorities continue to function.
+
+## Verified first production cutover — 2026-11-20 11:34 UTC
+
+The old Deriv three-account read-only reconciler was failing with `NATIVE_PROTECTED_SL_TP_PROOF_NOT_UNIQUE` on account 6207 because the V9 writer emits valid signed `ABUTRON_NATIVE_EXPOSURE_V2` HMAC evidence rather than legacy APEX-format per-position proof files. The two independent native broker feeds were directly compared for the open position: ticket, symbol, side, volume, entry, SL and TP matched exactly; stop risk was USD 9.81 with `ordercalcprofit_verified=true`.
+
+The V9 replacement `native_deriv_reconciliation.py` passed a three-DEMO-account read-only inspection and was installed into the **existing** `abutron-deriv-three-native-reconcile-ro.service` compatibility slot via `90-v9-native-source.conf`. This retained its upstream `abutron-six-broker-native-history-reconcile.service` dependency, which otherwise restarted the old unit and canceled the parallel V9 unit. The new V9 executable was verified to run successfully (exit 0) and publish `all_verified=true` for 6207/7593/9244. The downstream owner-wide current exposure report then verified zero unknown position sets. All publisher jobs remain read-only; no order was sent, no LIVE activation was changed.
+
+An initial new-unit start failed with a read-only `/data` path because the V9 package imports `abutron.config`, which initializes state directories. The service now sets `ABUTRON_DATA_ROOT=/var/lib/abutron-deriv-multi-native-reconciliation`, the pre-existing state directory permitted by its systemd sandbox, and explicitly sets `ABUTRON_LIVE_TRADING_ENABLED=false`. The new separate timer was disabled; the existing timer continues using the V9 executable through the drop-in. The old unit name is retained *only as a downstream dependency alias*.
+
+**Not yet cut over:** V9 activation job and MT5 session manager remain staged/inactive; legacy APEX11 still controls CRM activation revision. The user-desired 6207 switch remains ON, but old ACK expiration intermittently blocks the V9 dispatcher. Owner-risk publisher also remains the legacy implementation, now reading the corrected Deriv native reconciliation report. Do not claim full APEX retirement.
