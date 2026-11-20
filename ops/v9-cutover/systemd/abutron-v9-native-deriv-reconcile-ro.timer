@@ -1,0 +1,12 @@
+[Unit]
+Description=ABUTRON V9 Deriv DEMO native broker position and deals reconciliation
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=20s
+AccuracySec=15s
+Persistent=true
+Unit=abutron-v9-native-deriv-reconcile-ro.service
+
+[Install]
+WantedBy=timers.target

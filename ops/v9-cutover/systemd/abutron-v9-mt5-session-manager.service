@@ -1,0 +1,34 @@
+[Unit]
+Description=ABUTRON V9 native per-client MT5 session manager
+After=local-fs.target
+Wants=local-fs.target
+Conflicts=abutron-client-mt5-manager.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /opt/abutron-v9-native-runtime/mt5_session_manager.py
+WorkingDirectory=/opt/abutron-v9-native-runtime
+EnvironmentFile=/etc/abutron-v9-native-runtime/manager-identities.env
+StateDirectory=abutron-client-mt5-manager
+StateDirectoryMode=0700
+RuntimeDirectory=abutron-client-mt5-manager
+RuntimeDirectoryMode=0755
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/abutron-client-mt5-manager /var/lib/apex-signup /var/lib/abutron-client-mt5-manager
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=805306368
+TasksMax=70
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
