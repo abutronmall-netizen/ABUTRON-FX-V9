@@ -11,7 +11,6 @@ on:
 
 permissions:
   contents: read
-  pull_requests: write
 
 jobs:
   compile-native-ea:
@@ -96,23 +95,6 @@ jobs:
           Write-Host "Native EX5 built in CI. SHA256=$hash"
           Write-Host 'NO LIVE, DEMO OR PRODUCTION MT5 ACCOUNT ATTACHED.'
           Add-Content -Path $env:GITHUB_OUTPUT -Value "apex_ex5_sha256=$hash"
-
-      - name: Post EX5 SHA256 as PR comment
-        if: "success() && github.event_name == 'pull_request'"
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $shaFile = Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeWriter.ex5.sha256.txt'
-          if (Test-Path -LiteralPath $shaFile) {
-            $sha = (Get-Content -LiteralPath $shaFile -Raw).Trim()
-            $body = "## Native EX5 Compile Result`n`n`n**ApexNativeWriter.ex5 SHA256:**`n`n````n$sha`n````n`nCompiled by signed MetaEditor on windows-2022. NO broker, NO live, DEMO QA only."
-          } else {
-            $body = "## Native EX5 Compile Result`n`n`nCompile succeeded but SHA256 file was not found."
-          }
-          $prNumber = "${{ github.event.pull_request.number }}"
-          gh pr comment $prNumber --body $body
 
       - name: Retain native compiler diagnostics (never auto deploy EX5)
         if: always()
