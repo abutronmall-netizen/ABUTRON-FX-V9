@@ -437,7 +437,12 @@ double NormalizeLots(double v, string symbol)
 {
    double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
    if(step <= 0.0)  step = 0.01;
-   double lots = MathFloor(v / step) * step;
+   // IEEE 754 division can produce 6556.999999999999 for 65.57/0.01,
+   // which MathFloor would round down to 65.56 — one lot step short.
+   // Add a tiny epsilon to compensate for representation error without
+   // ever rounding up a genuinely fractional result (same pattern used
+   // by the FP native bridge). Never round up: floor only.
+   double lots = MathFloor(v / step + 1.0e-9) * step;
    int decimals = (int)MathRound(-MathLog10(step));
    if(decimals < 0)   decimals = 0;
    if(decimals > 8)   decimals = 8;

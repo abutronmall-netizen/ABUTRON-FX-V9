@@ -93,8 +93,20 @@ def signed_native_exposure(files_dir: str, *, cid: str, login: int,
 
 
 def match_protective_order(receipt: dict, expected: dict,
-                           exposure: dict, tick_size: float) -> dict:
-    """Only a broker-authenticated open position with exact protective stops counts."""
+                           exposure: dict, tick_size: float,
+                           broker_volume: float | None = None) -> dict:
+    """Only a broker-authenticated open position with exact protective stops counts.
+
+    ``broker_volume`` optionally overrides ``expected["volume"]`` for the
+    volume-match check. The receipt already carries the broker's ACTUAL
+    executed volume (from OrderSend's res.volume), which may differ from
+    the candidate's requested volume by one lot step when the MT5 writer
+    floors lots (e.g. 65.57 requested -> 65.56 executed). Comparing the
+    broker position's volume against the executed volume — not the
+    requested volume — correctly reconciles those fills without weakening
+    the protection requirement. When ``broker_volume`` is None the
+    candidate's requested volume is used (legacy behavior).
+    """
     ticket=int(receipt.get("ticket") or 0)
     if ticket<=0 or receipt.get("state")!="ACK":
         raise NativeCRMReconcileError("NATIVE_RECEIPT_NOT_BROKER_ACK")
@@ -116,7 +128,13 @@ def match_protective_order(receipt: dict, expected: dict,
     if ((direction=="BUY" and pos["sl"]<sl-tolerance) or
             (direction=="SELL" and pos["sl"]>sl+tolerance)):
         return {"status":"BROKER_STOP_WIDENED"}
-    if abs(pos["volume"]-float(expected["volume"]))>1e-5:
+    # Compare against the broker-executed volume when available. The
+    # receipt's volume is the broker's actual fill (OrderSend res.volume),
+    # not the model's requested volume — a one-lot-step difference from
+    # lot flooring is legitimate, not a mismatch.
+    expected_volume = (broker_volume if broker_volume is not None
+                       else float(expected.get("volume", 0.0)))
+    if abs(pos["volume"]-expected_volume)>1e-5:
         return {"status":"BROKER_VOLUME_MISMATCH"}
     return {"status":"BROKER_PROTECTED_SLTP",
             "ticket":ticket,"native_sl":pos["sl"],
@@ -252,7 +270,8 @@ def historical_signed_protection(files_dir: str, *, cid: str, login: int,
                 ttl=1_000_000_000,source_file=path)
             matched=match_protective_order(
                 {"ticket":position,"state":"ACK"},
-                candidate,exposure,tick_size)
+                candidate,exposure,tick_size,
+                broker_volume=float(receipt.get("volume",0.0)))
         except (OSError,ValueError,KeyError,TypeError):
             continue
         if matched.get("status")=="BROKER_PROTECTED_SLTP":
@@ -318,7 +337,8 @@ def reconcile_engine_receipts(*, engine_db: Any, crm_db: str,
         native_position=position or receipt["native_ticket"]
         status=match_protective_order(
             {"ticket":native_position,"state":"ACK"},
-            candidate,exposure,tick)
+            candidate,exposure,tick,
+            broker_volume=float(receipt.get("volume",0.0)))
         proof_sha=source_sha
         if status.get("status")!="BROKER_PROTECTED_SLTP" and position:
             historical=historical_signed_protection(
