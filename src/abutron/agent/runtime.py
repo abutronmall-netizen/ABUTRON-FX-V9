@@ -53,6 +53,7 @@ class AgenticRuntimeResult:
     candidates_generated: int = 0
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     dispatch_results: List[Dict[str, Any]] = field(default_factory=list)
+    reserved_candidate_ids: List[str] = field(default_factory=list)
     dispatch_blocked: bool = False
     dispatch_reason: str = ""
     broker_native_signal_certified: bool = False
@@ -74,6 +75,7 @@ class AgenticRuntimeResult:
             "candidates_generated": self.candidates_generated,
             "candidates": self.candidates,
             "dispatch_results": self.dispatch_results,
+            "reserved_candidate_ids": self.reserved_candidate_ids,
             "dispatch_blocked": self.dispatch_blocked,
             "dispatch_reason": self.dispatch_reason,
             "broker_native_signal_certified": self.broker_native_signal_certified,
@@ -181,6 +183,11 @@ def run_agentic_pass(
     since: Optional[float] = None,
     event_log: Optional[Any] = None,
     override: Optional[OperatorOverride] = None,
+    native_specs: Optional[Dict[str, Dict[str, Any]]] = None,
+    owner_open_risk_usd: Optional[float] = None,
+    owner_equity_usd: Optional[float] = None,
+    native_writer: Optional[Dict[str, str]] = None,
+    owner_native_authority: Any = None,
 ) -> AgenticRuntimeResult:
     """Run one full agentic pass: real data -> brain -> gated dispatch.
 
@@ -195,6 +202,19 @@ def run_agentic_pass(
     Every bypass is logged with the operator identity, the gate that
     was bypassed, and the current risk state.
     """
+    # Account-bound V9 writers use the proven native broker sizing/arm path.
+    # Generic callers retain the existing decision-to-dispatch behavior.
+    if native_specs is not None or native_writer is not None:
+        return _run_native_agentic_pass(
+            connection_id, broker=broker, owner_id=owner_id,
+            engine=engine, adapter=adapter, dispatcher=dispatcher,
+            since=since, event_log=event_log, override=override,
+            native_specs=native_specs,
+            owner_open_risk_usd=owner_open_risk_usd,
+            owner_equity_usd=owner_equity_usd,
+            native_writer=native_writer,
+            owner_native_authority=owner_native_authority)
+
     log = event_log or engine_db.event_log
 
     # --- Load account and determine gating --------------------------
@@ -352,6 +372,314 @@ def run_agentic_pass(
         )
 
     dispatch_result = dispatcher.dispatch_account(connection_id)
+    result.dispatch_results = dispatch_result.get("details", [])
+    if dispatch_result.get("error"):
+        result.dispatch_blocked = True
+        result.dispatch_reason = dispatch_result["error"]
+
+    log.append(make_event(
+        "agentic.dispatch_complete", connection_id=connection_id,
+        broker=broker, execution_state="DISPATCHED",
+        payload={
+            "sent": dispatch_result.get("sent", 0),
+            "ack": dispatch_result.get("ack", 0),
+            "unknown": dispatch_result.get("unknown", 0),
+            "rejected": dispatch_result.get("rejected", 0),
+            "error": dispatch_result.get("error", ""),
+        }))
+
+    return result
+
+
+def _run_native_agentic_pass(
+    connection_id: str,
+    *,
+    broker: str = "",
+    owner_id: str = "",
+    engine: Optional[AgenticDecisionEngine] = None,
+    adapter: Optional[BrokerNativeMarketDataAdapter] = None,
+    dispatcher: Optional[NativeDispatcher] = None,
+    since: Optional[float] = None,
+    event_log: Optional[Any] = None,
+    override: Optional[OperatorOverride] = None,
+    native_specs: Optional[Dict[str, Dict[str, Any]]] = None,
+    owner_open_risk_usd: Optional[float] = None,
+    owner_equity_usd: Optional[float] = None,
+    native_writer: Optional[Dict[str, str]] = None,
+    owner_native_authority: Any = None,
+) -> AgenticRuntimeResult:
+    """Run one full agentic pass: real data -> brain -> gated dispatch.
+
+    ``override`` is an explicit, logged, scoped operator override that
+    allows dispatch past the ``DEMO_NOT_EFFECTIVE_ON`` and
+    ``LIVE_NOT_AUTHORIZED`` policy gates. It does NOT bypass:
+
+    * Market data errors (data correctness — non-negotiable)
+    * Exposure certification inside ``NativeDispatcher`` (20% ceiling,
+      0.15%/trade, R:R >= 1.50 — real risk invariants)
+
+    Every bypass is logged with the operator identity, the gate that
+    was bypassed, and the current risk state.
+    """
+    log = event_log or engine_db.event_log
+
+    # --- Load account and determine gating --------------------------
+    account = _load_account(connection_id)
+    if account is None:
+        return AgenticRuntimeResult(
+            connection_id=connection_id, environment="unknown",
+            effective_on=False, decision_mode="ACCOUNT_NOT_FOUND",
+            error="account not found for connection_id")
+
+    is_demo = _is_demo(account)
+    environment = account.get("environment", "unknown")
+    effective_on = bool(account.get("effective_on"))
+
+    # Resolve broker/owner from account if not explicitly provided.
+    if not broker:
+        broker = account.get("broker", "")
+    if not owner_id:
+        owner_id = account.get("owner_id", "")
+
+    # --- Build the adapter and engine --------------------------------
+    if adapter is None:
+        adapter = BrokerNativeMarketDataAdapter(
+            connection_id=connection_id,
+            broker=broker,
+            login=int(account.get("mt5_login", 0)),
+            server=account.get("server", ""),
+        )
+    if engine is None:
+        engine = AgenticDecisionEngine(live=False)
+
+    # --- Run the real-data shadow decision pass ---------------------
+    try:
+        shadow = run_shadow_decision_pass(
+            engine, adapter,
+            connection_id=connection_id,
+            broker=broker,
+            owner_id=owner_id,
+            account=account,
+            equity=float(account.get("equity", 0.0) or 0.0),
+            since=since,
+        )
+    except MarketDataError as exc:
+        log.append(make_event(
+            "agentic.market_data_error", connection_id=connection_id,
+            broker=broker, execution_state="MARKET_DATA_ERROR",
+            reason_code="MARKET_DATA_REJECTED",
+            payload={"error": str(exc)}))
+        return AgenticRuntimeResult(
+            connection_id=connection_id, environment=environment,
+            effective_on=effective_on,
+            decision_mode="MARKET_DATA_ERROR",
+            error=str(exc))
+
+    result = AgenticRuntimeResult(
+        connection_id=connection_id,
+        environment=environment,
+        effective_on=effective_on,
+        decision_mode=shadow.get("decision_mode", "UNKNOWN"),
+        evaluated_symbols=shadow.get("evaluated_symbols", []),
+        candle_count=shadow.get("candle_count", 0),
+        quote_count=shadow.get("quote_count", 0),
+        candidates_generated=shadow.get("candidates_generated", 0),
+        candidates=shadow.get("candidates", []),
+        broker_native_signal_certified=shadow.get(
+            "broker_native_signal_certified", False),
+        shadow_decision_evaluated=shadow.get(
+            "shadow_decision_evaluated", False),
+        source_hash=shadow.get("source_hash", ""),
+        source_ts=shadow.get("source_ts", 0.0),
+    )
+
+    # The brain's proposed quantity is NOT native MT5 lots. Do not persist
+    # or dispatch it here; native broker sizing runs AFTER account authorization.
+    # The one canonical reservation path is below.
+
+    # --- Gated dispatch ------------------------------------------
+    # DEMO: dispatch only if effective_on AND exposure certified.
+    # LIVE: never dispatch unless effective_on AND distinct live intent.
+    # An operator override can bypass the policy gates (effective_on,
+    # live authorization) but NOT market data errors or exposure
+    # certification. Every bypass is logged.
+    candidates = shadow.get("candidates", [])
+
+    if not candidates:
+        # No approved candidate -- HOLD/reject. Nothing to dispatch.
+        log.append(make_event(
+            "agentic.hold_no_dispatch", connection_id=connection_id,
+            broker=broker, execution_state="HOLD",
+            reason_code="NO_APPROVED_CANDIDATE"))
+        return result
+
+    # Resolve the override (load from config if not passed directly).
+    if override is None:
+        override = load_override()
+
+    def _log_bypass(gate: str, ov: OperatorOverride) -> None:
+        log.append(make_event(
+            "agentic.override_bypass", connection_id=connection_id,
+            broker=broker, execution_state="DISPATCH_OVERRIDDEN",
+            reason_code=gate,
+            payload={
+                "authorized_by": ov.authorized_by,
+                "authorized_at": ov.authorized_at,
+                "reason": ov.reason,
+                "gate_bypassed": gate,
+                "risk_state": {
+                    "environment": environment,
+                    "effective_on": effective_on,
+                    "candidates_generated": result.candidates_generated,
+                },
+            }))
+
+    if is_demo:
+        if not effective_on and not (override and override.covers(connection_id)):
+            result.dispatch_blocked = True
+            result.dispatch_reason = "DEMO_NOT_EFFECTIVE_ON"
+            log.append(make_event(
+                "agentic.dispatch_blocked", connection_id=connection_id,
+                broker=broker, execution_state="BLOCKED",
+                reason_code="DEMO_NOT_EFFECTIVE_ON"))
+            return result
+        if not effective_on and override and override.covers(connection_id):
+            _log_bypass("DEMO_NOT_EFFECTIVE_ON", override)
+        # DEMO dispatch is gated by the existing exposure certification
+        # inside NativeDispatcher.dispatch_account(). No additional gate
+        # is needed -- the dispatcher blocks on BLOCKED_INCOMPLETE_EXPOSURE.
+    elif not _is_live_authorized(connection_id, account):
+        if override and override.covers(connection_id):
+            _log_bypass("LIVE_NOT_AUTHORIZED", override)
+        else:
+            result.dispatch_blocked = True
+            result.dispatch_reason = "LIVE_NOT_AUTHORIZED"
+            log.append(make_event(
+                "agentic.dispatch_blocked", connection_id=connection_id,
+                broker=broker, execution_state="BLOCKED",
+                reason_code="LIVE_NOT_AUTHORIZED"))
+            return result
+
+    # --- Real agentic candidates -> account-scoped native reservations ---
+    # The AI quantity is NOT a broker lot size. Convert only from current
+    # account-bound native contract/quote/OrderCalcProfit evidence.
+    if native_specs is None or owner_open_risk_usd is None or owner_equity_usd is None:
+        result.dispatch_blocked = True
+        result.dispatch_reason = "NATIVE_BROKER_ORDER_GEOMETRY_MISSING"
+        return result
+    # A model decision is not a reservation until an account-native EA
+    # can actually receive it. Prevent orphaned/stale queued decisions.
+    gateway = None
+    if dispatcher is None:
+        if not native_writer:
+            result.dispatch_blocked = True
+            result.dispatch_reason = "ACCOUNT_NATIVE_EA_ATTACHMENT_MISSING"
+            return result
+        # MQL5 native ActivationRevision is HMAC(secret, connection|seed).
+        # CRM revision is a separate account control, checked independently.
+        import os
+        from ..crypto import hmac_sign
+        if str(native_writer.get("crm_activation_revision", "")) != str(account.get("activation_revision", "")):
+            result.dispatch_blocked = True
+            result.dispatch_reason = "CRM_ACTIVATION_REVISION_CHANGED"
+            return result
+        try:
+            seed = int(native_writer["activation_seed"])
+            existing_secret = bool(native_writer.get("use_existing_secret", False))
+            secret = (SingleWriterGateway.read_existing_secret(
+                native_writer["mql5_files_dir"]) if existing_secret else
+                os.environ["ABUTRON_ACTIVATION_SECRET"])
+            native_rev = hmac_sign(secret, connection_id + "|" + str(seed))
+        except (KeyError, ValueError, TypeError, OSError):
+            result.dispatch_blocked = True
+            result.dispatch_reason = "NATIVE_EA_ACTIVATION_SEED_NOT_BOUND"
+            return result
+        gateway = SingleWriterGateway(event_log=log)
+        status = gateway.arm(
+            connection_id=connection_id,
+            ea_path=native_writer["ea_path"],
+            expected_sha256=native_writer["ea_sha256"],
+            activation_revision=native_rev,
+            broker=broker,
+            mql5_files_dir=native_writer["mql5_files_dir"],
+            existing_secret=existing_secret,
+        )
+        if not status.armed:
+            result.dispatch_blocked = True
+            result.dispatch_reason = "ACCOUNT_NATIVE_EA_NOT_ARMED"
+            return result
+
+    from types import SimpleNamespace
+    from ..execution.native_agentic_sizing import (
+        NativeSizingError, plan_native_agentic_order)
+    import json
+    from ..config import utc_now
+    # Reserve against one shared owner budget. Two simultaneous symbols must
+    # not each consume the same remaining stop-risk headroom.
+    reserved_owner_risk_usd = float(owner_open_risk_usd)
+    for cand in candidates:
+        try:
+            plan = plan_native_agentic_order(
+                SimpleNamespace(**cand), native_specs[cand["symbol"]],
+                equity_usd=float(account.get("equity", 0.0)),
+                owner_open_risk_usd=reserved_owner_risk_usd,
+                owner_equity_usd=float(owner_equity_usd))
+        except (KeyError, ValueError, TypeError, NativeSizingError):
+            log.append(make_event(
+                "agentic.native_plan_rejected", connection_id=connection_id,
+                broker=broker, execution_state="HOLD",
+                reason_code="BROKER_NATIVE_ORDER_GEOMETRY_INVALID"))
+            continue
+        # Connection scope is part of the replay key: one symbol/bar on
+        # another account must never suppress an independent account.
+        replay_key = (connection_id + ":" + str(cand["symbol"]) + ":" +
+                      str(cand.get("bar_open", "")) + ":" + str(cand["direction"]))
+        row = dict(candidate_id=cand["candidate_id"],
+                   connection_id=connection_id, owner_id=owner_id,
+                   broker=broker, symbol=cand["symbol"],
+                   timeframe=str(cand.get("timeframe", "M5")),
+                   bar_open=str(cand.get("bar_open", "")),
+                   replay_key=replay_key, direction=cand["direction"],
+                   conviction=float(cand.get("conviction", 0.0)),
+                   agent_votes=json.dumps({"source": "AGENTIC_V9",
+                                           "native_order_plan": plan}),
+                   risk_fraction=float(cand.get("risk_fraction", 0.0)),
+                   stop_risk_usd=plan["estimated_stop_risk_usd"],
+                   volume=plan["volume"], price=plan["price"],
+                   stop_loss=plan["stop_loss"], take_profit=plan["take_profit"],
+                   entry_type="CONFIRM", trigger_price=plan["price"],
+                   trail_k=2.0, trail_stop=0.0,
+                   execution_state="RESERVED",
+                   reason_code="V9_BROKER_NATIVE_PLAN",
+                   created_at=utc_now(), updated_at=utc_now())
+        if engine_db.add_candidate(row):
+            reserved_owner_risk_usd += float(plan["estimated_stop_risk_usd"])
+            result.reserved_candidate_ids.append(cand["candidate_id"])
+            result.persisted_candidate_ids.append(cand["candidate_id"])
+            log.append(make_event(
+                "agentic.candidate_persisted", connection_id=connection_id,
+                order_request_id=cand["candidate_id"],
+                execution_state="RESERVED",
+                reason_code="DECISION_TO_DISPATCH_CONNECTED",
+                payload={"symbol":cand["symbol"],
+                         "direction":cand["direction"],
+                         "volume":plan["volume"],
+                         "stop_loss":plan["stop_loss"],
+                         "take_profit":plan["take_profit"]}))
+    if not result.reserved_candidate_ids:
+        result.dispatch_blocked = True
+        result.dispatch_reason = "NO_NEW_BROKER_SIZED_AGENTIC_CANDIDATES"
+        return result
+
+    # --- Use the already-armed native single writer for this account ---
+    if dispatcher is None:
+        dispatcher = NativeDispatcher(
+            event_log=log, gateway=gateway,
+            receipt_mgr=ReceiptManager(event_log=log),
+            owner_native_authority=owner_native_authority)
+
+    dispatch_result = dispatcher.dispatch_account(
+        connection_id, candidate_ids=result.reserved_candidate_ids)
     result.dispatch_results = dispatch_result.get("details", [])
     if dispatch_result.get("error"):
         result.dispatch_blocked = True
