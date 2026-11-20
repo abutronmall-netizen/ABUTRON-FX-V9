@@ -15,7 +15,7 @@ def make_probe(source: str) -> str:
    if(!InpExposureOnly)
    {
       ProcessOrderRequests();
-      ApplyTrailingStops();
+      ManageAgenticTrailingStops();
    }"""
     assert source.count(timer) == 1, "Unexpected OnTimer layout"
     source = source.replace(
@@ -42,6 +42,13 @@ def make_probe(source: str) -> str:
         'input bool    InpExposureOnly   = true;',
         'input bool    InpExposureOnly   = true; // NO-ORDER build, fixed behavior',
         1,
+    )
+    # The old, production-proven trailing functions are at the end
+    # of the full EA. The no-order probe must not compile them.
+    marker = "//+------------------------------------------------------------------+\n//| Native MT5 trailing"
+    assert source.count(marker) == 1, "Unexpected trailing module layout"
+    source = source[:source.index(marker)] + (
+        "// NO-ORDER QA: broker trailing and modification code removed.\n"
     )
     for forbidden in (
         "OrderSend(", "ProcessOrderRequests(", "WriteReceipt(",
