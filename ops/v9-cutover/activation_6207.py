@@ -70,12 +70,8 @@ def inspect() -> dict:
     if status != "CONNECTED":
         return {"ready": False, "reason": "BROKER_CONNECTION_NOT_CURRENT",
                 "desired": desired, "effective": effective, "revision": rev}
-    health = recent_json(QA_ROOT / "issue38-health.json", 70)
-    if (health.get("status") != "SIGNED_NATIVE_EXPOSURE_VERIFIED"
-            or health.get("signature_verified") is not True
-            or health.get("automated_trading_configured") is not True
-            or health.get("native_probe_sha256") != EA_SHA):
-        raise ValueError("BROKER_NATIVE_EA_IDENTITY_NOT_AUTHENTICATED")
+    # V9 authenticates the pinned native EA and fresh HMAC-signed broker
+    # exposure below; the 300-second legacy QA health report is diagnostic.
     if not EA.is_file() or EA.is_symlink() or hashlib.sha256(EA.read_bytes()).hexdigest() != EA_SHA:
         raise ValueError("NATIVE_EA_BINARY_CHANGED")
     cost = recent_json(COST_REPORT, 65)

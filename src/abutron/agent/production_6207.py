@@ -63,14 +63,26 @@ def execution_session_enabled() -> bool:
     raw=preset.read_text(encoding="utf-8").lower()
     if "inpexposureonly=false" not in raw or "inptrailingenabled=true" not in raw:
         return False
-    # Worker publishes its configured mode on each signed broker snapshot.
-    health=QA_ROOT/"issue38-health.json"
-    if not health.is_file() or time.time()-health.stat().st_mtime>75:
+    # The 300-second legacy QA health report cannot be the authority for
+    # a 30-second V9 decision cycle. Read the live HMAC-authenticated native
+    # broker exposure directly; do not bypass a stale/missing signed source.
+    from ..execution.writer_gateway import SingleWriterGateway
+    from ..reconciliation.native_crm_6207 import signed_native_exposure
+    try:
+        cid=resolve_crm_demo_6207_connection()
+        with sqlite3.connect("file:"+CRM_DB+"?mode=ro",uri=True) as db:
+            rows=db.execute(
+                "SELECT account_reference,broker_server FROM apex_mt5_connections "
+                "WHERE id=? AND broker='Deriv' AND environment='DEMO'",(cid,)).fetchall()
+        if len(rows)!=1:
+            return False
+        files=str(QA_TERMINAL/"MQL5/Files")
+        signed_native_exposure(
+            files,cid=cid,login=int(rows[0][0]),server=str(rows[0][1]),
+            secret=SingleWriterGateway.read_existing_secret(files),ttl=70)
+        return True
+    except (OSError,ValueError,TypeError,sqlite3.Error):
         return False
-    j=json.loads(health.read_text(encoding="utf-8"))
-    return (j.get("status")=="SIGNED_NATIVE_EXPOSURE_VERIFIED" and
-            j.get("signature_verified") is True and
-            j.get("automated_trading_configured") is True)
 
 
 def run(mode: str) -> dict:
