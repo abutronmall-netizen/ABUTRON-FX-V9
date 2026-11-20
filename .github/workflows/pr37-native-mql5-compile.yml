@@ -1,6 +1,12 @@
 name: ABUTRON PR37 Native MetaEditor Compile (QA Only)
 
 on:
+  push:
+    branches: [arena/*]
+    paths:
+      - 'mql5/ApexNativeWriter.mq5'
+      - 'scripts/generate_issue38_exposure_probe.py'
+      - '.github/workflows/pr37-native-mql5-compile.yml'
   pull_request:
     branches: [main]
     paths:
@@ -10,7 +16,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   compile-native-ea:
@@ -166,3 +172,18 @@ jobs:
             mql5/ApexNativeExposureProbe.ex5
             mql5/ApexNativeExposureProbe.log
             mql5/ApexNativeExposureProbe.ex5.sha256.txt
+
+      - name: Commit SHA256 pins to branch
+        if: success() && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add mql5/ApexNativeWriter.ex5.sha256.txt mql5/ApexNativeExposureProbe.ex5.sha256.txt
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host 'No SHA256 changes to commit.'
+          } else {
+            git commit -m "ci: record EX5 SHA256 pins from native compile"
+            git push
