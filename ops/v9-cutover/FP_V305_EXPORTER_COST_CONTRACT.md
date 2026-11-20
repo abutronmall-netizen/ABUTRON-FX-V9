@@ -79,6 +79,14 @@ from the explicitly configured FP DEMO terminal directory. It validates:
   actual negative OrderCalcProfit amounts, and cross-consistency of
   symbol contract/volume/digits/trade-mode with the V305 catalog.
 
+**Broker-clock correction:** MQL5 broker tick timestamps are not
+necessarily UTC. The exporter samples TimeTradeServer() and TimeGMT()
+within the same cycle, recording broker_server_epoch and
+broker_clock_offset_seconds. The Python intake normalizes each broker
+tick using that observed offset before applying freshness rules.
+This supports GMT+2 or other real broker offsets, while still rejecting
+genuinely stale quotes.
+
 Only on success can `refresh_fp_v9_cost_report()` atomically
 materialize a `0600` root-owned V9 consumer JSON with the existing
 `DemoNativeCRM` contract:
@@ -110,7 +118,7 @@ exists or is armed.
 
 - The isolated full Python suite and new synthetic account/nonce,
   positive/negative cost-contract tests must pass.
-- CI workflow `.github/workflows/fp-v305-native-cost-compile.yml` has compiled the source with official signed MetaEditor (0 errors, 0 warnings). The exact QA EX5 artifact was downloaded and verified against SHA-256 `2928de2045af743629dd2916ff29e41fe8e96d4d49d23895bf24b36177db717e`. Its value is pinned in `mql5/AbutronFPMarketsNativeFeedParallelV305.ex5.sha256.txt`. This is NOT the currently installed FP feed binary and was not deployed.
+- The earlier CI artifact SHA 2928de2045af743629dd2916ff29e41fe8e96d4d49d23895bf24b36177db717e is OBSOLETE because its native exporter compared broker tick timestamps with UTC. The corrected broker-server-clock source requires a NEW MetaEditor compilation and a separately verified EX5 checksum. No binary has been deployed.
 - **Do not reuse the existing V305 production EX5 checksum for a newly
   compiled artifact.** Compiled binary hashes must be verified separately.
 - The existing FP 0512 order bridge is **currently armed**, though recent

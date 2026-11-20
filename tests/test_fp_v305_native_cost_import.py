@@ -35,6 +35,7 @@ def fixture(tmp_path, *, suffix="0512"):
     folder = tmp_path / "MQL5" / "Files"
     folder.mkdir(parents=True)
     now = int(time.time())
+    broker_offset = 7200  # observed FP broker clock offset in this fixture
     (folder / f"ABUTRON_SESSION_HEARTBEAT_V1_{NONCE}.txt").write_text(
         "\n".join(["ABUTRON_MT5_NATIVE_HEARTBEAT_V1", NONCE, OWNER,
                    "FP_MARKETS", SERVER, "DEMO", "CONNECTED",
@@ -63,7 +64,7 @@ def fixture(tmp_path, *, suffix="0512"):
             "volume_step": 0.01, "volume_max": 10.0,
             "stops_level": 20, "freeze_level": 10,
             "digits": 2, "trade_mode": 4,
-            "bid": 100.0, "ask": 100.02, "tick_epoch": now,
+            "bid": 100.0, "ask": 100.02, "tick_epoch": now + broker_offset,
             "buy_probe_native_ordercalcprofit_usd": -1.0,
             "sell_probe_native_ordercalcprofit_usd": -1.0,
         }
@@ -73,6 +74,8 @@ def fixture(tmp_path, *, suffix="0512"):
         "heartbeat_owner": OWNER, "broker_server": SERVER,
         "mt5_login": LOGIN, "account_suffix": suffix,
         "environment": "DEMO", "sample_epoch": now,
+        "broker_server_epoch": now + broker_offset,
+        "broker_clock_offset_seconds": broker_offset,
         "account_currency": "USD", "account_equity_usd": 10000.0,
         "native_bid_ask_and_ordercalcprofit_verified": True,
         "verified_instrument_count": 13,
@@ -230,3 +233,35 @@ def test_runner_opt_in_only():
             "src/abutron/agent/production_fp_demo.py").read_text()
     assert 'os.environ.get("ABUTRON_FP_FEED_FILES", "")' in source
     assert "refresh_fp_v9_cost_report" in source
+
+
+def test_fp_broker_server_tick_clock_not_compared_directly_to_utc(tmp_path):
+    _, _, _, report, read = fixture(tmp_path)
+    assert report["broker_clock_offset_seconds"] == 7200
+    assert report["instruments"]["US100"]["tick_epoch"] - report["sample_epoch"] == 7200
+    assert read()["native_bid_ask_and_ordercalcprofit_verified"] is True
+
+
+def test_wrong_broker_clock_offset_rejected(tmp_path):
+    _, _, filename, report, read = fixture(tmp_path)
+    report["broker_clock_offset_seconds"] = -7200
+    filename.write_text(json.dumps(report))
+    with pytest.raises(FPMarketCostError, match="BROKER_CLOCK_NOT_BOUND"):
+        read()
+
+
+def test_real_stale_quote_rejected_after_server_clock_normalization(tmp_path):
+    _, _, filename, report, read = fixture(tmp_path)
+    report["instruments"]["US100"]["tick_epoch"] -= 600
+    filename.write_text(json.dumps(report))
+    with pytest.raises(FPMarketCostError, match="BROKER_PROBE_INVALID"):
+        read()
+
+
+def test_mql5_cost_uses_broker_time_for_tick_staleness():
+    s=(Path(__file__).resolve().parents[1] /
+       "mql5/AbutronFPMarketsNativeFeedParallelV305.mq5").read_text()
+    assert "broker_epoch=(long)TimeTradeServer()" in s
+    assert "broker_epoch-(long)tick.time" in s
+    assert "broker_clock_offset_seconds" in s
+    assert "sample-(long)tick.time" not in s

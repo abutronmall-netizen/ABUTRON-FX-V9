@@ -168,6 +168,13 @@ def read_native_fp_cost(
     sample = _positive(cost.get("sample_epoch"))
     if not 0 <= time.time() - sample <= NATIVE_TTL_SECONDS:
         raise FPMarketCostError("FP_NATIVE_COST_SAMPLE_STALE")
+    # Native MT5 tick timestamps are broker-server clock values.
+    # The same source records broker and GMT clocks for normalization.
+    broker_epoch = _positive(cost.get("broker_server_epoch"))
+    broker_offset = _positive(cost.get("broker_clock_offset_seconds"))
+    if (abs(broker_offset) > 14 * 3600 or
+            abs((broker_epoch - sample) - broker_offset) > 10):
+        raise FPMarketCostError("FP_NATIVE_COST_BROKER_CLOCK_NOT_BOUND")
     equity = _positive(cost.get("account_equity_usd"))
     if equity <= 0:
         raise FPMarketCostError("FP_NATIVE_COST_EQUITY_INVALID")
@@ -188,7 +195,8 @@ def read_native_fp_cost(
                 or nums["buy_probe_native_ordercalcprofit_usd"] >= 0
                 or nums["sell_probe_native_ordercalcprofit_usd"] >= 0
                 or int(nums["trade_mode"]) != 4
-                or not 0 <= time.time() - nums["tick_epoch"] <= 90):
+                or not 0 <= broker_epoch - nums["tick_epoch"] <= 90
+                or not 0 <= time.time() - (nums["tick_epoch"] - broker_offset) <= 90):
             raise FPMarketCostError("FP_NATIVE_COST_BROKER_PROBE_INVALID")
         mapped = mappings[symbol]
         if (int(mapped[4]) != int(nums["trade_mode"])

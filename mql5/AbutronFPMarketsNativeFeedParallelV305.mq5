@@ -163,6 +163,11 @@ void PublishV9Cost(const string nonce,const string owner,
  int valid_count=0;
  double equity=AccountInfoDouble(ACCOUNT_EQUITY);
  string currency=AccountInfoString(ACCOUNT_CURRENCY);
+ // MqlTick.time is broker-server time; TimeGMT is UTC.
+ // Measure both clocks from this same MT5 terminal, never assume GMT+2.
+ long sample_utc=(long)TimeGMT();
+ long broker_epoch=(long)TimeTradeServer();
+ if(sample_utc<=0 || broker_epoch<=0)all_verified=false;
  if(!MathIsValidNumber(equity) || equity<=0.0 || currency!="USD")
     all_verified=false;
 
@@ -189,9 +194,8 @@ void PublishV9Cost(const string nonce,const string owner,
    long stops=SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL);
    long freeze=SymbolInfoInteger(sym,SYMBOL_TRADE_FREEZE_LEVEL);
    int digits=(int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
-   long sample=(long)TimeGMT();
    if(!SymbolInfoTick(sym,tick) || tick.bid<=0 || tick.ask<=tick.bid ||
-      MathAbs((double)(sample-(long)tick.time))>90.0 ||
+      MathAbs((double)(broker_epoch-(long)tick.time))>90.0 ||
       tick_size<=0 || point<=0 || contract<=0 ||
       minimum<=0 || step<=0 || maximum<minimum ||
       trade_mode!=SYMBOL_TRADE_MODE_FULL)
@@ -245,7 +249,9 @@ void PublishV9Cost(const string nonce,const string owner,
    +"\"mt5_login\":\""+FPJsonEscape(login)+"\","
    +"\"account_suffix\":\""+FPJsonEscape(suffix)+"\","
    +"\"environment\":\"DEMO\","
-   +"\"sample_epoch\":"+IntegerToString((long)TimeGMT())+","
+   +"\"sample_epoch\":"+IntegerToString(sample_utc)+","
+   +"\"broker_server_epoch\":"+IntegerToString(broker_epoch)+","
+   +"\"broker_clock_offset_seconds\":"+IntegerToString(broker_epoch-sample_utc)+","
    +"\"account_currency\":\""+FPJsonEscape(currency)+"\","
    +"\"account_equity_usd\":"+Px(equity,2)+","
    +"\"native_bid_ask_and_ordercalcprofit_verified\":"
