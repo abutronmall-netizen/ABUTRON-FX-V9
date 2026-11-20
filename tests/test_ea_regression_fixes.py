@@ -8,7 +8,12 @@ SRC=ROOT/"mql5/ApexNativeWriter.mq5"
 def text(): return SRC.read_text()
 
 def test_utf8_pending(): assert "FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in text()
-def test_utf8_order_flow(): assert "FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8)" in text()
+def test_utf8_order_flow():
+    s = text()
+    assert "WriteTextFile(oflowFile, ofJson);" in s
+    assert "ABUTRON_ORDER_FLOW_V2_LAST" not in s
+    assert "broker_trade_ticks" in s
+    assert "CopyTicksRange(" in s
 def test_valid_filehandle_check(): assert "if(h == INVALID_HANDLE) { return; }" in text()
 def test_no_ansi_bare_reads():
     for line in text().splitlines():

@@ -23,83 +23,88 @@ from abutron.feeds.mt5_terminal import Mt5TerminalManager
 # Order-flow file parsing
 # --------------------------------------------------------------------- #
 
-def _write_orderflow_file(path, trades):
-    data = json.dumps({"trades": trades})
-    path.write_text(data, encoding="utf-8")
-    return path
+def _payload(trades, *, nonce="demo-123", symbol="Volatility 50 Index.0"):
+    return {
+        "schema": "ABUTRON_ORDER_FLOW_V2",
+        "source": "broker_trade_ticks",
+        "nonce": nonce,
+        "symbol": symbol,
+        "trades": trades,
+    }
 
 
-def test_parse_order_flow_file_valid():
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        trades = [
-            {"symbol": "Volatility 50 Index.0", "price": 82.50,
-             "size": 1.5, "side": "buy", "time": "2026-11-20 09:00:00"},
-            {"symbol": "Volatility 50 Index.0", "price": 82.51,
-             "size": 0.5, "side": "sell", "time": "2026-11-20 09:00:05"},
-        ]
-        f.write(json.dumps({"trades": trades}))
-        path = f.name
-    try:
-        result = Mt5TerminalManager._parse_order_flow_file(path)
-        assert result is not None
-        assert len(result["trades"]) == 2
-        assert result["trades"][0]["symbol"] == "Volatility 50 Index.0"
-        assert result["trades"][0]["price"] == 82.50
-        assert result["trades"][0]["side"] == "buy"
-    finally:
-        os.unlink(path)
+def test_parse_real_broker_trades(tmp_path):
+    trades = [
+        {"symbol": "Volatility 50 Index.0", "price": 82.50,
+         "size": 1.5, "side": "buy", "time_msc": 1795165200000},
+        {"symbol": "Volatility 50 Index.0", "price": 82.51,
+         "size": 0.5, "side": "sell", "time_msc": 1795165205000},
+    ]
+    p = tmp_path / "ABUTRON_ORDER_FLOW_V2_demo-123.txt"
+    p.write_text(json.dumps(_payload(trades)), encoding="utf-8")
+    parsed = Mt5TerminalManager._parse_order_flow_file(str(p), expected_nonce="demo-123")
+    assert parsed is not None
+    assert parsed["source"] == "broker_trade_ticks"
+    assert parsed["nonce"] == "demo-123"
+    assert len(parsed["trades"]) == 2
+    assert parsed["trades"][0]["time_msc"] == 1795165200000
 
 
-def test_parse_order_flow_file_invalid_json():
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        f.write("not valid json {{{")
-        path = f.name
-    try:
-        result = Mt5TerminalManager._parse_order_flow_file(path)
-        assert result is None
-    finally:
-        os.unlink(path)
+def test_parse_rejects_mismatched_nonce(tmp_path):
+    p = tmp_path / "ABUTRON_ORDER_FLOW_V2_demo-123.txt"
+    p.write_text(json.dumps(_payload([])), encoding="utf-8")
+    assert Mt5TerminalManager._parse_order_flow_file(str(p), expected_nonce="OTHER") is None
+
+
+def test_parse_rejects_candle_synthetic_format(tmp_path):
+    p = tmp_path / "ABUTRON_ORDER_FLOW_V2_demo-123.txt"
+    p.write_text(json.dumps({"trades": [{"symbol": "Volatility 50 Index.0",
+        "price": 82.50, "size": 2, "side": "buy", "time": "2026-11-20"}]}))
+    assert Mt5TerminalManager._parse_order_flow_file(str(p), expected_nonce="demo-123") is None
+
+
+def test_parse_rejects_last_marker(tmp_path):
+    p = tmp_path / "ABUTRON_ORDER_FLOW_V2_LAST.txt"
+    p.write_text("2026.11.20 12:00:00", encoding="utf-8")
+    assert Mt5TerminalManager._parse_order_flow_file(str(p), expected_nonce="demo-123") is None
+
+
+def test_parse_order_flow_file_invalid_json(tmp_path):
+    p = tmp_path / "bad.txt"
+    p.write_text("not valid json {{{", encoding="utf-8")
+    assert Mt5TerminalManager._parse_order_flow_file(str(p), expected_nonce="demo-123") is None
 
 
 def test_parse_order_flow_file_missing():
-    result = Mt5TerminalManager._parse_order_flow_file("/nonexistent/path.txt")
-    assert result is None
+    assert Mt5TerminalManager._parse_order_flow_file("/nonexistent/path.txt") is None
 
 
-def test_parse_order_flow_file_invalid_trades():
-    """Trades with bad data are filtered out."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        trades = [
-            {"symbol": "X", "price": 0, "size": 1.0, "side": "buy", "time": "t"},
-            {"symbol": "X", "price": 100, "size": 0, "side": "buy", "time": "t"},
-            {"symbol": "X", "price": 100, "size": 1.0, "side": "hold", "time": "t"},
-            {"symbol": "X", "price": 100, "size": 1.0, "side": "buy", "time": "t"},
-        ]
-        f.write(json.dumps({"trades": trades}))
-        path = f.name
-    try:
-        result = Mt5TerminalManager._parse_order_flow_file(path)
-        assert result is not None
-        assert len(result["trades"]) == 1  # only the valid one
-    finally:
-        os.unlink(path)
+def test_parse_filters_bad_trades(tmp_path):
+    trades = [
+        {"symbol": "Volatility 50 Index.0", "price": 0, "size": 1,
+         "side": "buy", "time_msc": 1795165200000},
+        {"symbol": "Volatility 50 Index.0", "price": 100, "size": 0,
+         "side": "buy", "time_msc": 1795165200000},
+        {"symbol": "Volatility 50 Index.0", "price": 100, "size": 1,
+         "side": "hold", "time_msc": 1795165200000},
+        {"symbol": "Volatility 50 Index.0", "price": 100, "size": 1,
+         "side": "buy", "time_msc": 1795165200000},
+        {"symbol": "WRONG", "price": 100, "size": 1,
+         "side": "buy", "time_msc": 1795165200000},
+        {"symbol": "Volatility 50 Index.0", "price": float("inf"), "size": 1,
+         "side": "buy", "time_msc": 1795165200000},
+    ]
+    p = tmp_path / "ABUTRON_ORDER_FLOW_V2_demo-123.txt"
+    p.write_text(json.dumps(_payload(trades)), encoding="utf-8")
+    result = Mt5TerminalManager._parse_order_flow_file(str(p), expected_nonce="demo-123")
+    assert result is not None and len(result["trades"]) == 1
 
 
-def test_parse_order_flow_file_no_symbol_key():
-    """Trades without a symbol field get empty string — filtered by adapter."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        trades = [
-            {"price": 100, "size": 1.0, "side": "buy", "time": "t"},
-        ]
-        f.write(json.dumps({"trades": trades}))
-        path = f.name
-    try:
-        result = Mt5TerminalManager._parse_order_flow_file(path)
-        assert result is not None
-        assert len(result["trades"]) == 1
-        assert result["trades"][0]["symbol"] == ""
-    finally:
-        os.unlink(path)
+def test_parse_quote_only_broker_empty_trades(tmp_path):
+    p = tmp_path / "ABUTRON_ORDER_FLOW_V2_demo-123.txt"
+    p.write_text(json.dumps(_payload([])), encoding="utf-8")
+    result = Mt5TerminalManager._parse_order_flow_file(str(p), expected_nonce="demo-123")
+    assert result is not None and result["trades"] == []
 
 
 # --------------------------------------------------------------------- #
@@ -176,15 +181,29 @@ def test_compute_footprint_filters_invalid_ticks():
 # MQL5 order-flow export includes symbol
 # --------------------------------------------------------------------- #
 
-def test_mql5_orderflow_export_includes_symbol():
+def test_mql5_orderflow_uses_real_broker_trade_flags_only():
     src = pathlib.Path(__file__).parent.parent / "mql5/ApexNativeWriter.mq5"
     content = src.read_text()
-    # The order-flow JSON must include "symbol" per trade
-    assert '\\"symbol\\":\\"%s\\"' in content or '"symbol"' in content
-    # The format string must include symbol in the JSON output
-    of_section = content[content.index("Order flow: aggressor trades"):
+    of_section = content[content.index("Order flow: real, broker-reported"):
                          content.index("Broker-native exposure snapshot")]
-    assert "r.symbol" in of_section
+    assert "CopyTicksRange(" in of_section
+    assert "COPY_TICKS_TRADE" in of_section
+    assert "TICK_FLAG_BUY" in of_section and "TICK_FLAG_SELL" in of_section
+    assert "tick.volume_real" in of_section
+    assert "_Symbol, tick.last" in of_section
+    assert "r.symbol" not in of_section
+    assert "tick_volume / 100" not in of_section
+    assert "r.close >= r.open" not in of_section
+    assert "ABUTRON_ORDER_FLOW_V2_LAST" not in of_section
+
+
+def test_full_reader_pairs_exact_native_nonce():
+    from abutron.feeds import mt5_terminal
+    import inspect
+    source = inspect.getsource(mt5_terminal.Mt5TerminalManager.read_native_export_full)
+    assert 'f"ABUTRON_ORDER_FLOW_V2_{nonce}.txt"' in source
+    assert 'ABUTRON_ORDER_FLOW_V2_*.txt' not in source
+    assert "expected_nonce=nonce" in source
 
 
 # --------------------------------------------------------------------- #

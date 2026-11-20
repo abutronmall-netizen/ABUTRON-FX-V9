@@ -98,13 +98,14 @@ void OnTimer()
 void ExportNativeData()
 {
    string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
+   string exportNonce = Nonce();  // One export cycle, one matching nonce
 
    // --- Account identity -------------------------------------------
-   string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + Nonce() + ".txt";
+   string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + exportNonce + ".txt";
    string idJson = StringFormat(
       "{\"connection_id\":\"%s\",\"login\":%d,\"broker\":\"%s\",\"server\":\"%s\",\"nonce\":\"%s\",\"challenge\":\"%s\",\"worker_health_ts\":\"%s\"}",
       InpConnectionId, AccountInfoInteger(ACCOUNT_LOGIN),
-      "native", InpBrokerServer, Nonce(), Challenge(), TimeStampToStr(TimeCurrent()));
+      "native", InpBrokerServer, exportNonce, Challenge(), TimeStampToStr(TimeCurrent()));
    WriteTextFile(identity, idJson);
 
    // --- Closed M5 bars (last 120) -----------------------------------
@@ -134,7 +135,7 @@ void ExportNativeData()
    if(StringLen(barsJson) > 0 && StringSubstr(barsJson, StringLen(barsJson)-1, 1) == ",")
       barsJson = StringSubstr(barsJson, 0, StringLen(barsJson)-1);
    barsJson += "]}";
-   string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + Nonce() + ".txt";
+   string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + exportNonce + ".txt";
    WriteTextFile(barsFile, barsJson);
 
    // --- Authenticated quote snapshot (bid/ask/tick geometry) -------
@@ -142,7 +143,7 @@ void ExportNativeData()
    // from the broker's own SymbolInfoDouble at export time, bound to
    // the same nonce/login/server/session. Never derive quotes from
    // bar close.
-   string quotesFile = dir + "ABUTRON_NATIVE_QUOTES_V2_" + Nonce() + ".txt";
+   string quotesFile = dir + "ABUTRON_NATIVE_QUOTES_V2_" + exportNonce + ".txt";
    string qJson = "{\"quotes\":[";
    string qs = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,"
       "\"spread\":%.0f,\"tick_size\":%.5f,\"point\":%.5f,\"observed_at\":\"%s\"},",
@@ -158,34 +159,55 @@ void ExportNativeData()
    qJson += "]}";
    WriteTextFile(quotesFile, qJson);
 
-   // --- Order flow: aggressor trades since last export -------------
-   string ofJson = "{\"trades\":[";
-   string lastFile = dir + "ABUTRON_ORDER_FLOW_V2_LAST.txt";
-   if(FileIsExist(lastFile))
+   // --- Order flow: real, broker-reported trade ticks only ----------------
+   // Official CopyTicksRange(COPY_TICKS_TRADE) API; never infer side from bars.
+   // Candle tick_volume and candle color are not actual aggressor trades.
+   // If the broker does not publish buy/sell trade flags and trade volume,
+   // the correct output is an empty trades list (no inferred footprint).
+   string ofJson = StringFormat(
+      "{\"schema\":\"ABUTRON_ORDER_FLOW_V2\",\"symbol\":\"%s\","
+      "\"nonce\":\"%s\",\"source\":\"broker_trade_ticks\",\"trades\":[",
+      _Symbol, exportNonce);
+   int closedBarCount = ArraySize(rates);
+   if(closedBarCount > 0)
    {
-      int h = FileOpen(lastFile, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
-      if(h > 0)
+      MqlRates lastClosed = rates[closedBarCount - 1];
+      ulong startMsc = (ulong)lastClosed.time * 1000;
+      ulong endMsc = startMsc + (ulong)PeriodSeconds(InpExportPeriod) * 1000 - 1;
+      MqlTick brokerTicks[];
+      int tradeCount = CopyTicksRange(
+         _Symbol, brokerTicks, COPY_TICKS_TRADE, startMsc, endMsc);
+      if(tradeCount > 0)
       {
-         string s = FileReadString(h);
-         FileClose(h);
+         for(int i = 0; i < tradeCount; i++)
+         {
+            MqlTick tick = brokerTicks[i];
+            bool buyFlag = (tick.flags & TICK_FLAG_BUY) != 0;
+            bool sellFlag = (tick.flags & TICK_FLAG_SELL) != 0;
+            // Neither flag or both flags: aggressor direction unavailable.
+            if(buyFlag == sellFlag || tick.last <= 0.0)
+               continue;
+            if((ulong)tick.time_msc < startMsc ||
+               (ulong)tick.time_msc > endMsc)
+               continue;
+            double tradeSize = tick.volume_real > 0.0
+                             ? tick.volume_real : (double)tick.volume;
+            if(tradeSize <= 0.0)
+               continue;
+            ofJson += StringFormat(
+               "{\"symbol\":\"%s\",\"price\":%.8f,\"size\":%.8f,"
+               "\"side\":\"%s\",\"time_msc\":%I64d},",
+               _Symbol, tick.last, tradeSize,
+               buyFlag ? "buy" : "sell", tick.time_msc);
+         }
       }
    }
-   for(int i = 0; i < ArraySize(rates); i++)
-   {
-      MqlRates r = rates[i];
-      if(r.tick_volume <= 0) continue;
-      ofJson += StringFormat(
-         "{\"symbol\":\"%s\",\"price\":%.5f,\"size\":%.2f,\"side\":\"%s\",\"time\":\"%s\"},",
-         r.symbol, r.close, r.tick_volume / 100.0,
-         (r.close >= r.open) ? "buy" : "sell",
-         TimeToString(r.time, TIME_DATE|TIME_SECONDS));
-   }
-   if(StringLen(ofJson) > 0 && StringSubstr(ofJson, StringLen(ofJson)-1, 1) == ",")
-      ofJson = StringSubstr(ofJson, 0, StringLen(ofJson)-1);
+   if(StringLen(ofJson) > 0 &&
+      StringSubstr(ofJson, StringLen(ofJson) - 1, 1) == ",")
+      ofJson = StringSubstr(ofJson, 0, StringLen(ofJson) - 1);
    ofJson += "]}";
-   string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + Nonce() + ".txt";
+   string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + exportNonce + ".txt";
    WriteTextFile(oflowFile, ofJson);
-   WriteTextFile(lastFile, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
 
    // --- Broker-native exposure snapshot (Issue #36) -----------------
    // Never attest flat positions from a disconnected terminal.

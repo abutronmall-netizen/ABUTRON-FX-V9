@@ -13,6 +13,7 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -622,56 +623,89 @@ class Mt5TerminalManager:
                    export["identity"]["_native_file_mtime"]) > 120:
                 return None
         export["quotes"] = quotes
-        # Read order-flow trades if present (ApexNativeWriter exports
-        # ABUTRON_ORDER_FLOW_V2_<nonce>.txt with aggressor ticks).
+        # Order-flow is optional contextual data, not an execution authority.
+        # Read ONLY the same nonce as identity/bars/quotes. Wildcard matching
+        # can accidentally pick ABUTRON_ORDER_FLOW_V2_LAST.txt (not JSON).
         term = self._terminals.get(connection_id)
-        if term is not None:
-            of_file = _latest_match(os.path.join(term.export_dir,
-                                                 "ABUTRON_ORDER_FLOW_V2_*.txt"))
-            if of_file is not None:
-                of_data = Mt5TerminalManager._parse_order_flow_file(of_file)
-                if of_data is not None:
+        nonce = str(export["identity"].get("nonce") or "")
+        if (term is not None and nonce and
+                "/" not in nonce and "\\" not in nonce):
+            of_file = os.path.join(
+                term.export_dir, f"ABUTRON_ORDER_FLOW_V2_{nonce}.txt")
+            of_data = Mt5TerminalManager._parse_order_flow_file(
+                of_file, expected_nonce=nonce)
+            if of_data is not None:
+                if abs(os.stat(of_file).st_mtime -
+                       export["identity"]["_native_file_mtime"]) <= 120:
                     export["orderflow"] = of_data
         return export
 
     @staticmethod
-    def _parse_order_flow_file(path: str) -> Optional[Dict]:
-        """Parse the latest order-flow export file.
+    def _parse_order_flow_file(
+        path: str, expected_nonce: Optional[str] = None
+    ) -> Optional[Dict]:
+        """Parse real broker trade ticks, never infer delta from M5 candles.
 
-        Format (ApexNativeWriter): JSON ``{"trades":[{"price":...,
-        "size":..., "side":"buy"|"sell", "time":"..."}]}``.
-        Returns ``{"trades": [...]}`` or None if unparseable.
+        The native EA only emits trades carrying BUY/SELL broker-side flags.
+        Quote-only feeds legitimately return {"trades": []}. These analytics
+        are native but not HMAC signed; they never substitute for execution
+        or protective-position authentication.
         """
         if not os.path.isfile(path) or os.path.islink(path):
             return None
         try:
+            st = os.stat(path)
+            if st.st_size > 8000000 or st.st_size < 2:
+                return None
+            if time.time() - st.st_mtime > 180 or st.st_mtime - time.time() > 30:
+                return None
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            if not isinstance(data, dict) or "trades" not in data:
+            if not isinstance(data, dict):
                 return None
-            trades = data["trades"]
-            if not isinstance(trades, list):
+            if (data.get("schema") != "ABUTRON_ORDER_FLOW_V2" or
+                    data.get("source") != "broker_trade_ticks"):
+                return None
+            nonce = data.get("nonce")
+            if not isinstance(nonce, str) or not nonce:
+                return None
+            if expected_nonce is not None and nonce != expected_nonce:
+                return None
+            symbol = data.get("symbol")
+            if not isinstance(symbol, str) or not symbol:
+                return None
+            trades = data.get("trades")
+            if not isinstance(trades, list) or len(trades) > 100000:
                 return None
             validated = []
             for t in trades:
-                if not isinstance(t, dict):
+                if not isinstance(t, dict) or t.get("symbol") != symbol:
                     continue
                 try:
                     price = float(t.get("price", 0.0))
                     size = float(t.get("size", 0.0))
                     side = str(t.get("side", "")).lower()
-                except (ValueError, TypeError):
+                    time_msc = int(t.get("time_msc", 0))
+                except (ValueError, TypeError, OverflowError):
                     continue
-                if side not in ("buy", "sell") or price <= 0 or size <= 0:
+                if (side not in ("buy", "sell") or
+                        not math.isfinite(price) or
+                        not math.isfinite(size) or
+                        price <= 0 or size <= 0 or time_msc <= 0):
                     continue
                 validated.append({
-                    "symbol": str(t.get("symbol", "")),
+                    "symbol": symbol,
                     "price": price,
                     "size": size,
                     "side": side,
-                    "time": str(t.get("time", "")),
+                    "time_msc": time_msc,
                 })
-            return {"trades": validated}
+            return {
+                "trades": validated,
+                "nonce": nonce,
+                "source": "broker_trade_ticks",
+                "symbol": symbol,
+            }
         except (ValueError, OSError, TypeError):
             return None
 
