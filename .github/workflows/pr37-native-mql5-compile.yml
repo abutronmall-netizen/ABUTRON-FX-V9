@@ -98,7 +98,7 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "apex_ex5_sha256=$hash"
 
       - name: Post EX5 SHA256 as PR comment
-        if: success() && github.event_name == 'pull_request'
+        if: "success() && github.event_name == 'pull_request'"
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
