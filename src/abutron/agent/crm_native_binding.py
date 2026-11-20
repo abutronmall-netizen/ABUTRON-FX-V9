@@ -21,7 +21,7 @@ from typing import Any, Dict
 
 from ..risk.owner_native_authority import CurrentBrokerOwnerRisk, NativeOwnerRiskError
 
-EX5_SHA = "9d4f6701993865d32fcd5d9e9781c7803e5f1a688bd8f1ca63e85b8eed173b86"
+EX5_SHA = "00252e95005dd208cc5ca7fdee37b6006871660b6fc9aff2336078e227ba1586"
 
 
 class CRMBindingError(ValueError):
