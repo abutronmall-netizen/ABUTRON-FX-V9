@@ -1,0 +1,20 @@
+[Unit]
+Description=ABUTRON FP DEMO V9 13/13 read-only inference readiness monitor
+After=abutron-v9-fp-demo-native-inference-ro.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-fp-v9-13of13-watch-ro.py
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/abutron-v9-brain/monitor
+MemoryMax=80M
+TasksMax=12
+TimeoutStartSec=15s

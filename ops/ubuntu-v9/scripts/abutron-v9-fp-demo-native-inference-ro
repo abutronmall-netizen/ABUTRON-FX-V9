@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+# Migration export: CRM connection IDs are supplied by per-account environment variables.
+"""ABUTRON V9 trained 49-feature FP Markets DEMO inference, native feed only.
+
+Reads two authenticated CRM-bound 13-symbol FP Markets DEMO partial exports.
+Never writes native orders, CRM, risk files, receipts, or MT5 files.
+"""
+from __future__ import annotations
+import datetime as dt
+import hashlib,json,math,os,stat,sys,tempfile,time
+from pathlib import Path
+
+RELEASE=Path("/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90f947b")
+MODEL_DIR=RELEASE/"data/brains/unified_m5"
+MODEL=MODEL_DIR/"nexus_brain.json"
+MODEL_SHA="2667997b1498aae316c4103ec1f3d0bd2efb805f034836455ed10019284302df"
+FEEDS=Path("/var/lib/abutron-fpmarkets-feed/partial")
+OUT=Path("/var/lib/abutron-v9-brain/decisions/fp-demo-authoritative-latest.json")
+ACCOUNTS={
+ "0512":__import__("os").environ["ABUTRON_CRM_CONNECTION_ID_0512"],
+ "1636":__import__("os").environ["ABUTRON_CRM_CONNECTION_ID_1636"],
+}
+REQUIRED_CANONICAL={
+ "AUDUSD","EURUSD","GBPUSD","NZDUSD","USDCHF","USDJPY","XAUUSD",
+ "BTCUSD","USOIL","US30","SP500","US100","GER40",
+}
+SCHEMA="abutron.v9.fpmarkets.demo.native.account_trained_m5.v1"
+ACCOUNT_REPORT_MAX_AGE=145
+BAR_SECONDS=300
+N=70
+
+def require(test,msg):
+ if not test: raise ValueError(msg)
+
+def timestamp(v):
+ require(isinstance(v,str),"FP_TIME_MISSING")
+ t=dt.datetime.fromisoformat(v.replace("Z","+00:00"))
+ require(t.tzinfo is not None,"FP_TIME_NO_TZ")
+ return t.timestamp()
+
+def load_native_feed(suffix,cid,now):
+ path=FEEDS/(cid+".json")
+ require(not path.is_symlink(),"FP_NATIVE_FEED_SYMLINK")
+ fd=os.open(str(path),os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+ try:
+  st=os.fstat(fd)
+  require(stat.S_ISREG(st.st_mode) and st.st_uid==0 and not(st.st_mode&0o022)
+          and 3000<st.st_size<1_800_000,"FP_NATIVE_FEED_PERMISSIONS")
+  require(-5<=now-st.st_mtime<=ACCOUNT_REPORT_MAX_AGE,
+          "FP_NATIVE_FEED_STALE")
+  raw=os.read(fd,1_800_001)
+  after=os.fstat(fd)
+  require(len(raw)==st.st_size and (after.st_ino,after.st_mtime_ns,after.st_size)==
+          (st.st_ino,st.st_mtime_ns,st.st_size),"FP_NATIVE_FEED_RACED")
+ finally:os.close(fd)
+ obj=json.loads(raw)
+ require(type(obj) is dict and
+         obj.get("schema")=="abutron.fpmarkets.native.partial.readonly.v1" and
+         obj.get("connection_id")==cid and obj.get("account_mode")=="DEMO" and
+         obj.get("broker_server")=="FPMarketsSC-Demo" and
+         obj.get("execution_enabled") is False and
+         obj.get("orders_submitted")==0 and
+         obj.get("parallel_forex_status")=="SIX_FOREX_R_VERIFIED_V305",
+         "FP_NATIVE_BROKER_PROOF_INVALID")
+ require(-10<=now-timestamp(obj["checked_at_utc"])<=ACCOUNT_REPORT_MAX_AGE,
+         "FP_NATIVE_SOURCE_EMISSION_STALE")
+ require(set(obj["mapping"])==REQUIRED_CANONICAL and
+         set(obj["bars"])==set(obj["quotes"]) and
+         0<len(obj["bars"])<=13 and
+         set(obj["bars"])<=REQUIRED_CANONICAL,
+         "FP_NATIVE_PARTIAL_SYMBOL_SCOPE_INVALID")
+ return obj,hashlib.sha256(raw).hexdigest()
+
+def native_bars(feed,canonical,now,expected_symbols):
+ m=feed["mapping"][canonical]
+ actual=m.get("actual")
+ require((m.get("status"),m.get("trade_mode"))==("MAPPED",4)
+         and actual in expected_symbols and
+         feed["quotes"][canonical].get("symbol")==actual,
+         "FP_NATIVE_SYMBOL_MAPPING_UNVERIFIED")
+ q=feed["quotes"][canonical]
+ age=q.get("age_seconds")
+ require(type(age) in (int,float) and -12<=age<=100,
+         "FP_NATIVE_QUOTE_STALE")
+ bars=feed["bars"][canonical]
+ require(type(bars) is dict and all(type(bars.get(tf)) is list and
+         len(bars[tf])>=65 for tf in ("M1","M5","M15","H1","H4","D1")),
+         "FP_NATIVE_M5_HISTORY_INCOMPLETE")
+ rows=bars["M5"]
+ require(65<=len(rows)<=N,"FP_NATIVE_M5_HISTORY_LENGTH")
+ last=-1
+ out=[]
+ for x in rows:
+  require(type(x) is dict and type(x.get("time")) is int,"FP_NATIVE_BAR_TIME_INVALID")
+  t=x["time"]
+  require(t>last and t%300==0,"FP_NATIVE_M5_TIME_ORDER_UNVERIFIED")
+  vals=[x.get(k) for k in ("open","high","low","close")]
+  require(all(type(v) in (int,float) and math.isfinite(v) and v>0 for v in vals),
+          "FP_NATIVE_M5_PRICE_UNVERIFIED")
+  op,hi,lo,cl=vals
+  require(lo<=min(op,cl)<=hi and lo<=max(op,cl)<=hi,
+          "FP_NATIVE_M5_GEOMETRY_INVALID")
+  out.append({"symbol":actual,
+              "open_time":dt.datetime.fromtimestamp(t,dt.timezone.utc).isoformat(),
+              "open":op,"high":hi,"low":lo,"close":cl,"volume":0.0})
+  last=t
+ closed=last+BAR_SECONDS
+ require(-35<=now-closed<=610,"FP_NATIVE_M5_LAST_CLOSED_STALE")
+ return actual,closed,out
+
+def infer():
+ from abutron.brain.unified import load_unified
+ from abutron.brain.signals import build_signal_bundle,SIGNAL_SLOT_INDICES,SIGNAL_DATA_VERSION
+ from abutron.brain.features import N_FEATURES,FEATURE_VERSION
+ now=time.time()
+ require(hashlib.sha256(MODEL.read_bytes()).hexdigest()==MODEL_SHA,
+         "FP_V9_TRAINED_MODEL_BINARY_MISMATCH")
+ brain=load_unified(str(MODEL_DIR),mc_samples=16)
+ require(brain is not None and len(brain.symbol_ids)==26 and
+         len(brain.ensemble.members)==3 and N_FEATURES==23 and
+         FEATURE_VERSION=="nexus_v1",
+         "FP_V9_TRAINED_MODEL_FEATURES_UNVERIFIED")
+ fp_symbols={x for x in brain.symbol_ids if not x.endswith(" Index.0")}
+ require(len(fp_symbols)==13,"FP_V9_MODEL_13_SYMBOLS_MISSING")
+ reports={}
+ for suffix,cid in ACCOUNTS.items():
+  feed,digest=load_native_feed(suffix,cid,now)
+  rows=[]
+  native_symbols=set()
+  # Inference on broker-proven symbols only. Missing symbols are NOT certified,
+  # and the separate execution authority still requires 13/13.
+  available=set(feed["bars"]) & set(feed["quotes"])
+  for canonical in sorted(available):
+   actual,closed,candles=native_bars(feed,canonical,now,fp_symbols)
+   require(actual not in native_symbols,"FP_NATIVE_SYMBOL_DUPLICATED")
+   native_symbols.add(actual)
+   signals=build_signal_bundle(candles,symbol=actual,use_gemma=False)
+   features=signals.at(-1)
+   proposal=brain.decide(symbol=actual,closes=signals.closes,highs=signals.highs,
+       lows=signals.lows,orderflow=features["orderflow"],footprint=features["footprint"],
+       agent_scores=features["agent_scores"],regime=features["regime"])
+   require(proposal.trained is True and proposal.brain_version=="unified_v1"
+           and len(proposal.features)==49 and
+           proposal.direction in ("BUY","SELL","HOLD"),
+           "FP_V9_TRAINED_SIGNAL_INVALID")
+   nonzero=sum(abs(float(proposal.features[i]))>1e-12 for i in SIGNAL_SLOT_INDICES)
+   require(nonzero>0,"FP_V9_FULL_SIGNAL_FEATURES_MISSING")
+   blockers=list(getattr(proposal,"blockers",[]) or [])
+   rows.append({"canonical_symbol":canonical,"symbol":actual,
+                "broker":"FP Markets","environment":"DEMO",
+                "state":"CURRENT_NATIVE_M5",
+                "last_closed_m5_utc":dt.datetime.fromtimestamp(closed,dt.timezone.utc).isoformat(),
+                "bar_closed_ts":closed,"bar_age_seconds":int(now-closed),
+                "model_direction":proposal.direction,
+                "model_confidence":round(float(proposal.confidence),6),
+                "model_conviction":round(float(proposal.conviction),6),
+                "model_uncertainty":round(float(proposal.uncertainty),6),
+                "loss_pattern_guard_blockers":blockers,
+                "features_count":49,"full_signal_feature_slots_nonzero":nonzero,
+                "trained_model":True,
+                "feature_source":"OHLCV_PROXY_NO_NATIVE_TICK_OR_DEPTH",
+                "order_authority":False})
+  require(len(rows)==len(available) and native_symbols<=fp_symbols,
+          "FP_V9_MODEL_SYMBOL_SCOPE_MISMATCH")
+  reports[suffix]={"connection_id":cid,"environment":"DEMO","broker":"FP Markets",
+                   "native_source_sha256":digest,
+                   "native_export_checked_at_utc":feed["checked_at_utc"],
+                   "symbols":rows,"symbols_current":len(rows),
+                   "symbols_missing":sorted(REQUIRED_CANONICAL - available),
+                   "scope_certified":len(rows)==13}
+ return {"schema":SCHEMA,"generated_utc":dt.datetime.fromtimestamp(now,dt.timezone.utc).isoformat(),
+         "release_commit":RELEASE.name,"model_sha256":MODEL_SHA,
+         "trained":True,"model_features":49,"model_symbols":26,
+         "signal_data_version":SIGNAL_DATA_VERSION,
+         "microstructure_source":"OHLCV_PROXY_NOT_AUTHENTIC_TICK_OR_DEPTH",
+         "native_order_dispatch":"NOT_CONNECTED",
+         "orders_submitted":0,"crm_mutated":False,"risk_policy_modified":False,
+         "mt5_terminals_modified":False,"accounts":reports}
+
+def write_atomic(doc,path):
+ path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+ fd,tmp=tempfile.mkstemp(prefix=".fp-v9-",dir=str(path.parent))
+ try:
+  os.fchmod(fd,0o600)
+  with os.fdopen(fd,"w") as f:
+   json.dump(doc,f,sort_keys=True,separators=(",",":"),allow_nan=False)
+   f.write("\n");f.flush();os.fsync(f.fileno())
+  os.replace(tmp,path)
+ finally:
+  if os.path.lexists(tmp):os.unlink(tmp)
+
+if __name__=="__main__":
+ result=infer()
+ dest=OUT if len(sys.argv)==1 else Path(sys.argv[1])
+ write_atomic(result,dest)
+ print("V9_FP_DEMO_NATIVE_INFERENCE_" +
+       ("OK" if all(v["scope_certified"] for v in result["accounts"].values())
+        else "PARTIAL_NOT_CERTIFIED"),result["model_sha256"][:12],
+       {k: {"current":v["symbols_current"], "missing":v["symbols_missing"]}
+        for k,v in result["accounts"].items()},
+       "no broker orders")

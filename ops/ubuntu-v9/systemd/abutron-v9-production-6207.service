@@ -1,0 +1,30 @@
+[Unit]
+Description=ABUTRON V9 Agentic CRM-bound Native Deriv DEMO 6207 broker order and reconciliation worker
+After=network-online.target local-fs.target
+Wants=network-online.target
+ConditionPathExists=/opt/abutron-v9-execution-repair/V9-10794e2/src/abutron/agent/production_6207.py
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/abutron-v9-execution-repair/V9-10794e2
+Environment=PYTHONPATH=/opt/abutron-v9-execution-repair/V9-10794e2/src
+Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-v9-production-6207
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=ABUTRON_LIVE_TRADING_ENABLED=false
+ExecStart=/opt/abutron-v9-brain/.venv-a88f373/bin/python -B -m abutron.agent.production_6207 --mode execute
+TimeoutStartSec=40s
+UMask=0077
+NoNewPrivileges=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-v9-production-6207 /var/lib/apex-signup /var/lib/private/abutron-pr37-direct-writer-demo6207-qa/terminal/MQL5/Files
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+MemoryMax=1600M
+TasksMax=120

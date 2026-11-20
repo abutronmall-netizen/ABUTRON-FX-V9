@@ -1,0 +1,25 @@
+[Unit]
+Description=ABUTRON V9 49-feature native FP DEMO 1622/2582 inference (READ ONLY)
+After=abutron-fpmarkets-native-feed.service
+Requires=abutron-fpmarkets-native-feed.service
+ConditionPathExists=/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90f947b/data/brains/unified_m5/nexus_brain.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=PYTHONPATH=/opt/abutron-v9-brain/releases/a88f373001ee1b8fcc934a1e3d068ed5b90f947b/src
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/opt/abutron-v9-brain/.venv-a88f373/bin/python -B /usr/local/sbin/abutron-v9-fp-other-demo-native-inference-ro.py
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-v9-brain
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=300M
+TasksMax=24
+TimeoutStartSec=29s

@@ -1,0 +1,26 @@
+[Unit]
+Description=ABUTRON trained V9 candidate from authenticated broker closed trades (NO ORDERS, NO PROMOTION)
+After=abutron-v9-broker-closed-feedback-ro.service abutron-fpmarkets-native-feed.service
+Requires=abutron-v9-broker-closed-feedback-ro.service abutron-fpmarkets-native-feed.service
+ConditionPathExists=/var/lib/abutron-v9-realtrade-feedback/latest.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+ExecStart=/opt/abutron-v9-brain/.venv-a88f373/bin/python -B /usr/local/sbin/abutron-v9-train-realtrade-candidate.py
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-v9-realtrade-feedback
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=2G
+CPUQuota=150%
+TasksMax=24
+TimeoutStartSec=240s

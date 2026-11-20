@@ -1,0 +1,21 @@
+[Unit]
+Description=ABUTRON V9 native owner risk, sizing and trailing evidence audit (READ ONLY)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-v9-native-risk-audit-ro.py
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/abutron-v9-native-risk-audit
+MemoryMax=130M
+TasksMax=15
+TimeoutStartSec=18s

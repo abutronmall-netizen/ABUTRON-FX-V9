@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh isolated DEMO 6207 signed exposure snapshot (NO ORDER FUNCTIONS)
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=300s
+AccuracySec=10s
+Unit=abutron-issue38-deriv6207-exposureqa.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

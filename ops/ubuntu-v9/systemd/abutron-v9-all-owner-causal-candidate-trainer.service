@@ -1,0 +1,33 @@
+[Unit]
+Description=ABUTRON V9 all-owner broker-native causal model candidate learning (never promote or place orders)
+After=abutron-v9-eight-account-learning-archive-ro.service abutron-fp-native-m5-archive-ro.service
+Wants=abutron-v9-eight-account-learning-archive-ro.service abutron-fp-native-m5-archive-ro.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStartPre=/usr/bin/python3 -B /usr/local/sbin/abutron-v9-fp-fouraccount-native-m5-market-prepare-ro
+ExecStartPre=/usr/bin/python3 -B /usr/local/sbin/abutron-v9-hcc-two-native-m5-recovery-ro
+ExecStartPre=-/usr/bin/python3 -B /usr/local/sbin/abutron-v9-deriv-native-precision-m5-ro
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-v9-all-owner-causal-candidate-trainer
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ABUTRON_ENV=demo
+Environment=ABUTRON_LIVE_TRADING_ENABLED=false
+Environment=ABUTRON_GEMMA_ENABLED=false
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ReadWritePaths=/var/lib/abutron-v9-eight-account-learning
+MemoryMax=5G
+TasksMax=50
+CPUWeight=100
+IOWeight=100
+TimeoutStartSec=1800s
+StandardOutput=journal
+StandardError=journal

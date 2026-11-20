@@ -1,0 +1,12 @@
+[Unit]
+Description=Preserve independently verified signed DEMO 6207 exposure snapshots on each refresh
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=60s
+AccuracySec=5s
+Persistent=false
+Unit=abutron-issue38-native-archive-ro.service
+
+[Install]
+WantedBy=timers.target

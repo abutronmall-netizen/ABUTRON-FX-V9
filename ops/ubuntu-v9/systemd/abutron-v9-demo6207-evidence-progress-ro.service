@@ -1,0 +1,29 @@
+[Unit]
+Description=ABUTRON V9 independently validate original DEMO 6207 no-send OrderCheck and min-lot native costs (READ ONLY)
+After=local-fs.target
+ConditionPathExists=/usr/local/sbin/abutron-v9-demo6207-evidence-progress-ro.py
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-v9-demo6207-evidence-progress-ro.py
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-v9-native-risk-audit
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+MemoryMax=140M
+TasksMax=15
+TimeoutStartSec=18s
+StandardOutput=journal
+StandardError=journal

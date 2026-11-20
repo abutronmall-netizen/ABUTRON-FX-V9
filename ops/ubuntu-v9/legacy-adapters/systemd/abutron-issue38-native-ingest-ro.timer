@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh broker-signed DEMO 6207 evidence reconciliation every minute (READ ONLY)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=abutron-issue38-native-ingest-ro.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

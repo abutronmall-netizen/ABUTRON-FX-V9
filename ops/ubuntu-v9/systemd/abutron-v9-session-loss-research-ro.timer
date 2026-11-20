@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh ABUTRON V9 DEMO loss-by-trading-hour shadow evidence every five minutes
+
+[Timer]
+OnBootSec=7min
+OnUnitInactiveSec=5min
+AccuracySec=20s
+RandomizedDelaySec=10s
+Unit=abutron-v9-session-loss-research-ro.service
+
+[Install]
+WantedBy=timers.target

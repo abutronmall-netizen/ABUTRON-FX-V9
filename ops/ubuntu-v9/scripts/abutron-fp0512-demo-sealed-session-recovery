@@ -1,0 +1,131 @@
+#!/usr/bin/python3
+"""FP 0512 DEMO sealed-session recovery; never submits orders or changes CRM flags.
+
+Only start the preexisting MT5 worker through the authenticated manager API
+when the owner requests ON, the exact DEMO worker is gone, and no duplicate
+broker session exists. The CRM manager reattests the broker heartbeat, while
+the normal ACK job decides effective execution.
+"""
+import datetime as dt
+import fcntl
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sqlite3
+import time
+
+CID=__import__("os").environ["ABUTRON_CRM_CONNECTION_ID_0512"]
+UNIT="abutron-client-mt5-"+CID
+BROKER="FP Markets"
+MODE="DEMO"
+SERVER="FPMarketsSC-Demo"
+MANAGER=Path("/opt/apex-client-mt5/manager.py")
+MANAGER_SHA="2a73e45a97b6ef51773af1dede7fcb750d535d14c1f72ea089f270691becc69b"
+DB=Path("/var/lib/apex-signup/accounts.sqlite3")
+STATE=Path("/var/lib/abutron-fp0512-session-recovery")
+LAST=STATE/"last-attempt.json"
+LATEST=STATE/"latest.json"
+COOLDOWN_SECONDS=300
+
+def eligible(row,duplicates,sealed,active,manager_running):
+    if not row:return "ACCOUNT_MISSING"
+    broker,mode,server,status,desired,effective,binding=row
+    if (broker,mode,server)!=(BROKER,MODE,SERVER):return "NOT_FP0512_DEMO"
+    if desired!=1:return "CUSTOMER_DESIRED_OFF"
+    if active:return "WORKER_ALREADY_ACTIVE"
+    if status=="DISCONNECTED":return "USER_DISCONNECTED"
+    if status!="ERROR" or effective!=0:return "CRM_STATE_NOT_OFFLINE"
+    if binding not in (None,"",UNIT):return "WORKER_BINDING_MISMATCH"
+    if duplicates:return "POSSIBLE_DUPLICATE_BROKER_SESSION"
+    if not manager_running:return "MANAGER_NOT_RUNNING"
+    if not sealed:return "SEALED_CREDENTIAL_UNAVAILABLE"
+    return "ELIGIBLE"
+
+def selftest():
+    row=(BROKER,MODE,SERVER,"ERROR",1,0,None)
+    assert eligible(row,0,True,False,True)=="ELIGIBLE"
+    assert eligible(row,0,True,True,True)=="WORKER_ALREADY_ACTIVE"
+    assert eligible((BROKER,MODE,SERVER,"ERROR",0,0,None),0,True,False,True)=="CUSTOMER_DESIRED_OFF"
+    assert eligible((BROKER,MODE,SERVER,"DISCONNECTED",1,0,None),0,True,False,True)=="USER_DISCONNECTED"
+    assert eligible((BROKER,"LIVE",SERVER,"ERROR",1,0,None),0,True,False,True)=="NOT_FP0512_DEMO"
+    assert eligible(row,1,True,False,True)=="POSSIBLE_DUPLICATE_BROKER_SESSION"
+    assert eligible(row,0,False,False,True)=="SEALED_CREDENTIAL_UNAVAILABLE"
+    assert eligible(row,0,True,False,False)=="MANAGER_NOT_RUNNING"
+    assert eligible(row,0,True,False,True)=="ELIGIBLE"
+    print("FP0512_AUTO_RECONNECT_SELFTEST_PASS_9")
+
+def atomic_json(path,doc):
+    import tempfile
+    fd,temp=tempfile.mkstemp(prefix=".fp0512-recovery-",dir=str(STATE))
+    try:
+        with os.fdopen(fd,"w") as f:
+            os.fchmod(f.fileno(),0o600)
+            json.dump(doc,f,sort_keys=True,separators=(",",":"))
+            f.write("\n");f.flush();os.fsync(f.fileno())
+        os.replace(temp,path)
+    finally:
+        if os.path.exists(temp):os.unlink(temp)
+
+def run(dry_run=False):
+    STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
+    if STATE.is_symlink() or STATE.stat().st_uid!=0 or STATE.stat().st_mode&0o077:
+        raise ValueError("ROOT_OWNED_RECOVERY_STATE_REQUIRED")
+    with (STATE/".lock").open("a+") as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        if MANAGER.is_symlink() or not MANAGER.is_file() or MANAGER.stat().st_uid!=0 or hashlib.sha256(MANAGER.read_bytes()).hexdigest()!=MANAGER_SHA:
+            raise ValueError("PINNED_MANAGER_IDENTITY_MISMATCH")
+        spec=importlib.util.spec_from_file_location("fp0512_existing_manager",str(MANAGER))
+        manager=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(manager)
+        with sqlite3.connect("file:"+str(DB)+"?mode=ro",uri=True,timeout=5) as db:
+            db.execute("PRAGMA query_only=ON")
+            record=db.execute("""SELECT a.broker,a.environment,a.broker_server,a.status,
+                  t.desired_enabled,t.effective_enabled,a.worker_binding
+                  FROM apex_mt5_connections a JOIN apex_trade_controls t ON t.connection_id=a.id
+                  WHERE a.id=?""",(CID,)).fetchone()
+            if record:
+                dupe=db.execute("""SELECT COUNT(*) FROM apex_mt5_connections a
+                  JOIN apex_mt5_connections target ON target.id=?
+                  WHERE a.id!=target.id AND a.account_id=target.account_id
+                    AND a.broker=target.broker AND a.environment=target.environment
+                    AND a.broker_server=target.broker_server
+                    AND a.account_reference=target.account_reference
+                    AND a.status IN ('CONNECTED','CONNECTING')""",(CID,)).fetchone()[0]
+            else:dupe=0
+        import subprocess
+        manager_running=subprocess.run(["/bin/systemctl","is-active","--quiet","abutron-client-mt5-manager.service"],timeout=5).returncode==0
+        active=manager.service_active(CID)
+        sealed=manager.sealed_available(CID)
+        verdict=eligible(record,dupe,sealed,active,manager_running)
+        now=time.time()
+        if verdict=="ELIGIBLE" and LAST.is_file():
+            try:
+                last=float(json.loads(LAST.read_text()).get("at_epoch",0))
+                if now-last<COOLDOWN_SECONDS:verdict="COOLDOWN"
+            except (OSError,ValueError,TypeError):verdict="COOLDOWN_UNKNOWN_LAST_ATTEMPT"
+        if verdict=="ELIGIBLE" and not dry_run:
+            atomic_json(LAST,{"at_epoch":now,"mode":MODE,"masked_account":"••••0512"})
+            try:
+                # Existing worker manager; ONLY this DEMO account and original sealed host credential.
+                manager.launch_worker(CID,BROKER,MODE,manager.sealed_path(CID))
+                verdict="SEALED_WORKER_LAUNCHED_WAIT_FOR_NATIVE_ATTESTATION"
+            except Exception as e:
+                verdict="WORKER_START_FAILED_"+type(e).__name__
+        elif verdict=="ELIGIBLE":verdict="DRY_RUN_ELIGIBLE"
+        status={"schema":"abutron.fp0512.demo.sealed_session_recovery.v1",
+                "checked_at_utc":dt.datetime.now(dt.timezone.utc).isoformat(),
+                "account_masked":"••••0512","environment":MODE,
+                "result":verdict,"worker_active":manager.service_active(CID),
+                "crm_or_trading_switch_changed":False,"broker_orders_submitted":0}
+        if not dry_run:atomic_json(LATEST,status)
+        print(json.dumps(status,sort_keys=True))
+        return status
+
+if __name__=="__main__":
+    import sys
+    if len(sys.argv)==2 and sys.argv[1]=="--selftest":selftest()
+    elif len(sys.argv)==2 and sys.argv[1]=="--dry-run":run(dry_run=True)
+    elif len(sys.argv)==1:run()
+    else:raise SystemExit("USAGE: [--selftest|--dry-run]")

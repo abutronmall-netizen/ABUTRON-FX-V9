@@ -1,0 +1,30 @@
+[Unit]
+Description=ABUTRON FP DEMO 0512 sealed MT5 worker auto-recovery (NO ORDER DISPATCH)
+After=abutron-client-mt5-manager.service
+Requires=abutron-client-mt5-manager.service
+ConditionPathExists=/usr/local/sbin/abutron-fp0512-demo-sealed-session-recovery
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-fp0512-demo-sealed-session-recovery
+StateDirectory=abutron-fp0512-session-recovery
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-fp0512-session-recovery
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+MemoryMax=120M
+TasksMax=25
+TimeoutStartSec=35s
+StandardOutput=journal
+StandardError=journal

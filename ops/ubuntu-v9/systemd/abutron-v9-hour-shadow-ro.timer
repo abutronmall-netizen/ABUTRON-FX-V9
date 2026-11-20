@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh loss-aware read-only FP DEMO V9 shadow signal decisions every minute
+
+[Timer]
+OnBootSec=4min
+OnUnitInactiveSec=60s
+AccuracySec=10s
+Unit=abutron-v9-hour-shadow-ro.service
+
+[Install]
+WantedBy=timers.target

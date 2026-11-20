@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily ABUTRON V9 owner-isolated historical chronological 70-30 replay quality metrics
+
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=1d
+AccuracySec=5min
+Persistent=false
+Unit=abutron-v9-four-owner-chronological-holdout-ro.service
+
+[Install]
+WantedBy=timers.target

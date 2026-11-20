@@ -1,0 +1,21 @@
+[Unit]
+Description=ABUTRON V9 broker-verified FP DEMO settled trade feedback (NO ORDERS)
+After=local-fs.target abutron-fp-dual-native-reconcile-ro.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-v9-broker-closed-feedback-ro.py
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-v9-realtrade-feedback
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=150M
+TasksMax=16
+TimeoutStartSec=18s

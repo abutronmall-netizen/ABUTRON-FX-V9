@@ -1,0 +1,12 @@
+[Unit]
+Description=ABUTRON FP DEMO 13/13 automatic coverage status check every 60 seconds
+
+[Timer]
+OnBootSec=90s
+OnUnitInactiveSec=60s
+AccuracySec=3s
+Persistent=true
+Unit=abutron-fp-v9-13of13-watch-ro.service
+
+[Install]
+WantedBy=timers.target

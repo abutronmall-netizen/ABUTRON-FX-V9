@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh ABUTRON V9 trained unified M5 NexusBrain predictions
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=45s
+AccuracySec=3s
+Unit=abutron-v9-trained-brain-readonly.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

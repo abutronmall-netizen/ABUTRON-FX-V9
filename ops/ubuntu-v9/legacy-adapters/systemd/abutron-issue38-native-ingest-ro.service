@@ -1,0 +1,27 @@
+[Unit]
+Description=ABUTRON Issue38 signed DEMO 6207 exposure native reconciliation (READ ONLY)
+After=local-fs.target
+ConditionPathExists=/opt/abutron-issue38-exposureqa/ingest_ro.py
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /opt/abutron-issue38-exposureqa/ingest_ro.py
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-issue38-exposure-readonly
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+MemoryMax=128M
+TasksMax=20
+TimeoutStartSec=20

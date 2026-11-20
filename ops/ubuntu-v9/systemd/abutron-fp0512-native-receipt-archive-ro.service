@@ -1,0 +1,29 @@
+[Unit]
+Description=ABUTRON FP DEMO 0512 immutable native receipt archive (READ-ONLY MT5 SOURCE)
+After=local-fs.target
+ConditionPathExists=/usr/local/sbin/abutron-fp0512-native-receipt-archive-ro
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/sbin/abutron-fp0512-native-receipt-archive-ro
+StateDirectory=abutron-fp0512-native-receipt-archive
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-fp0512-native-receipt-archive
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+MemoryMax=100M
+TasksMax=10
+TimeoutStartSec=15s
+StandardOutput=journal
+StandardError=journal
