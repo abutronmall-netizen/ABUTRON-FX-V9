@@ -377,6 +377,8 @@ def run_shadow_decision_pass(
         "candle_count": md.candle_count,
         "quote_count": md.quote_count,
         "candidates_generated": len(candidates),
+        # Raw Candidate objects for persistence into the dispatch queue.
+        "_raw_candidates": candidates,
         "candidates": [
             {
                 "symbol": c.symbol,

@@ -59,6 +59,7 @@ class AgenticRuntimeResult:
     shadow_decision_evaluated: bool = False
     source_hash: str = ""
     source_ts: float = 0.0
+    persisted_candidate_ids: List[str] = field(default_factory=list)
     error: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -79,6 +80,7 @@ class AgenticRuntimeResult:
             "shadow_decision_evaluated": self.shadow_decision_evaluated,
             "source_hash": self.source_hash,
             "source_ts": self.source_ts,
+            "persisted_candidate_ids": self.persisted_candidate_ids,
             "error": self.error,
         }
 
@@ -106,6 +108,67 @@ def _is_live_authorized(connection_id: str,
         return False
     return bool(intent.get("authorized", 0))
 
+
+
+
+def _persist_candidates(
+    candidates: List[Any],
+    *,
+    connection_id: str,
+    event_log: Any,
+) -> List[str]:
+    """Persist brain-generated candidates into the dispatch queue.
+
+    Converts each ``Candidate`` to a ``CandidateRow`` dict via
+    ``to_row()`` and persists it with ``execution_state="RESERVED"`` so
+    the existing ``NativeDispatcher.dispatch_account()`` can pick it up.
+
+    Returns the list of persisted candidate IDs. Fail-closed: if
+    persistence fails for a candidate, it is skipped and logged.
+    """
+    from ..apex.engine import Candidate
+
+    persisted_ids: List[str] = []
+    for cand in candidates:
+        if not isinstance(cand, Candidate):
+            continue
+        cand.reserved = True
+        row = cand.to_row()
+        row["execution_state"] = "RESERVED"
+        try:
+            if engine_db.add_candidate(row):
+                persisted_ids.append(cand.candidate_id)
+                event_log.append(make_event(
+                    "agentic.candidate_persisted",
+                    connection_id=connection_id,
+                    order_request_id=cand.candidate_id,
+                    execution_state="RESERVED",
+                    reason_code="DECISION_TO_DISPATCH_CONNECTED",
+                    payload={
+                        "symbol": cand.symbol,
+                        "direction": cand.direction,
+                        "volume": cand.volume,
+                        "stop_loss": cand.stop_loss,
+                        "take_profit": cand.take_profit,
+                    }))
+            else:
+                # Duplicate replay_key (at-most-once) — skip, don't re-add.
+                event_log.append(make_event(
+                    "agentic.candidate_duplicate",
+                    connection_id=connection_id,
+                    order_request_id=cand.candidate_id,
+                    execution_state="RESERVED",
+                    reason_code="DUPLICATE_REPLAY_KEY",
+                    payload={"replay_key": cand.replay_key}))
+        except Exception as exc:
+            event_log.append(make_event(
+                "agentic.candidate_persist_error",
+                connection_id=connection_id,
+                order_request_id=cand.candidate_id,
+                execution_state="PERSIST_ERROR",
+                reason_code="CANDIDATE_PERSIST_FAILED",
+                payload={"error": str(exc)}))
+    return persisted_ids
 
 def run_agentic_pass(
     connection_id: str,
@@ -203,6 +266,19 @@ def run_agentic_pass(
         source_hash=shadow.get("source_hash", ""),
         source_ts=shadow.get("source_ts", 0.0),
     )
+
+    # --- Persist candidates into the dispatch queue ----------------
+    # Connect the decision engine to the dispatcher: persist brain-
+    # generated candidates as RESERVED rows so NativeDispatcher can
+    # pick them up. This closes the gap where decisions were generated
+    # but never reached the dispatch queue.
+    raw_candidates = shadow.get("_raw_candidates", [])
+    if raw_candidates:
+        persisted_ids = _persist_candidates(
+            raw_candidates, connection_id=connection_id, event_log=log)
+        result.persisted_candidate_ids = persisted_ids
+        # candidates_generated reflects the brain's output; the persisted
+        # list shows what reached the dispatch queue.
 
     # --- Gated dispatch ------------------------------------------
     # DEMO: dispatch only if effective_on AND exposure certified.
