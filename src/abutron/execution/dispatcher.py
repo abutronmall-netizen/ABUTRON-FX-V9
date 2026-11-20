@@ -133,15 +133,28 @@ class NativeDispatcher:
         outcome = sent.get("outcome")
 
         if outcome == "ACK":
+            # Use the ACTUAL native execution price and volume from the
+            # broker's OrderSend result (res.price, res.volume), not the
+            # model's proposed price/volume. The EA writes these into the
+            # receipt file and returns them in the socket response.
+            receipt_ref = sent.get("receipt_ref", {})
+            actual_price = float(receipt_ref.get("price", 0.0) or 0.0)
+            actual_volume = float(receipt_ref.get("volume", 0.0) or 0.0)
+            if actual_price <= 0:
+                # Fall back to candidate price only if the EA did not
+                # report the actual fill (older EA versions).
+                actual_price = float(candidate.get("trigger_price",
+                                                   candidate.get("price", 0.0)))
+            if actual_volume <= 0:
+                actual_volume = float(candidate.get("volume", 0.0))
             self.receipts.record_native_receipt(
                 candidate_id=candidate["candidate_id"],
                 connection_id=cid, mt5_login=account["mt5_login"],
                 symbol=candidate["symbol"], direction=candidate["direction"],
-                native_ticket=sent["receipt_ref"].get("ticket", 0),
-                broker_deal_id=sent["receipt_ref"].get("deal", ""),
-                volume=candidate["volume"],
-                fill_price=candidate.get("trigger_price",
-                                         candidate.get("price", 0.0)),
+                native_ticket=receipt_ref.get("ticket", 0),
+                broker_deal_id=receipt_ref.get("deal", ""),
+                volume=actual_volume,
+                fill_price=actual_price,
                 stop_loss=candidate["stop_loss"],
                 take_profit=candidate["take_profit"],
                 commission=0.0, swap=0.0,
@@ -163,16 +176,25 @@ class NativeDispatcher:
             return {"candidate_id": candidate["candidate_id"],
                     "outcome": "UNKNOWN", "receipt_id": rid}
 
-        # REJECTED
+        # REJECTED — expose the actual MT5 return code from the EA's
+        # native receipt so operators can diagnose OrderCheck failures.
+        receipt_ref = sent.get("receipt_ref", {}) or {}
+        reject_reason = sent.get("reason", "REJECTED")
+        mt5_retcode = receipt_ref.get("reason", "") or reject_reason
         db.engine_db.set_candidate_state(candidate["candidate_id"], "REJECTED",
-                                      sent.get("reason", "REJECTED"))
+                                      mt5_retcode)
         self.log.append(make_event(
             "dispatch.rejected", connection_id=cid, broker=broker,
             order_request_id=candidate["candidate_id"],
             symbol=candidate["symbol"], execution_state="REJECTED",
-            reason_code=sent.get("reason", "REJECTED")))
+            reason_code=mt5_retcode,
+            payload={"mt5_return_code": mt5_retcode,
+                     "native_reason": receipt_ref.get("reason", ""),
+                     "broker_deal_id": receipt_ref.get("deal", "")}))
         return {"candidate_id": candidate["candidate_id"],
-                "outcome": "REJECTED", "reason": sent.get("reason")}
+                "outcome": "REJECTED",
+                "reason": mt5_retcode,
+                "mt5_return_code": mt5_retcode}
 
     def _reserved_candidate_ids(self, connection_id: str) -> List[str]:
         from sqlalchemy import select

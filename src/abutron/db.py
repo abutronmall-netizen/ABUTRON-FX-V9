@@ -170,6 +170,11 @@ class OrderReceiptRow(Base):
     broker_native_stop_risk_usd: Mapped[float] = mapped_column(Float, default=0.0)
     broker_native_ordercalcprofit_verified: Mapped[int] = mapped_column(Integer, default=0)
     native_position_ticket: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    # Broker-confirmed SL/TP from native evidence (closed-position
+    # reconciliation). These record the broker's actual protective stop
+    # levels, not the model's requested values.
+    broker_sl: Mapped[float] = mapped_column(Float, default=0.0)
+    broker_tp: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class LedgerRow(Base):
@@ -345,6 +350,8 @@ class EngineDB:
                 "broker_native_stop_risk_usd": "FLOAT DEFAULT 0",
                 "broker_native_ordercalcprofit_verified": "INTEGER DEFAULT 0",
                 "native_position_ticket": "INTEGER DEFAULT 0",
+                "broker_sl": "FLOAT DEFAULT 0",
+                "broker_tp": "FLOAT DEFAULT 0",
             })
 
     @property
@@ -446,6 +453,20 @@ class EngineDB:
         stmt = select(OrderReceiptRow).order_by(OrderReceiptRow.received_at.desc()).limit(limit)
         if connection_id:
             stmt = stmt.where(OrderReceiptRow.connection_id == connection_id)
+        return [_row_dict(r) for r in self.session.scalars(stmt)]
+
+    def list_pending_reconciled_receipts(self, connection_id: str) -> List[Dict[str, Any]]:
+        """Receipts with execution_state ACK but still PENDING reconciliation.
+
+        These are positions that have been acknowledged by the broker but
+        whose protection evidence has not yet been verified. Includes both
+        currently-open and already-closed positions — the reconciler must
+        handle closed positions using historical native evidence.
+        """
+        stmt = select(OrderReceiptRow).where(
+            OrderReceiptRow.connection_id == connection_id,
+            OrderReceiptRow.execution_state == "ACK",
+            OrderReceiptRow.reconciled_state == "PENDING")
         return [_row_dict(r) for r in self.session.scalars(stmt)]
 
     def add_ledger(self, row: Dict[str, Any]) -> None:

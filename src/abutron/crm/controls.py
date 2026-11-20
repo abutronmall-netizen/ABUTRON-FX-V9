@@ -305,6 +305,133 @@ class CrmService:
                     f"{connection_id} (ticket {ticket}) has no matching "
                     "broker position; stale receipt (fail-closed)")
 
+    def reconcile_closed_positions(self, connection_id: str,
+                                   native_position_history: List[Dict]) -> Dict:
+        """Reconcile ACK receipts whose positions have already closed.
+
+        The existing ``_reconcile_native_positions`` only matches currently
+        open positions from the latest snapshot. When a position closes
+        between the order ACK and the next exposure snapshot, the receipt
+        stays ``PENDING`` forever — the reconciliation misses the broker's
+        protection evidence. This method resolves the correct MT5 position
+        ticket from authenticated native deal history and retrieves the
+        signed historical protection evidence after a position closes.
+
+        ``native_position_history`` is a list of historical position
+        snapshots (each with ``ticket``/``symbol``/``direction``/``volume``
+        /``entry``/``sl``/``tp``/``stop_risk_usd``/
+        ``ordercalcprofit_verified``/``broker_deal_id``). The method
+        matches each pending ACK receipt to a historical position by
+        ``broker_deal_id`` (the broker's deal reference), then verifies
+        and updates the receipt with the correct position ticket, SL, TP
+        and stop-risk.
+
+        Returns a summary dict with resolved, already_protected, and
+        unresolved counts. Fail-closed: positions that cannot be matched
+        to native evidence remain PENDING (never silently certified).
+        """
+        pending = self.engine.list_pending_reconciled_receipts(connection_id)
+        if not pending:
+            return {"connection_id": connection_id,
+                    "resolved": 0, "already_protected": 0,
+                    "unresolved": 0, "details": []}
+
+        # Build a lookup from broker_deal_id -> historical position.
+        # The deal ID is the broker's immutable reference; matching by
+        # deal ID resolves the correct position ticket even when the
+        # order ticket differs from the position ticket (MT5 OrderSend
+        # returns the order ticket, but PositionsTotal returns the
+        # position ticket — they are different identifiers).
+        history_by_deal = {}
+        history_by_ticket = {}
+        for pos in native_position_history:
+            deal = str(pos.get("broker_deal_id", "") or "")
+            ticket = pos.get("ticket", 0)
+            if deal:
+                history_by_deal[deal] = pos
+            if ticket:
+                history_by_ticket[int(ticket)] = pos
+
+        resolved = 0
+        already_protected = 0
+        unresolved = []
+        details = []
+
+        for receipt in pending:
+            receipt_id = receipt.get("receipt_id", "")
+            broker_deal = str(receipt.get("broker_deal_id", "") or "")
+            order_ticket = receipt.get("native_ticket", 0)
+
+            # Skip if already protected by a previous run.
+            if receipt.get("reconciled_state") == "PROTECTED":
+                already_protected += 1
+                continue
+
+            # Match by broker deal ID first (authoritative), then by
+            # position ticket as fallback.
+            pos = None
+            match_method = ""
+            if broker_deal and broker_deal in history_by_deal:
+                pos = history_by_deal[broker_deal]
+                match_method = "broker_deal_id"
+            elif order_ticket and int(order_ticket) in history_by_ticket:
+                pos = history_by_ticket[int(order_ticket)]
+                match_method = "position_ticket"
+
+            if pos is None:
+                unresolved.append(receipt_id)
+                details.append({"receipt_id": receipt_id,
+                                "status": "UNRESOLVED",
+                                "reason": "no_matching_native_position"})
+                continue
+
+            stop_risk = pos.get("stop_risk_usd")
+            verified = pos.get("ordercalcprofit_verified")
+            position_ticket = pos.get("ticket", 0)
+            sl = float(pos.get("sl", 0.0))
+            tp = float(pos.get("tp", 0.0))
+
+            import math
+            if (type(stop_risk) not in (int, float)
+                    or not math.isfinite(stop_risk) or stop_risk < 0):
+                unresolved.append(receipt_id)
+                details.append({"receipt_id": receipt_id,
+                                "status": "UNRESOLVED",
+                                "reason": "invalid_stop_risk"})
+                continue
+            if verified is not True:
+                unresolved.append(receipt_id)
+                details.append({"receipt_id": receipt_id,
+                                "status": "UNRESOLVED",
+                                "reason": "not_ordercalcprofit_verified"})
+                continue
+
+            self.engine.update_receipt(
+                receipt_id,
+                reconciled_state="PROTECTED",
+                broker_native_stop_risk_usd=float(stop_risk),
+                broker_native_ordercalcprofit_verified=1,
+                native_position_ticket=int(position_ticket),
+                broker_sl=sl,
+                broker_tp=tp,
+                broker_deal_id=broker_deal or str(pos.get("broker_deal_id", "")),
+            )
+            resolved += 1
+            details.append({"receipt_id": receipt_id,
+                            "status": "PROTECTED",
+                            "match_method": match_method,
+                            "position_ticket": int(position_ticket),
+                            "broker_sl": sl,
+                            "broker_tp": tp,
+                            "stop_risk_usd": float(stop_risk)})
+
+        return {"connection_id": connection_id,
+                "resolved": resolved,
+                "already_protected": already_protected,
+                "unresolved": len(unresolved),
+                "unresolved_ids": unresolved,
+                "details": details}
+
     # ------------------------------------------------------------------
     # Broker connection lifecycle (blueprint C10–C16, seven statuses)
     # ------------------------------------------------------------------
