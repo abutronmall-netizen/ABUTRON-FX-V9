@@ -34,10 +34,38 @@ The existing execution environment includes:
 5. **FP symbol mapping.** Use the current account's broker-native `instruments` mapping, symbol spelling, tick/lot steps and supported asset classes; never use Deriv's `Volatility 50 Index.0` on FP. PR #59 fixes source symbol selection, but real instrument reports and quote coverage are not yet verified on the new writer.
 6. **Risk settings need precise continuity.** The new FP runner specifies `RiskGate(per_trade_pct=0.0015, portfolio_cap_pct=0.02)` while the existing 0512 activation code references a **0.10% per-trade** configuration. A **2% aggregate open stop-risk** number is not interchangeable with a **20% portfolio drawdown ceiling**. Preserve the actually authorized FP position-sizing and protective SL/TP/trailing settings; do not silently change them by applying a generic Deriv preset.
 7. **Per-account runtime context.** The FP runner reads `ABUTRON_DATA_ROOT` for its event log. The engine DB, receipt ledger, signed writer and cost/owner paths must all belong to 0512. Verify the trained V9 model and its SHA in the **actual** runtime checkout before executing. Do not reuse another account's engine or secrets.
-8. **Order-writer ownership.** The existing FP 0512 router/order bridge may already own order dispatch. Before attaching an order-capable `ApexNativeWriter`, inspect current routing and agree on a single execution writer for 0512. A second terminal does not inherently prevent duplicate dispatch; do not add a new supervisory/veto architecture, and do not disable the established writer blindly.
+8. **Order-writer ownership.** The existing FP 0512 router/order bridge may already own order dispatch. Per the architecture decision in §3, V9 becomes the sole order-capable writer for 0512 via a coordinated cutover — the existing bridge's order path is disarmed first, then V9 is armed. Do not run both EAs as simultaneous order senders (different magic numbers and handoff protocols; no shared veto). Do not disable the established writer blindly without recording its receipt/evidence state for rollback.
 9. **Release integrity.** The specific push-CI EX5 SHA-256 is `b6b63afeb7c4939a2bea1f40cfad58d8288af4009d8dc4e2534d7196162b91f3`. Use the exact verified binary, not a separately recompiled file with an assumed equal hash. Account-binding and secret provisioning must be proven from the actual FP DEMO session, without publishing secrets.
 
-## 3. 0512-first integration sequence
+## 3. Architecture decision: V9 as the sole order-capable writer
+
+**Decision:** V9 `ApexNativeWriter` becomes the **sole order-capable writer** for 0512 through a coordinated cutover. The existing FP 0512 order bridge (`AbutronFPNativeOrderBridgeV101`) is **not** reused as the order sender. Its feed, reconciliation, and evidence roles remain untouched; only its order-dispatch role is superseded by V9.
+
+**Why the existing bridge must not be the order sender:**
+
+1. **Trailing is magic-number-bound to the EA that opens the position.** V9 trailing (`ManageAgenticTrailingStops` in `ApexNativeWriter.mq5`) only modifies positions where `POSITION_MAGIC == InpTradeMagic` (`20261120`). The existing FP bridge sends orders with a different magic (`73113051`). If V9 dispatched through the bridge, those positions would carry the bridge's magic and V9 trailing would never touch them, breaking the broker-confirmed trailing-stop evidence required for verification.
+
+2. **Order-flow provenance exists only in the V9 EA.** Genuine trade-tick provenance (`CopyTicks` with `COPY_TICKS_TRADE`, `TICK_FLAG_BUY`/`TICK_FLAG_SELL`) is implemented only in `ApexNativeWriter.mq5`. The existing bridge has no equivalent export, so reusing it as the sender would leave genuine FP aggressor volume indistinguishable from candle-derived estimates on the positions being verified.
+
+3. **Two order-capable EAs on one account violates the single-writer invariant.** The V9 `SingleWriterGateway` enforces exactly one writer per account via per-account locks, HMAC secret provisioning, and EX5 SHA pinning. Running `ApexNativeWriter` and `AbutronFPNativeOrderBridgeV101` simultaneously on the same 0512 account means two independent order senders with different handoff protocols (V9 HMAC-signed canonical payload vs the bridge's `.req`/`.consumed` file protocol) and no shared veto — a duplicate-dispatch risk that a second terminal does not inherently prevent.
+
+| State | Order writer | Trailing | Order-flow |
+|---|---|---|---|
+| Before | Existing FP bridge (if `EnableNativeDemoOrders=true`) or dormant | Bridge magic (`73113051`) or none | None |
+| After | V9 ApexNativeWriter (`b6b63afe…`, magic `20261120`) | V9 trailing on V9-magic positions | V9 `CopyTicks` genuine ticks |
+
+**The cutover is bounded and reversible:**
+
+1. Inspect the existing bridge's actual `EnableNativeDemoOrders` state and its current order-writing authority on Ubuntu.
+2. Disarm the existing bridge's order path (`EnableNativeDemoOrders=false`, already the default) and record its receipt/evidence state for rollback.
+3. Deploy V9 `ApexNativeWriter.ex5` (`b6b63afe…`) into a dedicated 0512 terminal with `InpExposureOnly=false`, `InpTradeMagic=20261120`, and an account-bound preset.
+4. Arm via `SingleWriterGateway` (EX5 SHA verified, HMAC secret provisioned, CRM controls confirmed).
+5. Verify genuine broker ACK + SL/TP + V9 trailing + order-flow `source`.
+6. Rollback if needed: disarm the V9 writer and re-enable the existing bridge order path; established FP feeds and history stay intact.
+
+**Precondition before the cutover:** Confirm the actually-authorized FP 0512 per-trade risk. The existing 0512 activation code references a **0.10% per-trade** configuration, while the V9 runner defaults to `RiskGate(per_trade_pct=0.0015, portfolio_cap_pct=0.02)`. Align the V9 EA's `InpRiskFraction` to the authorized FP policy — do not silently apply the generic Deriv default. The V9 EA gates on `OrderCalcProfit` + `InpRiskFraction`, so the EA-side value must match the authorized policy, not the runner default.
+
+## 4. 0512-first integration sequence
 
 ### A. Offline corrections (current permitted scope)
 
@@ -65,11 +93,11 @@ The existing execution environment includes:
 
 After 0512 has independently verified native order/protection evidence, repeat the same process **1636 → 1622 → 2582**, one at a time. Each has distinct existing worker and order-writer history. Reuse the tested code, **not** 0512's identity, credentials, EA state, receipts or cost assertions.
 
-## 4. LIVE 9392 — excluded
+## 5. LIVE 9392 — excluded
 
 FP LIVE 9392 remains **CONNECTED for data, desired OFF, effective OFF**. No LIVE account, service, EA, owner-risk limit or control change belongs in this 0512 plan. LIVE execution is a separately authorized task. Do not assert a particular `live_intents` table or future deployment gate exists without checking the current production schema.
 
-## 5. Rollback and evidence standard
+## 6. Rollback and evidence standard
 
 For any subsequently authorized 0512 deployment, preserve exact before/after EA and preset hashes, the existing router's authority, native receipt/engine state and service configuration. If the new path fails, undo **only** the new 0512 V9 integration, leaving established FP feeds and history intact. Keep Deriv DEMO and LIVE unchanged. No fabricated broker confirmations, no unrequested trading veto layers.
 
