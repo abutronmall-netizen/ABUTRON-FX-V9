@@ -12,8 +12,8 @@ BAD = [
     re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----"),
     re.compile(r"sk-proj-[A-Za-z0-9_-]{10,}"),
     re.compile(r"ghp_[A-Za-z0-9]{20,}"),
-    re.compile(r"\\b[a-f0-9]{32}\\b"),
-    re.compile(r"\\b(?:32456207|7410512|7411636|7411622|7412582|86076364)\\b"),
+    re.compile(r"\b[a-f0-9]{32}\b"),
+    re.compile(r"\b(?:32456207|7410512|7411636|7411622|7412582|86076364)\b"),
 ]
 py_files = []
 errors = []
