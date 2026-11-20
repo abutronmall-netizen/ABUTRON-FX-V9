@@ -228,7 +228,7 @@ def main():
  challenge.write_text("\r\n".join(["ABUTRON_MT5_CUSTOMER_V6",nonce,challenge_owner,
   ALLOWED[(broker,server)],login,server,"DEMO"])+"\r\n")
  auth=runtime/"auth.ini"
- auth.write_text("[Common]\r\nLogin="+login+"\r\nPassword="REDACTED"password"]+
+ auth.write_text("[Common]\r\nLogin="+login+"\r\nPassword="+doc["password"]+
   "\r\nServer="+server+"\r\nKeepPrivate=0\r\nProxyEnable=0\r\n"+
   "[Experts]\r\nEnabled=1\r\nAllowLiveTrading="+("1" if broker=="Deriv" and doc["mode"]=="DEMO" else "0")+"\r\nAllowDllImport=0\r\n"+
   "[StartUp]\r\n"+("Expert=ABUTRON\\AbutronApexExistingDerivV4_"+v4_suffix+"\r\n" if is_v4_target else ("Expert=ABUTRON\\AbutronApexNativeOrderBridgeV2\r\n" if broker=="Deriv" else ""))+("ExpertParameters=ABUTRON_APEX11_V4_GUARDED_"+v4_suffix+".set\r\n" if is_v4_target else ("ExpertParameters=ABUTRON_APEX_USD_50_100_APPROVED.set\r\n" if broker=="Deriv" else ""))+"Script=ABUTRON\\AbutronBrokerNativeFeedV2\r\n"+
