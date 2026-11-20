@@ -1,6 +1,11 @@
 """Prevent false-positive owner-risk, stop and trailing broker evidence."""
+import time
 import types
 from abutron.risk import risk_engine
+
+
+def _fresh_cert():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _engine(monkeypatch, account, positions):
@@ -38,7 +43,8 @@ def test_missing_position_snapshot_is_not_flat(monkeypatch):
 def test_verified_flat_and_usd_equity_can_pass(monkeypatch):
     re = _engine(monkeypatch,
         {"connection_id":"fp","equity":10000.0,
-         "native_positions_verified":True,"account_currency":"USD"},[])
+         "native_positions_verified":True,"account_currency":"USD",
+         "exposure_certified_at":_fresh_cert()},[])
     result = re.aggregate_owner_risk("owner")
     assert result["owner_risk_certified"] is True
     assert result["cap_exceeded"] is False
@@ -70,7 +76,8 @@ def test_known_symbol_registry_is_not_mt5_stop_risk_proof(monkeypatch):
 def test_native_ordercalcprofit_actual_usd_risk_can_be_certified(monkeypatch):
     obj = _engine(monkeypatch,
         {"connection_id":"fp", "equity":10000.0,
-         "native_positions_verified":True,"account_currency":"USD"},
+         "native_positions_verified":True,"account_currency":"USD",
+         "exposure_certified_at":_fresh_cert()},
         [{"symbol":"US30", "direction":"SELL", "fill_price":50100,
           "stop_loss":50200, "volume":0.03,
           "broker_native_ordercalcprofit_verified":True,

@@ -64,6 +64,14 @@ class AccountRow(Base):
     equity: Mapped[float] = mapped_column(Float, default=0.0)
     account_currency: Mapped[str] = mapped_column(String(8), default="")
     native_positions_verified: Mapped[int] = mapped_column(Integer, default=0)
+    # Issue #36: exposure certification is now bound to authenticated
+    # broker-native evidence. These columns record the proof that set
+    # native_positions_verified=1 — the native export nonce, the open
+    # position count, a digest of the snapshot, and the certification time.
+    exposure_nonce: Mapped[str] = mapped_column(String(64), default="")
+    exposure_snapshot_count: Mapped[int] = mapped_column(Integer, default=0)
+    exposure_snapshot_digest: Mapped[str] = mapped_column(String(128), default="")
+    exposure_certified_at: Mapped[str] = mapped_column(String(32), default="")
 
 
 class LinkAttemptRow(Base):
@@ -154,6 +162,14 @@ class OrderReceiptRow(Base):
     reconciled_state: Mapped[str] = mapped_column(String(32), default="PENDING")
     received_at: Mapped[str] = mapped_column(String(32), default="")
     reason_code: Mapped[str] = mapped_column(String(64), default="")
+    # Issue #36: broker-native stop-risk reconciliation. These fields are
+    # populated by the native exposure publisher from the broker snapshot's
+    # OrderCalcProfit and read by RiskEngine.aggregate_owner_risk. They MUST
+    # originate from a broker-reconciled native position, never from a
+    # registry estimate.
+    broker_native_stop_risk_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    broker_native_ordercalcprofit_verified: Mapped[int] = mapped_column(Integer, default=0)
+    native_position_ticket: Mapped[int] = mapped_column(Integer, default=0, index=True)
 
 
 class LedgerRow(Base):
@@ -309,6 +325,10 @@ class EngineDB:
                 "equity": "FLOAT DEFAULT 0",
                 "account_currency": "VARCHAR(8) DEFAULT ''",
                 "native_positions_verified": "INTEGER DEFAULT 0",
+                "exposure_nonce": "VARCHAR(64) DEFAULT ''",
+                "exposure_snapshot_count": "INTEGER DEFAULT 0",
+                "exposure_snapshot_digest": "VARCHAR(128) DEFAULT ''",
+                "exposure_certified_at": "VARCHAR(32) DEFAULT ''",
             })
             _migrate_columns(self._engine, "candidates", {
                 "price": "FLOAT DEFAULT 0",
@@ -320,6 +340,11 @@ class EngineDB:
                 "trail_k": "FLOAT DEFAULT 0",
                 "trail_stop": "FLOAT DEFAULT 0",
                 "trail_plan": "TEXT DEFAULT '{}'",
+            })
+            _migrate_columns(self._engine, "order_receipts", {
+                "broker_native_stop_risk_usd": "FLOAT DEFAULT 0",
+                "broker_native_ordercalcprofit_verified": "INTEGER DEFAULT 0",
+                "native_position_ticket": "INTEGER DEFAULT 0",
             })
 
     @property
@@ -350,7 +375,9 @@ class EngineDB:
                       "conn_status", "conn_updated_at", "conn_error",
                       "worker_binding", "broker_verified_at",
                       "equity", "account_currency",
-                      "native_positions_verified"):
+                      "native_positions_verified",
+                      "exposure_nonce", "exposure_snapshot_count",
+                      "exposure_snapshot_digest", "exposure_certified_at"):
                 if k in acct:
                     setattr(row, k, acct[k])
             s.commit()

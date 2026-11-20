@@ -233,7 +233,7 @@ def main() -> int:
         account = {
             "connection_id": connection_id,
             "broker": "fp_markets",
-            "mt5_login": 50123456,
+            "mt5_login": 345678,
             "owner_id": "owner_staging",
             "display_name": "Staging DEMO",
             "environment": "demo",

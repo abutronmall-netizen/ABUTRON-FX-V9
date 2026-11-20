@@ -28,7 +28,8 @@ class NativeDispatcher:
         self.gateway = gateway
         self.receipts = receipt_mgr
 
-    def dispatch_account(self, connection_id: str) -> Dict[str, Any]:
+    def dispatch_account(self, connection_id: str,
+                         candidate_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """Dispatch all RESERVED candidates for one account.
 
         Before sending, each candidate is gated by the owner-wide
@@ -65,8 +66,13 @@ class NativeDispatcher:
                         "exposure": exposure}
 
         # Collect reserved (RESERVED state) candidates
-        candidates = [self._load_candidate(cid)
-                      for cid in self._reserved_candidate_ids(connection_id)]
+        eligible_ids = self._reserved_candidate_ids(connection_id)
+        # A production agentic tick may submit only its own reservations,
+        # never unrelated older queue items or another owner's candidates.
+        if candidate_ids is not None:
+            allowed = set(candidate_ids)
+            eligible_ids = [cid for cid in eligible_ids if cid in allowed]
+        candidates = [self._load_candidate(cid) for cid in eligible_ids]
         results = {"connection_id": connection_id, "sent": 0,
                    "ack": 0, "unknown": 0, "rejected": 0,
                    "details": []}

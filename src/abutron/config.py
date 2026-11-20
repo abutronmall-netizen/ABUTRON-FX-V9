@@ -84,6 +84,17 @@ CANDLE_OPEN_SECONDS = 300          # M5
 ENGINE_TICK_SECONDS = int(os.getenv("ABUTRON_ENGINE_TICK", "30"))
 HEARTBEAT_STALE_SECONDS = int(os.getenv("ABUTRON_HEARTBEAT_STALE", "90"))
 
+# Issue #36: exposure certifications expire if not refreshed by the broker
+# worker. A stale certification is treated as uncertified (fail-closed), so
+# the dispatcher blocks on BLOCKED_INCOMPLETE_EXPOSURE until the worker
+# publishes a fresh authenticated broker snapshot.
+EXPOSURE_CERT_TTL_SECONDS = int(os.getenv("ABUTRON_EXPOSURE_CERT_TTL", "300"))
+
+# Issue #36: a broker exposure snapshot must be fresh. The nonce embeds a
+# unix timestamp; a snapshot older than this window is rejected (replay
+# protection), so a captured old snapshot cannot certify exposure.
+EXPOSURE_SNAPSHOT_FRESH_SECONDS = int(os.getenv("ABUTRON_SNAPSHOT_FRESH", "60"))
+
 # ---------------------------------------------------------------------------
 # Wine / MT5 terminal runtime (Ubuntu host)
 # ---------------------------------------------------------------------------

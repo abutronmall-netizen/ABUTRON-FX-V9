@@ -241,12 +241,15 @@ class TestSniperEngineIntegration:
 # Execution path — the sniper entry geometry reaches the order request
 # ---------------------------------------------------------------------------
 class TestSniperExecutionPath:
-    def test_gateway_sends_sniper_entry_geometry(self):
+    def test_gateway_sends_sniper_entry_geometry(self, monkeypatch):
         from abutron.events import EventLog
         from abutron.execution.writer_gateway import SingleWriterGateway
 
         log = EventLog(os.path.join(DATA_ROOT, "t_sniper_gw.jsonl"))
         gw = SingleWriterGateway(log)
+        from abutron.execution.writer_gateway import WriterStatus
+        monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "local-fixture-value")
+        gw._armed["c1"] = WriterStatus("c1", True, "fixture-sha", "fixture-sha", "rev", True, False, "now")
         captured = {}
 
         def _fake_deliver(request, timeout):
@@ -270,7 +273,7 @@ class TestSniperExecutionPath:
         assert captured["stop_loss"] == 1.2532
         assert captured["take_profit"] == 1.2560
 
-    def test_dispatcher_receipt_uses_trigger_price(self):
+    def test_dispatcher_receipt_uses_trigger_price(self, monkeypatch):
         from abutron.events import EventLog
         from abutron.execution.dispatcher import NativeDispatcher
         from abutron.execution.writer_gateway import SingleWriterGateway
@@ -280,6 +283,9 @@ class TestSniperExecutionPath:
         _clear_candidates()
         log = EventLog(os.path.join(DATA_ROOT, "t_sniper_disp.jsonl"))
         gw = SingleWriterGateway(log)
+        from abutron.execution.writer_gateway import WriterStatus
+        monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "local-fixture-value")
+        gw._armed["snip_disp"] = WriterStatus("snip_disp", True, "fixture-sha", "fixture-sha", "rev", True, False, "now")
 
         def _fake_deliver(request, timeout):
             return "ACK", {"status": "ack", "ticket": 7007}

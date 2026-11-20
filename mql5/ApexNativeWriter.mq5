@@ -23,25 +23,55 @@
 //| InpActivationSecret input.                                        |
 //+------------------------------------------------------------------+
 #property copyright "ABUTRON FX V9"
-#property version   "1.1.0"
-#property strict_testing
+#property version   "1.10"
 
 input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
 input long    InpActivationSeed = 0;            // activation seed (per arm)
 input string  InpActivationSecret = "";         // HMAC key (or file-provisioned)
+input bool    InpExposureOnly   = true;         // QA default: export only, NO OrderSend
+input ulong   InpTradeMagic     = 20261120;      // V9-owned trades only
+input bool    InpTrailingEnabled = true;          // only active if InpExposureOnly=false
+input double  InpTrailingAtrMult = 2.0;           // closed-M5 ATR distance
 input int     InpManagedCharts  = 0;            // 0 = all charts with EA
 input double  InpRiskFraction   = 0.15;         // per-trade risk fraction (display)
 input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
-input int     InpExportPeriod   = PERIOD_M5;    // export timeframe
+input ENUM_TIMEFRAMES InpExportPeriod = PERIOD_M5;  // native export timeframe
 
 string g_activation_secret = "";                // resolved at OnInit
 
 int OnInit()
 {
-   SetTradeAllowed(true);
-   SetTradeExecution(ORDER_TYPE_MARKET, 0, 0, 0); // allow market orders
+   // Terminal-level algorithmic trading permissions are managed by MT5.
+   // Verify SHA256/HMAC against a public, non-secret known-answer vector.
+   string kat = HmacSha256Hex("key", "The quick brown fox jumps over the lazy dog");
+   if(kat != "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+   {
+      Print("ISSUE38_INIT_BLOCK_HMAC_KAT result=", kat);
+      return(INIT_FAILED);
+   }
    g_activation_secret = LoadActivationSecret();
+   if(g_activation_secret == "")
+   {
+      Print("ISSUE38_INIT_BLOCK_SECRET_NOT_PROVISIONED");
+      return(INIT_FAILED);
+   }
+   if(InpConnectionId == "" || InpBrokerServer == "")
+   {
+      Print("ISSUE38_INIT_BLOCK_MISSING_EA_ACCOUNT_PARAMETERS");
+      return(INIT_FAILED);
+   }
+   if(AccountInfoString(ACCOUNT_SERVER) != InpBrokerServer)
+   {
+      Print("ISSUE38_INIT_BLOCK_BROKER_SERVER_MISMATCH");
+      return(INIT_FAILED);
+   }
+   if(AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO)
+   {
+      Print("ISSUE38_INIT_BLOCK_NON_DEMO_ACCOUNT");
+      return(INIT_FAILED);
+   }
+   Print("ISSUE38_INIT_EXPOSURE_QA_READY_NO_ORDERS");
    EventSetTimer(5);                                  // export + handoff loop
    return(INIT_SUCCEEDED);
 }
@@ -54,7 +84,12 @@ void OnDeinit(const int reason)
 void OnTimer()
 {
    ExportNativeData();
-   ProcessOrderRequests();
+   // DEMO exposure QA is strictly read-only unless explicitly reconfigured.
+   if(!InpExposureOnly)
+   {
+      ProcessOrderRequests();
+      ManageAgenticTrailingStops();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -62,7 +97,7 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void ExportNativeData()
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
 
    // --- Account identity -------------------------------------------
    string identity = dir + "ABUTRON_NATIVE_ACCOUNT_V2_" + Nonce() + ".txt";
@@ -73,10 +108,11 @@ void ExportNativeData()
    WriteTextFile(identity, idJson);
 
    // --- Closed M5 bars (last 120) -----------------------------------
-   ulong from = TimeCurrent() - 120 * PeriodSeconds();
+   // Closed bars only. The previous datetime range had stop_time=0,
+   // which is earlier than start_time and could return zero bars.
    MqlRates rates[];
-   int count = CopyRates(_Symbol, InpExportPeriod, from, 0, rates);
-   if(count > 0) ArrayResize(rates, count);
+   int count = CopyRates(_Symbol, InpExportPeriod, 1, 120, rates);
+   if(count < 0) ArrayResize(rates, 0);
 
    string barsJson = "{\"bars\":[";
    for(int i = 0; i < ArraySize(rates); i++)
@@ -88,15 +124,39 @@ void ExportNativeData()
          TimeToString(r.time, TIME_DATE|TIME_SECONDS),
          TimeToString(r.time + PeriodSeconds(InpExportPeriod), TIME_DATE|TIME_SECONDS),
          r.open, r.high, r.low, r.close, r.tick_volume,
-         Bid, Ask, (int)(Ask - Bid), _Point, _Point);
+         SymbolInfoDouble(_Symbol, SYMBOL_BID),
+         SymbolInfoDouble(_Symbol, SYMBOL_ASK),
+         (int)((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
+                SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point),
+         _Point, _Point);
    }
    // Remove trailing comma manually (StringTrimRight only trims whitespace)
-   int lastComma = StringFindLast(barsJson, ",");
-   if(lastComma >= 0)
-      barsJson = StringSubstr(barsJson, 0, lastComma);
+   if(StringLen(barsJson) > 0 && StringSubstr(barsJson, StringLen(barsJson)-1, 1) == ",")
+      barsJson = StringSubstr(barsJson, 0, StringLen(barsJson)-1);
    barsJson += "]}";
    string barsFile = dir + "ABUTRON_NATIVE_BARS_V2_" + Nonce() + ".txt";
    WriteTextFile(barsFile, barsJson);
+
+   // --- Authenticated quote snapshot (bid/ask/tick geometry) -------
+   // Separate from bars: the bar file has OHLC only. Quotes must come
+   // from the broker's own SymbolInfoDouble at export time, bound to
+   // the same nonce/login/server/session. Never derive quotes from
+   // bar close.
+   string quotesFile = dir + "ABUTRON_NATIVE_QUOTES_V2_" + Nonce() + ".txt";
+   string qJson = "{\"quotes\":[";
+   string qs = StringFormat("{\"symbol\":\"%s\",\"bid\":%.5f,\"ask\":%.5f,"
+      "\"spread\":%.0f,\"tick_size\":%.5f,\"point\":%.5f,\"observed_at\":\"%s\"},",
+      _Symbol,
+      SymbolInfoDouble(_Symbol, SYMBOL_BID),
+      SymbolInfoDouble(_Symbol, SYMBOL_ASK),
+      (int)((SymbolInfoDouble(_Symbol, SYMBOL_ASK) -
+             SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point),
+      _Point, _Point,
+      TimeStampToStr(TimeCurrent()));
+   qJson += qs;
+   qJson = StringSubstr(qJson, 0, StringLen(qJson) - 1); // strip trailing comma
+   qJson += "]}";
+   WriteTextFile(quotesFile, qJson);
 
    // --- Order flow: aggressor trades since last export -------------
    string ofJson = "{\"trades\":[";
@@ -120,13 +180,113 @@ void ExportNativeData()
          (r.close >= r.open) ? "buy" : "sell",
          TimeToString(r.time, TIME_DATE|TIME_SECONDS));
    }
-   int ofComma = StringFindLast(ofJson, ",");
-   if(ofComma >= 0)
-      ofJson = StringSubstr(ofJson, 0, ofComma);
+   if(StringLen(ofJson) > 0 && StringSubstr(ofJson, StringLen(ofJson)-1, 1) == ",")
+      ofJson = StringSubstr(ofJson, 0, StringLen(ofJson)-1);
    ofJson += "]}";
    string oflowFile = dir + "ABUTRON_ORDER_FLOW_V2_" + Nonce() + ".txt";
    WriteTextFile(oflowFile, ofJson);
    WriteTextFile(lastFile, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
+
+   // --- Broker-native exposure snapshot (Issue #36) -----------------
+   // Never attest flat positions from a disconnected terminal.
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED))
+      return;
+   // Open positions + account equity/balance, HMAC-authenticated by the
+   // activation secret and bound to THIS account (connection_id + login).
+   // The Python worker verifies the HMAC sig, the nonce freshness and
+   // account-binding before certifying exposure — a fabricated snapshot
+   // without the activation secret cannot certify.
+   //
+   // JSON escaping: in MQL5 a string literal "\\" is a single backslash
+   // and "\"" is a quote; to emit valid JSON the quotes must be "\""
+   // (NOT "\\\\\\\"), otherwise json.loads on the Python side fails.
+   string loginStr = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
+   double equityD  = AccountInfoDouble(ACCOUNT_EQUITY);
+   // Nonce: ABUTRON_NATIVE_<login>_<unix_ts> — Python parses login +
+   // freshness from this; the HMAC sig provides real authentication.
+   string expNonce = StringFormat("ABUTRON_NATIVE_%s_%d", loginStr,
+                                  (long)TimeGMT());
+
+   // Collect ticket list and sort ascending for a deterministic canonical.
+   ulong allTickets[];
+   int posCount = PositionsTotal();
+   ArrayResize(allTickets, posCount);
+   int n = 0;
+   for(int i = 0; i < PositionsTotal(); i++)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t != 0) allTickets[n++] = t;
+   }
+   // A failed ticket read is an incomplete inventory, NOT broker-flat.
+   if(n != posCount)
+      return;
+   ArrayResize(allTickets, n);
+   ArraySort(allTickets);
+
+   string positionsCanon = "";
+   string posJson = "";
+   for(int k = 0; k < ArraySize(allTickets); k++)
+   {
+      ulong ticket = allTickets[k];
+      if(!PositionSelectByTicket(ticket))
+         return;  // session/position changed: do not publish partial proof.
+      string sym = PositionGetString(POSITION_SYMBOL);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl   = PositionGetDouble(POSITION_SL);
+      double tp   = PositionGetDouble(POSITION_TP);
+      double vol  = PositionGetDouble(POSITION_VOLUME);
+      int type    = (int)PositionGetInteger(POSITION_TYPE);
+      ENUM_ORDER_TYPE ordType = (type == POSITION_TYPE_BUY)
+                                ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      string dir  = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+      double swap = PositionGetDouble(POSITION_SWAP);
+      // MQL5: bool OrderCalcProfit(type, symbol, volume, open, close, profit).
+      // Reject missing SL, broker calculation failures, or non-loss geometry.
+      double calcProfit = 0.0;
+      bool ocVerified = (sl > 0.0
+                         && OrderCalcProfit(ordType, sym, vol, entry, sl,
+                                            calcProfit)
+                         && MathIsValidNumber(calcProfit)
+                         && calcProfit < 0.0);
+      double stopRiskUsd = ocVerified ? -calcProfit : 0.0;
+      if(k > 0) positionsCanon += ";";
+      positionsCanon += StringFormat("%I64d:%s:%s:%.2f:%.5f:%.5f:%.5f:%.2f:%s",
+                                     ticket, sym, dir, vol, entry, sl, tp,
+                                     stopRiskUsd, ocVerified ? "true" : "false");
+      posJson += StringFormat(
+         "{\"ticket\":%I64u,\"symbol\":\"%s\",\"direction\":\"%s\","
+         "\"volume\":%.2f,\"entry\":%.5f,\"sl\":%.5f,\"tp\":%.5f,"
+         "\"swap\":%.2f,\"stop_risk_usd\":%.2f,\"ordercalcprofit_verified\":%s},",
+         ticket, sym, dir, vol, entry, sl, tp, swap, stopRiskUsd,
+         ocVerified ? "true" : "false");
+   }
+   if(StringLen(posJson) > 0 && StringSubstr(posJson, StringLen(posJson)-1, 1) == ",")
+      posJson = StringSubstr(posJson, 0, StringLen(posJson)-1);
+
+   // The signed wire format is mirrored in Python build_exposure_canonical.
+   // Include every broker-money field that CRM can use for certification.
+   string expServer = AccountInfoString(ACCOUNT_SERVER);
+   string expCurrency = AccountInfoString(ACCOUNT_CURRENCY);
+   double balanceD = AccountInfoDouble(ACCOUNT_BALANCE);
+   string expChallenge = Challenge();
+   string canonical = StringFormat("%s|%s|%s|%s|%s|%s|%s|%s|%d|%s",
+         InpConnectionId, loginStr, expServer, expCurrency,
+         DoubleToString(equityD, 2), DoubleToString(balanceD, 2),
+         expNonce, expChallenge, n, positionsCanon);
+   if(g_activation_secret == "")
+      return;  // Without provisioned key, never publish certifiable evidence.
+   string sig = HmacSha256Hex(g_activation_secret, canonical);
+   string expJson = StringFormat(
+      "{\"nonce\":\"%s\",\"challenge\":\"%s\",\"connection_id\":\"%s\","
+      "\"login\":\"%s\",\"server\":\"%s\",\"equity\":%s,\"balance\":%s,"
+      "\"currency\":\"%s\",\"position_count\":%d,\"sig\":\"%s\","
+      "\"positions\":[",
+      expNonce, expChallenge, InpConnectionId, loginStr, expServer,
+      DoubleToString(equityD, 2), DoubleToString(balanceD, 2),
+      expCurrency, n, sig);
+   expJson += posJson + "]}";
+   string exposureFile = dir + "ABUTRON_NATIVE_EXPOSURE_V2_" + expNonce + ".txt";
+   WriteTextFile(exposureFile, expJson);
 }
 
 //+------------------------------------------------------------------+
@@ -134,13 +294,13 @@ void ExportNativeData()
 //+------------------------------------------------------------------+
 void ProcessOrderRequests()
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
    string pending = dir + "ABUTRON_REQ_PENDING.json";
    if(!FileIsExist(pending)) return;
 
    // Open and read the pending request
-   int h = FileOpen(pending, FILE_READ | FILE_TXT);
-   if(h <= 0) { FileDelete(pending); return; }
+   int h = FileOpen(pending, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+   if(h == INVALID_HANDLE) { return; }
    string body = FileReadString(h);
    FileClose(h);
 
@@ -190,8 +350,9 @@ void ProcessOrderRequests()
    }
 
    double price = 0.0;
-   if(dirn == "BUY")  price = Ask;
-   else               price = Bid;
+   // Use the requested instrument, not whichever chart hosts the EA.
+   if(dirn == "BUY")  price = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   else               price = SymbolInfoDouble(symbol, SYMBOL_BID);
 
    // Floor volume to broker lot step — never round up.
    // If the floored lot is below the minimum, REJECT (not increase).
@@ -207,7 +368,7 @@ void ProcessOrderRequests()
 
    MqlTradeRequest req;
    MqlTradeResult  res;
-   Zero(req); Zero(res);
+   ZeroMemory(req); ZeroMemory(res);
    req.action    = TRADE_ACTION_DEAL;
    req.symbol    = symbol;
    req.volume    = normVol;
@@ -216,6 +377,37 @@ void ProcessOrderRequests()
    req.tp        = tp;
    req.type      = (dirn == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    req.deviation = 10;
+   req.magic     = InpTradeMagic;
+
+   // Validate actual broker stop-risk, not raw AI position_size * price.
+   // InpRiskFraction is the configured per-trade PERCENT, e.g. 0.15%.
+   double brokerStopPnL = 0.0;
+   double accountEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(price <= 0.0 || sl <= 0.0 || tp <= 0.0 || accountEquity <= 0.0 ||
+      InpRiskFraction <= 0.0 ||
+      !OrderCalcProfit(req.type, symbol, normVol, price, sl, brokerStopPnL) ||
+      !MathIsValidNumber(brokerStopPnL) || brokerStopPnL >= 0.0 ||
+      -brokerStopPnL > accountEquity * InpRiskFraction / 100.0)
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "BROKER_NATIVE_STOP_RISK_INVALID",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
+
+   // Run the broker's real margin/filling/stop validation before OrderSend.
+   MqlTradeCheckResult nativeCheck;
+   ZeroMemory(nativeCheck);
+   if(!OrderCheck(req, nativeCheck) ||
+      (nativeCheck.retcode != TRADE_RETCODE_DONE &&
+       nativeCheck.retcode != TRADE_RETCODE_PLACED &&
+       nativeCheck.retcode != 0))
+   {
+      WriteReceipt(reqId, 0, "REJECTED", "BROKER_NATIVE_ORDERCHECK_FAILED",
+                   0.0, 0.0, sl, tp, "");
+      FileDelete(pending);
+      return;
+   }
 
    if(OrderSend(req, res))
    {
@@ -224,7 +416,7 @@ void ProcessOrderRequests()
       {
          // Real broker ACK — write native receipt with ticket/deal
          WriteReceipt(reqId, res.order, "ACK", "NATIVE_ACK",
-                      res.price, res.volume, sl, tp, LongToString(res.deal));
+                      res.price, res.volume, sl, tp, IntegerToString((long)res.deal));
       }
       else
       {
@@ -264,10 +456,12 @@ double NormalizeLots(double v, string symbol)
 //+------------------------------------------------------------------+
 void WriteTextFile(string filename, string content)
 {
-   int h = FileOpen(filename, FILE_WRITE | FILE_TXT);
-   if(h > 0)
+   // Python reads UTF-8: MQL5 FILE_TXT without FILE_ANSI defaults to UTF-16.
+   int h = FileOpen(filename, FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+   if(h != INVALID_HANDLE)
    {
-      FileWrite(h, content);
+      FileWriteString(h, content);
+      FileFlush(h);
       FileClose(h);
    }
 }
@@ -279,7 +473,7 @@ void WriteReceipt(string reqId, long ticket, string state, string reason,
                   double price, double volume, double sl, double tp,
                   string deal)
 {
-   string dir = "MQL5\\Files\\";
+   string dir = "";  // FileOpen paths are relative to the MQL5/Files sandbox.
    string file = dir + "ABUTRON_NATIVE_RECEIPTS_V2_" + Nonce() + ".txt";
    string json = StringFormat(
       "{\"request_id\":\"%s\",\"ticket\":%d,\"state\":\"%s\",\"reason\":\"%s\",\"login\":%d,\"price\":%.5f,\"volume\":%.2f,\"sl\":%.5f,\"tp\":%.5f,\"deal\":\"%s\",\"ts\":\"%s\"}",
@@ -288,6 +482,11 @@ void WriteReceipt(string reqId, long ticket, string state, string reason,
       price, volume, sl, tp,
       deal, TimeStampToStr(TimeCurrent()));
    WriteTextFile(file, json);
+}
+
+string TimeStampToStr(datetime ts)
+{
+   return(TimeToString(ts, TIME_DATE|TIME_SECONDS));
 }
 
 string Nonce()
@@ -299,13 +498,16 @@ string Nonce()
 string Challenge()
 {
    return(StringFormat("%d", AccountInfoInteger(ACCOUNT_LOGIN) +
-                       (long)ServerTime()));
+                       (long)TimeTradeServer()));
 }
 
 string ActivationRevision()
 {
-   return(CryptHash(StringFormat("%s|%d", InpConnectionId,
-                                 InpActivationSeed)));
+   if(g_activation_secret == "")
+      return("");
+   return(HmacSha256Hex(g_activation_secret,
+                        StringFormat("%s|%I64d", InpConnectionId,
+                                     InpActivationSeed)));
 }
 
 //+------------------------------------------------------------------+
@@ -320,16 +522,18 @@ string LoadActivationSecret()
 {
    if(InpActivationSecret != "")
       return(InpActivationSecret);
-   string file = "MQL5\\Files\\ABUTRON_ACTIVATION_SECRET.txt";
+   string file = "ABUTRON_ACTIVATION_SECRET.txt";
    if(FileIsExist(file))
    {
-      int h = FileOpen(file, FILE_READ | FILE_TXT);
-      if(h > 0)
+      int h = FileOpen(file, FILE_READ | FILE_TXT | FILE_ANSI, 0, CP_UTF8);
+      if(h != INVALID_HANDLE)
       {
-         string s = FileReadString(h);
+         string secret = FileReadString(h);
          FileClose(h);
-         if(StringLen(s) > 0)
-            return(StringTrim(s));
+         StringTrimLeft(secret);
+         StringTrimRight(secret);
+         if(StringLen(secret) > 0)
+            return(secret);
       }
    }
    return("");
@@ -421,7 +625,7 @@ string HmacSha256Hex(string key, string message)
 //+------------------------------------------------------------------+
 //| SHA-256 (uses uint for 32-bit words — valid MQL5 type)            |
 //+------------------------------------------------------------------+
-string Sha256Hex(ushort input[], int inputLen)
+string Sha256Hex(ushort &inputBytes[], int inputLen)
 {
    uint H[8];
    H[0]=0x6a09e667; H[1]=0xbb67ae85; H[2]=0x3c6ef372; H[3]=0xa54ff53a;
@@ -441,7 +645,7 @@ string Sha256Hex(ushort input[], int inputLen)
    ushort bytes[];
    ArrayResize(bytes, inputLen + 72);
    for(int i = 0; i < inputLen; i++)
-      bytes[i] = input[i];
+      bytes[i] = inputBytes[i];
    bytes[inputLen] = 0x80;
 
    ulong bitLen = (ulong)inputLen * 8;
@@ -449,6 +653,10 @@ string Sha256Hex(ushort input[], int inputLen)
    if(padLen == 64) padLen = 0;
    int totalLen = inputLen + 1 + padLen + 8;
    ArrayResize(bytes, totalLen);
+   // MQL5 ArrayResize does not promise zeroed new storage. SHA-256 needs
+   // explicit 0x00 padding or the same input may hash incorrectly.
+   for(int i = inputLen + 1; i < totalLen - 8; i++)
+      bytes[i] = 0;
 
    // Length bytes MUST be masked to 8 bits each
    bytes[totalLen - 8] = (ushort)((bitLen >> 56) & 0xFF);
@@ -494,10 +702,10 @@ string Sha256Hex(ushort input[], int inputLen)
    string hex = "";
    for(int i = 0; i < 8; i++)
    {
-      hex += StringFormat("%02x", (ushort)(H[i] >> 24));
-      hex += StringFormat("%02x", (ushort)(H[i] >> 16));
-      hex += StringFormat("%02x", (ushort)(H[i] >> 8));
-      hex += StringFormat("%02x", (ushort)(H[i]));
+      hex += StringFormat("%02x", (uint)((H[i] >> 24) & 0xFF));
+      hex += StringFormat("%02x", (uint)((H[i] >> 16) & 0xFF));
+      hex += StringFormat("%02x", (uint)((H[i] >> 8) & 0xFF));
+      hex += StringFormat("%02x", (uint)(H[i] & 0xFF));
    }
    return(hex);
 }
@@ -506,7 +714,7 @@ string Sha256Hex(ushort input[], int inputLen)
 //| Convert hex string to byte array (reference param — MQL5 cannot  |
 //| return arrays from functions)                                   |
 //+------------------------------------------------------------------+
-void HexToBytes(string hex, ushort bytes[])
+void HexToBytes(string hex, ushort &bytes[])
 {
    int len = StringLen(hex) / 2;
    ArrayResize(bytes, len);
@@ -550,11 +758,131 @@ double JsonNum(string json, string key)
    string num = "";
    while(pos < StringLen(json))
    {
-      char c = StringGetCharacter(json, pos);
+      ushort c = StringGetCharacter(json, pos);
       if((c >= '0' && c <= '9') || c == '.' || c == '-')
-         num += c, pos++;
+      {
+         num += StringSubstr(json, pos, 1);
+         pos++;
+      }
       else break;
    }
    return(StringToDouble(num));
 }
 //+------------------------------------------------------------------+
+
+
+//+------------------------------------------------------------------+
+//| Native MT5 trailing: broker-side SLTP, actual retcode + readback   |
+//| Only this V9 writer's magic-numbered positions may be modified.   |
+//+------------------------------------------------------------------+
+void ManageAgenticTrailingStops()
+{
+   if(InpExposureOnly || !InpTrailingEnabled || InpTrailingAtrMult <= 0.0)
+      return;
+   if(AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO)
+      return;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpTradeMagic)
+         continue;
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      long side = PositionGetInteger(POSITION_TYPE);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double oldSL = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      if(entry <= 0.0 || oldSL <= 0.0 || tp <= 0.0)
+         continue;
+      if((side == POSITION_TYPE_BUY && oldSL >= entry && oldSL >= tp) ||
+         (side == POSITION_TYPE_SELL && oldSL <= entry && oldSL <= tp))
+         continue;
+
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol,tick) || tick.bid <= 0.0 || tick.ask <= 0.0)
+         continue;
+      double favorable = (side == POSITION_TYPE_BUY) ?
+                         tick.bid - entry : entry - tick.ask;
+      double riskDistance = MathAbs(entry - oldSL);
+      if(riskDistance <= 0.0 || favorable < riskDistance)
+         continue;
+
+      int atrHandle = iATR(symbol, PERIOD_M5, 14);
+      if(atrHandle == INVALID_HANDLE)
+         continue;
+      double atr[1];
+      int copied = CopyBuffer(atrHandle, 0, 1, 1, atr);
+      IndicatorRelease(atrHandle);
+      if(copied != 1 || !MathIsValidNumber(atr[0]) || atr[0] <= 0.0)
+         continue;
+
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+      if(point <= 0.0 || tickSize <= 0.0)
+         continue;
+      long stops = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      long freeze = SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+      double brokerDistance = (double)MathMax(stops, freeze) * point + tickSize;
+      double gap = InpTrailingAtrMult * atr[0];
+      double target = (side == POSITION_TYPE_BUY) ?
+                      MathMax(entry, tick.bid - gap) :
+                      MathMin(entry, tick.ask + gap);
+      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+      target = NormalizeDouble(target, digits);
+      if(side == POSITION_TYPE_BUY)
+      {
+         if(target <= oldSL + tickSize ||
+            target >= tick.bid - brokerDistance || target >= tp)
+            continue;
+      }
+      else
+      {
+         if(target >= oldSL - tickSize ||
+            target <= tick.ask + brokerDistance || target <= tp)
+            continue;
+      }
+      MqlTradeRequest modify;
+      MqlTradeResult result;
+      ZeroMemory(modify); ZeroMemory(result);
+      modify.action = TRADE_ACTION_SLTP;
+      modify.symbol = symbol;
+      modify.position = ticket;
+      modify.sl = target;
+      modify.tp = tp;
+      modify.magic = InpTradeMagic;
+      bool sent = OrderSend(modify,result);
+      double readback = 0.0;
+      bool found = PositionSelectByTicket(ticket);
+      if(found)
+         readback = PositionGetDouble(POSITION_SL);
+      bool verified = sent && result.retcode == TRADE_RETCODE_DONE &&
+                      found && MathAbs(readback - target) <= tickSize;
+      WriteAgenticTrailingReceipt(ticket, symbol, oldSL, target,
+                                 readback, tp, result.retcode, verified);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Broker-side trailing receipts, separate from entry ACK files      |
+//+------------------------------------------------------------------+
+void WriteAgenticTrailingReceipt(ulong ticket, string symbol,
+                                double previousSL, double requestedSL,
+                                double brokerSL, double tp,
+                                uint retcode, bool verified)
+{
+   string fname = "ABUTRON_NATIVE_TRAILING_V1_" +
+                  IntegerToString((long)ticket) + "_" +
+                  IntegerToString((long)TimeCurrent()) + ".json";
+   string status = verified ? "BROKER_READBACK_VERIFIED" : "UNKNOWN";
+   string payload = StringFormat(
+      "{\"connection_id\":\"%s\",\"login\":%I64d," +
+      "\"ticket\":%I64d,\"symbol\":\"%s\"," +
+      "\"previous_sl\":%.8f,\"requested_sl\":%.8f," +
+      "\"broker_sl\":%.8f,\"tp\":%.8f," +
+      "\"retcode\":%u,\"state\":\"%s\"}",
+      InpConnectionId, AccountInfoInteger(ACCOUNT_LOGIN),
+      (long)ticket, symbol, previousSL, requestedSL,
+      brokerSL, tp, retcode, status);
+   WriteTextFile(fname, payload);
+}
