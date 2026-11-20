@@ -574,7 +574,7 @@ void ApplyTrailingStops()
       ZeroMemory(mreq);
       ZeroMemory(mres);
       mreq.action    = TRADE_ACTION_SLTP;
-      mreq.ticket    = ticket;
+      mreq.order     = ticket;
       mreq.sl        = trailStop;
       mreq.deviation = 10;
 

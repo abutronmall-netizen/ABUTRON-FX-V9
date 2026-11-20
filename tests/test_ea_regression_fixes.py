@@ -119,6 +119,9 @@ def test_trailing_uses_modifyorder(source):
     assert "TRADE_ACTION_SLTP" in source, (
         "ApplyTrailingStops must use TRADE_ACTION_SLTP to modify the SL")
     assert "mreq.sl        = trailStop;" in source
+    assert "mreq.order     = ticket;" in source, (
+        "ApplyTrailingStops must set mreq.order (MQL5 MqlTradeRequest "
+        "uses 'order', not 'ticket') for the SLTP modify")
 
 
 def test_trailing_never_widens(source):
