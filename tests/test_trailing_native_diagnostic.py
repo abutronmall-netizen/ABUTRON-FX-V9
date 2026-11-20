@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-SOURCE = Path(__file__).with_name("diagnose_trailing_native.py")
+SOURCE = Path(__file__).resolve().parents[1] / "ops/v9-cutover/diagnose_trailing_native.py"
 spec = importlib.util.spec_from_file_location("diagnose_trailing_native", SOURCE)
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
