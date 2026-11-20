@@ -23,12 +23,15 @@ from .writer_gateway import SingleWriterGateway
 class NativeDispatcher:
     def __init__(self, event_log: EventLog,
                  gateway: SingleWriterGateway,
-                 receipt_mgr: ReceiptManager):
+                 receipt_mgr: ReceiptManager,
+                 owner_native_authority: Any = None):
         self.log = event_log
         self.gateway = gateway
         self.receipts = receipt_mgr
+        self.owner_native_authority = owner_native_authority
 
-    def dispatch_account(self, connection_id: str) -> Dict[str, Any]:
+    def dispatch_account(self, connection_id: str,
+                         candidate_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """Dispatch all RESERVED candidates for one account.
 
         Before sending, each candidate is gated by the owner-wide
@@ -51,22 +54,38 @@ class NativeDispatcher:
             # Never authorize an order from registry-estimated stop risk.
             # Only independently reconciled, account-bound MT5 position
             # inventories and OrderCalcProfit stop losses may open headroom.
-            from ..risk.risk_engine import RiskEngine
-            exposure = RiskEngine(self.log).aggregate_owner_risk(owner_id)
+            if self.owner_native_authority is not None:
+                from ..risk.owner_native_authority import NativeOwnerRiskError
+                try:
+                    exposure = self.owner_native_authority.current_owner(connection_id)
+                    if exposure["owner_id"] != owner_id:
+                        raise NativeOwnerRiskError("CRM_OWNER_ID_CHANGED")
+                except (NativeOwnerRiskError, OSError, ValueError, KeyError) as exc:
+                    exposure = {"owner_risk_certified":False,
+                                "cap_exceeded":None,
+                                "issues":[type(exc).__name__+":"+str(exc)[:90]]}
+            else:
+                from ..risk.risk_engine import RiskEngine
+                exposure = RiskEngine(self.log).aggregate_owner_risk(owner_id)
             if (exposure.get("owner_risk_certified") is not True
                     or exposure.get("cap_exceeded") is not False):
                 # Block all RESERVED candidates for this owner — do NOT
                 # send any order until exposure is reconciled.
                 blocked = self._block_for_incomplete_exposure(
-                    connection_id, owner_id, exposure)
+                    connection_id, owner_id, exposure, candidate_ids)
                 return {"connection_id": connection_id, "sent": 0,
                         "blocked": blocked,
                         "error": "BLOCKED_INCOMPLETE_EXPOSURE",
                         "exposure": exposure}
 
         # Collect reserved (RESERVED state) candidates
-        candidates = [self._load_candidate(cid)
-                      for cid in self._reserved_candidate_ids(connection_id)]
+        eligible_ids = self._reserved_candidate_ids(connection_id)
+        # A production agentic tick may submit only its own reservations,
+        # never unrelated older queue items or another owner's candidates.
+        if candidate_ids is not None:
+            allowed = set(candidate_ids)
+            eligible_ids = [cid for cid in eligible_ids if cid in allowed]
+        candidates = [self._load_candidate(cid) for cid in eligible_ids]
         results = {"connection_id": connection_id, "sent": 0,
                    "ack": 0, "unknown": 0, "rejected": 0,
                    "details": []}
@@ -90,7 +109,9 @@ class NativeDispatcher:
 
     def _block_for_incomplete_exposure(self, connection_id: str,
                                        owner_id: str,
-                                       exposure: Dict) -> List[str]:
+                                       exposure: Dict,
+                                       candidate_ids: Optional[List[str]] = None
+                                       ) -> List[str]:
         """Block all RESERVED candidates when exposure is incomplete/unsafe.
 
         Sets candidate state to BLOCKED_INCOMPLETE_EXPOSURE and logs
@@ -99,7 +120,10 @@ class NativeDispatcher:
         blocked_ids = []
         from .state import state_machine
         from ..events import make_event
+        allowed = set(candidate_ids) if candidate_ids is not None else None
         for cid in self._reserved_candidate_ids(connection_id):
+            if allowed is not None and cid not in allowed:
+                continue
             cand = self._load_candidate(cid)
             if cand is None:
                 continue
@@ -151,15 +175,19 @@ class NativeDispatcher:
                     "outcome": "ACK", "receipt": sent["receipt_ref"]}
 
         if outcome == "UNKNOWN":
+            native_request_id = str(sent.get("request_id") or "")
+            unknown_reason = str(sent.get("reason") or "SEND_UNKNOWN")
+            if native_request_id:
+                unknown_reason = "REQUEST_ID=" + native_request_id + ";" + unknown_reason
             rid = self.receipts.record_unknown(
                 candidate_id=candidate["candidate_id"], connection_id=cid,
                 mt5_login=account["mt5_login"],
                 symbol=candidate["symbol"],
                 direction=candidate["direction"],
                 volume=candidate["volume"],
-                reason_code=sent.get("reason", "SEND_UNKNOWN"))
+                reason_code=unknown_reason)
             db.engine_db.set_candidate_state(candidate["candidate_id"], "UNKNOWN",
-                                          sent.get("reason", "SEND_UNKNOWN"))
+                                          unknown_reason)
             return {"candidate_id": candidate["candidate_id"],
                     "outcome": "UNKNOWN", "receipt_id": rid}
 

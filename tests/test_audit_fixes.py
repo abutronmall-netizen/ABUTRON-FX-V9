@@ -118,9 +118,11 @@ def test_provision_secret_writes_file(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         log = EventLog(os.path.join(tmpdir, "events.jsonl"))
         gw = SingleWriterGateway(log)
-        result = gw.provision_secret("conn-001", tmpdir)
+        native_dir = os.path.join(tmpdir, "MQL5", "Files")
+        os.makedirs(native_dir, mode=0o700)
+        result = gw.provision_secret("conn-001", native_dir)
         assert result is True
-        secret_path = os.path.join(tmpdir, "ABUTRON_ACTIVATION_SECRET.txt")
+        secret_path = os.path.join(native_dir, "ABUTRON_ACTIVATION_SECRET.txt")
         assert os.path.exists(secret_path)
         with open(secret_path) as fh:
             assert fh.read().strip() == "provisioned-secret-abc"
@@ -145,9 +147,11 @@ def test_provision_secret_sets_restrictive_permissions(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         log = EventLog(os.path.join(tmpdir, "events.jsonl"))
         gw = SingleWriterGateway(log)
-        result = gw.provision_secret("conn-001", tmpdir)
+        native_dir = os.path.join(tmpdir, "MQL5", "Files")
+        os.makedirs(native_dir, mode=0o700)
+        result = gw.provision_secret("conn-001", native_dir)
         assert result is True
-        secret_path = os.path.join(tmpdir, "ABUTRON_ACTIVATION_SECRET.txt")
+        secret_path = os.path.join(native_dir, "ABUTRON_ACTIVATION_SECRET.txt")
         mode = stat.S_IMODE(os.stat(secret_path).st_mode)
         assert mode == 0o600, f"expected 0600, got {oct(mode)}"
 
@@ -182,6 +186,8 @@ def test_arm_succeeds_with_provisioning(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         log = EventLog(os.path.join(tmpdir, "events.jsonl"))
         gw = SingleWriterGateway(log)
+        native_dir = os.path.join(tmpdir, "MQL5", "Files")
+        os.makedirs(native_dir, mode=0o700)
         ea_path = os.path.join(tmpdir, "test_ea.ex5")
         with open(ea_path, "wb") as f:
             f.write(b"fake-ea-binary")
@@ -189,7 +195,7 @@ def test_arm_succeeds_with_provisioning(monkeypatch):
         status = gw.arm(connection_id="conn-003", ea_path=ea_path,
                         expected_sha256=expected_sha,
                         activation_revision="rev1", broker="fpmarkets",
-                        mql5_files_dir=tmpdir)
+                        mql5_files_dir=native_dir)
         assert status.armed is True, "arm must succeed with secret provisioning"
 
 
