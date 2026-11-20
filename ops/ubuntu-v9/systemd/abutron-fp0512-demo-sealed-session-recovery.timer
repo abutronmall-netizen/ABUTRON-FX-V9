@@ -1,0 +1,12 @@
+[Unit]
+Description=ABUTRON FP DEMO 0512 sealed-session health and recovery every minute
+
+[Timer]
+OnBootSec=75s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Persistent=false
+Unit=abutron-fp0512-demo-sealed-session-recovery.service
+
+[Install]
+WantedBy=timers.target

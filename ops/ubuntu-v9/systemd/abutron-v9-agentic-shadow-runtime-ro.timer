@@ -1,0 +1,12 @@
+[Unit]
+Description=Continuously verify V9 pinned agentic shadow runtime without broker access
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=300s
+AccuracySec=10s
+Persistent=false
+Unit=abutron-v9-agentic-shadow-runtime-ro.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,40 @@
+[Unit]
+Description=ABUTRON V9 pinned agentic brain+RiskGate runtime smoke (SHADOW ONLY, NO BROKER ORDERS)
+After=local-fs.target abutron-v9-native-risk-audit-ro.service
+ConditionPathExists=/opt/abutron-v9-agentic-release-review/agentic_runtime_ro.py
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/abutron-v9-brain/.venv-a88f373/bin/python -B /opt/abutron-v9-agentic-release-review/agentic_runtime_ro.py
+WorkingDirectory=/opt/abutron-v9-agentic-release-review/pr37
+Environment=PYTHONPATH=/opt/abutron-v9-agentic-release-review/pr37/src
+Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-v9-agentic-shadow
+Environment=ABUTRON_BRAIN_DIR=/opt/abutron-v9-agentic-release-review/pr37/data/brains/unified_m5
+Environment=ABUTRON_ENV=demo
+Environment=ABUTRON_AGENTIC_ENGINE=true
+Environment=ABUTRON_LIVE_TRADING_ENABLED=false
+Environment=ABUTRON_RISKGUARD_ENABLED=true
+Environment=ABUTRON_GEMMA_ENABLED=false
+Environment=ABUTRON_DEBATE_ENABLED=false
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/abutron-v9-agentic-shadow
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+MemoryMax=900M
+CPUQuota=100%
+TasksMax=20
+TimeoutStartSec=40s
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,12 @@
+[Unit]
+Description=ABUTRON FP DEMO V9 private Telegram alert delivery every 30 seconds
+
+[Timer]
+OnBootSec=110s
+OnUnitInactiveSec=30s
+AccuracySec=3s
+Persistent=false
+Unit=abutron-fp-v9-phone-alert-ro.service
+
+[Install]
+WantedBy=timers.target

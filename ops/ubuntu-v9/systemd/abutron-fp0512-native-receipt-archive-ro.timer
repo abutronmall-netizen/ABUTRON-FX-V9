@@ -1,0 +1,12 @@
+[Unit]
+Description=ABUTRON FP DEMO 0512 native receipt archive every 15 seconds
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Persistent=false
+Unit=abutron-fp0512-native-receipt-archive-ro.service
+
+[Install]
+WantedBy=timers.target

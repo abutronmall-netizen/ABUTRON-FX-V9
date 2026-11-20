@@ -1,0 +1,26 @@
+[Unit]
+Description=ABUTRON V9 DEMO entry-hour shadow loss filter applied to native signals (NO ORDERS)
+After=abutron-v9-fp-demo-native-inference-ro.service abutron-v9-session-loss-research-ro.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -B /usr/local/lib/abutron-v9-realtrade-feedback/hour_shadow_decisions.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/abutron-v9-hour-shadow
+CPUQuota=25%
+MemoryMax=100M
+TasksMax=10
+TimeoutStartSec=20s

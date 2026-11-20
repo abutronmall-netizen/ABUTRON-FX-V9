@@ -1,0 +1,27 @@
+[Unit]
+Description=ABUTRON V9 research-only purged chronological owner model holdout comparison
+After=abutron-v9-all-owner-causal-candidate-trainer.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/abutron-v9-brain/.venv-a88f373/bin/python -B /usr/local/sbin/abutron-v9-four-owner-chronological-holdout-ro
+UMask=0077
+Environment=ABUTRON_ENV=demo
+Environment=ABUTRON_LIVE_TRADING_ENABLED=false
+Environment=ABUTRON_GEMMA_ENABLED=false
+Environment=ABUTRON_DATA_ROOT=/var/lib/abutron-v9-eight-account-learning/validation/chronological-runtime
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+ReadWritePaths=/var/lib/abutron-v9-eight-account-learning/validation
+MemoryMax=3G
+TasksMax=30
+TimeoutStartSec=300s
+StandardOutput=journal
+StandardError=journal

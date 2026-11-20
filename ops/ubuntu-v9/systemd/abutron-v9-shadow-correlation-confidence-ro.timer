@@ -1,0 +1,12 @@
+[Unit]
+Description=Recalculate V9 paired Brier quality with shared account/candle correlation every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+AccuracySec=20s
+Persistent=false
+Unit=abutron-v9-shadow-correlation-confidence-ro.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Deriv DEMO broker-reconciled losing hours every five minutes
+
+[Timer]
+OnBootSec=8min
+OnUnitInactiveSec=5min
+AccuracySec=20s
+Unit=abutron-v9-deriv-session-loss-research-ro.service
+
+[Install]
+WantedBy=timers.target
