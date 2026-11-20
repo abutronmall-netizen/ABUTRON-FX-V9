@@ -118,7 +118,7 @@ exists or is armed.
 
 - The isolated full Python suite and new synthetic account/nonce,
   positive/negative cost-contract tests must pass.
-- The earlier CI artifact SHA 2928de2045af743629dd2916ff29e41fe8e96d4d49d23895bf24b36177db717e is OBSOLETE because its native exporter compared broker tick timestamps with UTC. The corrected broker-server-clock source requires a NEW MetaEditor compilation and a separately verified EX5 checksum. No binary has been deployed.
+- Corrected broker-server-clock native source compiled with official MetaEditor (0 errors, 0 warnings) at commit d22561b. Independently downloaded and verified exact QA EX5 artifact SHA-256 ebffae968f5c56b1653d97731a7395accfed2cb2e997723e4d9bdaa3fdd005eb. This hash is recorded in mql5/AbutronFPMarketsNativeFeedParallelV305.ex5.sha256.txt and supersedes the earlier 2928de20 build. Nothing was deployed to a broker terminal.
 - **Do not reuse the existing V305 production EX5 checksum for a newly
   compiled artifact.** Compiled binary hashes must be verified separately.
 - The existing FP 0512 order bridge is **currently armed**, though recent
