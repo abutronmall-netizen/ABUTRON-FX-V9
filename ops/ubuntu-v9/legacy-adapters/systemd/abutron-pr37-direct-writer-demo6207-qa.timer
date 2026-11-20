@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh broker-native DEMO M5 bars and quotes for V9 agentic engine
+
+[Timer]
+OnBootSec=90s
+OnUnitInactiveSec=75s
+AccuracySec=3s
+Unit=abutron-pr37-direct-writer-demo6207-qa.service
+
+[Install]
+WantedBy=timers.target
