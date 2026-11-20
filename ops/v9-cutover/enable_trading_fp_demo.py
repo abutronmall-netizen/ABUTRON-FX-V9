@@ -194,6 +194,7 @@ def run_execute_cycle(suffix: str) -> dict:
         "--mode", "execute",
     ]
     import subprocess
+    started_ns = time.time_ns()
     result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
     status_path = Path(_account_paths(suffix)["data_root"]) / "status.json"
     if result.returncode != 0:
@@ -203,12 +204,14 @@ def run_execute_cycle(suffix: str) -> dict:
             "stderr": result.stderr[:500],
             "returncode": result.returncode,
         }
-    if status_path.is_file():
+    if status_path.is_file() and status_path.stat().st_mtime_ns >= started_ns:
         status = json.loads(status_path.read_text())
+        if status.get("account_suffix") != suffix:
+            return {"status": "EXECUTE_CYCLE_ACCOUNT_MISMATCH"}
         status["returncode"] = result.returncode
         return status
     return {
-        "status": "EXECUTE_CYCLE_OUTPUT",
+        "status": "EXECUTE_CYCLE_STALE_OR_MISSING_STATUS",
         "stdout": result.stdout[:500],
         "stderr": result.stderr[:500],
         "returncode": result.returncode,
@@ -228,27 +231,40 @@ def main() -> int:
     print(f"  Preset template: {PRESET_TEMPLATE}")
     print()
 
+    # Verify every DEMO CRM binding, preset and binary before writing any
+    # account's execution configuration. Existing feed-only terminals will
+    # fail here without affecting their running service.
     connection_ids = {}
     for suffix in ACCOUNTS:
         try:
             cid = resolve_connection_id(suffix)
+            paths = _account_paths(suffix)
+            preset = paths["qa_root"] / "terminal/MQL5/Presets/PR37WriterExposureOnly.set"
+            if not preset.is_file() or preset.is_symlink():
+                raise FileNotFoundError(f"NO_ACCOUNT_BOUND_FP_PRESET_{suffix}")
+            bound = _parse_preset(preset.read_text(encoding="utf-8"))
+            if not all(bound.get(k, "").strip('"')
+                       for k in ("InpConnectionId", "InpBrokerServer", "InpActivationSeed")):
+                raise ValueError(f"FP_PRESET_ACCOUNT_BINDING_MISSING_{suffix}")
+            if bound["InpConnectionId"].strip('"') != cid:
+                raise ValueError(f"FP_PRESET_CRM_ID_MISMATCH_{suffix}")
+            if not Path(paths["data_root"]).is_dir():
+                raise FileNotFoundError(f"FP_V9_DATA_ROOT_NOT_PREPARED_{suffix}")
+            verify_ex5_sha(suffix)
             connection_ids[suffix] = cid
-            preset_paths = write_preset(suffix)
-            paths_str = ", ".join(str(p) for p in preset_paths)
-            print(f"  [{suffix}] connection_id=resolved presets={paths_str} "
-                  f"InpExposureOnly=false InpTrailingEnabled=true "
-                  f"(account-bound inputs preserved, mode preserved)")
+            print(f"  [{suffix}] CRM, account preset, data root, and EX5 verified")
         except Exception as exc:
-            print(f"  [{suffix}] ERROR: {type(exc).__name__}: {exc}")
+            print(f"  [{suffix}] PREPARE ERROR: {type(exc).__name__}: {exc}")
             return 1
 
-    print("\n  Verifying deployed EX5 SHA against pinned checksum:")
+    # Only update execution flags, leaving all identity and authorization
+    # values intact. This is DEMO-only and never creates an override.
     for suffix in ACCOUNTS:
         try:
-            ex5_path = verify_ex5_sha(suffix)
-            print(f"  [{suffix}] EX5 OK ({ex5_path})")
+            paths = write_preset(suffix)
+            print(f"  [{suffix}] account-bound presets updated: {len(paths)}")
         except Exception as exc:
-            print(f"  [{suffix}] EX5 VERIFY ERROR: {type(exc).__name__}: {exc}")
+            print(f"  [{suffix}] PRESET ERROR: {type(exc).__name__}: {exc}")
             return 1
 
     print(f"\n  No operator override created. Risk invariants: NOT bypassed "

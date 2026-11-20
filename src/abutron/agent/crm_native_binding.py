@@ -113,25 +113,41 @@ class DemoNativeCRM:
                     and row["owner_status"] == "approved"):
                 raise CRMBindingError(
                     f"CRM_DEMO_{suffix}_BINDING_NOT_ACTIVE")
-            activation = db.execute(
-                f"""SELECT revision,desired_enabled,effective_enabled,
-                          connection_status,ack_revision,ack_expires_utc
-                   FROM {self.activation_table} WHERE connection_id=?""",
-                (cid,)).fetchone()
-        if activation is None:
-            raise CRMBindingError(f"CRM_DEMO_{suffix}_ACTIVATION_MISSING")
-        revision = activation["revision"]
-        try:
-            ack_current = float(activation["ack_expires_utc"]) > time.time()
-        except (TypeError, ValueError, OverflowError):
-            ack_current = False
-        enabled = (activation["desired_enabled"] == 1 and
-                   activation["effective_enabled"] == 1 and
-                   activation["connection_status"] == "CONNECTED" and
-                   activation["ack_revision"] == revision and ack_current)
-        if not enabled:
-            raise CRMBindingError(
-                f"CRM_DEMO_{suffix}_ORDER_SWITCH_OFF_OR_ACK_STALE")
+            if self.broker == "FP Markets":
+                # FP's existing native activation services already publish
+                # effective_enabled into apex_trade_controls. Unlike Deriv,
+                # FP has no per-account abutron_v4_*_activation_revision table.
+                activation = db.execute(
+                    """SELECT desired_enabled,effective_enabled,updated_at
+                       FROM apex_trade_controls WHERE connection_id=?""",
+                    (cid,)).fetchone()
+                if activation is None:
+                    raise CRMBindingError(
+                        f"CRM_FP_DEMO_{suffix}_TRADE_CONTROL_MISSING")
+                revision = str(activation["updated_at"])
+                enabled = (activation["desired_enabled"] == 1 and
+                           activation["effective_enabled"] == 1)
+            else:
+                activation = db.execute(
+                    f"""SELECT revision,desired_enabled,effective_enabled,
+                              connection_status,ack_revision,ack_expires_utc
+                       FROM {self.activation_table} WHERE connection_id=?""",
+                    (cid,)).fetchone()
+                if activation is None:
+                    raise CRMBindingError(
+                        f"CRM_DEMO_{suffix}_ACTIVATION_MISSING")
+                revision = activation["revision"]
+                try:
+                    ack_current = float(activation["ack_expires_utc"]) > time.time()
+                except (TypeError, ValueError, OverflowError):
+                    ack_current = False
+                enabled = (activation["desired_enabled"] == 1 and
+                           activation["effective_enabled"] == 1 and
+                           activation["connection_status"] == "CONNECTED" and
+                           activation["ack_revision"] == revision and ack_current)
+            if not enabled:
+                raise CRMBindingError(
+                    f"CRM_DEMO_{suffix}_ORDER_SWITCH_OFF_OR_ACK_STALE")
         # Authenticate the actual current HMAC-signed MT5 position feed.
         # The old QA report refreshes every 300 seconds and is not a
         # reliable authority for a 30-second V9 execution cycle.
@@ -183,7 +199,8 @@ class DemoNativeCRM:
             ea_sha256=self.expected_ea_sha,
             equity=account_eq, account_currency="USD",
             per_trade_risk_pct=0.15, portfolio_cap_pct=0.20,
-            symbols="Volatility 50 Index.0",
+            symbols=("Volatility 50 Index.0" if self.broker == "Deriv"
+                     else ",".join(sorted(cost["instruments"]))),
             native_positions_verified=1,
         )
         writer = dict(ea_path=str(ea), ea_sha256=self.expected_ea_sha,
