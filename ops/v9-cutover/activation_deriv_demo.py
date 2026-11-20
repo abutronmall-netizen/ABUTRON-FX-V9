@@ -25,11 +25,26 @@ EA_SHA = "9d4f6701993865d32fcd5d9e9781c7803e5f1a688bd8f1ca63e85b8eed173b86"
 
 
 def _account_paths(account_suffix: str) -> dict:
-    """Derive the standard path layout for a Deriv DEMO account."""
+    """Derive the standard path layout for a Deriv DEMO account.
+
+    The owner-risk report is published once by the shared 6207
+    supervisor publisher and read by every Deriv DEMO account.  The
+    cost report is account-specific: 6207 keeps its verified
+    supervisor-dir location, while 7593/9244 use per-account
+    ``abutron-deriv-v4-{suffix}`` directories.
+    """
+    # Shared owner-risk evidence: one publisher, all Deriv DEMO accounts.
+    owner_report = Path("/var/lib/abutron-v4-broker-crm-supervisor-6207/customer-wide-risk-evidence.json")
+    # Cost report: 6207 verified in supervisor dir; 7593/9244 in
+    # per-account abutron-deriv-v4-{suffix} dirs.
+    if account_suffix == "6207":
+        cost_report = Path("/var/lib/abutron-v4-broker-crm-supervisor-6207/v4-native-execution-cost-6207.json")
+    else:
+        cost_report = Path(f"/var/lib/abutron-deriv-v4-{account_suffix}/v4-native-execution-cost-{account_suffix}.json")
     return {
         "qa_root": Path(f"/var/lib/private/abutron-pr37-direct-writer-demo{account_suffix}-qa"),
-        "owner_report": Path(f"/var/lib/abutron-v4-broker-crm-supervisor-{account_suffix}/customer-wide-risk-evidence.json"),
-        "cost_report": Path(f"/var/lib/abutron-v4-broker-crm-supervisor-{account_suffix}/v4-native-execution-cost-{account_suffix}.json"),
+        "owner_report": owner_report,
+        "cost_report": cost_report,
         "activation_table": f"abutron_v4_{account_suffix}_activation_revision",
     }
 

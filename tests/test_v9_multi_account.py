@@ -261,19 +261,32 @@ def test_wrong_account_suffix_rejected(monkeypatch, tmp_path):
 
 
 def test_production_runner_path_derivation():
-    """_account_paths derives correct paths for any suffix."""
+    """_account_paths derives correct paths for any suffix.
+
+    Owner-risk report is shared across all Deriv DEMO accounts (published
+    by the 6207 supervisor).  Cost report is account-specific: 6207 keeps
+    the verified supervisor-dir location; 7593/9244 use per-account
+    abutron-deriv-v4-{suffix} directories.
+    """
     from abutron.agent.production_deriv_demo import _account_paths
     paths = _account_paths("6207")
     assert "6207" in str(paths["qa_root"])
-    assert "6207" in str(paths["owner"])
-    assert "6207" in str(paths["cost"])
+    assert paths["owner"] == "/var/lib/abutron-v4-broker-crm-supervisor-6207/customer-wide-risk-evidence.json"
+    assert paths["cost"] == "/var/lib/abutron-v4-broker-crm-supervisor-6207/v4-native-execution-cost-6207.json"
     assert "6207" in str(paths["data_root"])
 
     paths = _account_paths("7593")
     assert "7593" in str(paths["qa_root"])
-    assert "7593" in str(paths["owner"])
-    assert "7593" in str(paths["cost"])
+    # Owner is shared — points at the 6207 supervisor dir, not a 7593 dir.
+    assert paths["owner"] == "/var/lib/abutron-v4-broker-crm-supervisor-6207/customer-wide-risk-evidence.json"
+    assert paths["cost"] == "/var/lib/abutron-deriv-v4-7593/v4-native-execution-cost-7593.json"
     assert "7593" in str(paths["data_root"])
+
+    paths = _account_paths("9244")
+    assert "9244" in str(paths["qa_root"])
+    assert paths["owner"] == "/var/lib/abutron-v4-broker-crm-supervisor-6207/customer-wide-risk-evidence.json"
+    assert paths["cost"] == "/var/lib/abutron-deriv-v4-9244/v4-native-execution-cost-9244.json"
+    assert "9244" in str(paths["data_root"])
 
 
 def test_activation_module_account_sql():
@@ -303,6 +316,13 @@ def test_activation_module_paths():
     spec.loader.exec_module(mod)
     paths = mod._account_paths("7593")
     assert "7593" in str(paths["qa_root"])
-    assert "7593" in str(paths["owner_report"])
-    assert "7593" in str(paths["cost_report"])
+    # Owner is shared — published by the 6207 supervisor, read by all.
+    assert "abutron-v4-broker-crm-supervisor-6207" in str(paths["owner_report"])
+    assert "customer-wide-risk-evidence.json" in str(paths["owner_report"])
+    assert str(paths["cost_report"]) == "/var/lib/abutron-deriv-v4-7593/v4-native-execution-cost-7593.json"
     assert paths["activation_table"] == "abutron_v4_7593_activation_revision"
+
+    # 6207 keeps its verified supervisor-dir cost report.
+    paths_6207 = mod._account_paths("6207")
+    assert str(paths_6207["cost_report"]) == "/var/lib/abutron-v4-broker-crm-supervisor-6207/v4-native-execution-cost-6207.json"
+    assert "abutron-v4-broker-crm-supervisor-6207" in str(paths_6207["owner_report"])
