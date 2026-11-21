@@ -3,7 +3,7 @@ name: ABUTRON full-suite regression (isolated CI)
 on:
   pull_request:
   push:
-    branches: [arena/a097f5f5-abutron-fx-v9]
+    branches: [main, arena/a097f5f5-abutron-fx-v9]
 
 permissions:
   contents: read
