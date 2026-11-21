@@ -279,6 +279,11 @@ bool FP_ANNOUNCED_OFFLINE=false;
 // Read-only broker-history indicator attachment. In this isolated terminal
 // profile, MT5 discards indicator entries during chart initialization.
 // Attach the ALREADY signed indicator only after authenticated MT5 proof.
+// P1 fix: the history indicator name is configurable via InpHistoryIndicator
+// (default V101) so replacing V307 with V305 preserves the existing
+// account-specific V101 history functionality instead of auto-attaching
+// the older V100 indicator.
+input string InpHistoryIndicator = "AbutronFPAccountHistoryV101";
 bool FP_HISTORY_INSTALLED=false;
 int FP_HISTORY_HANDLE=INVALID_HANDLE;
 datetime FP_HISTORY_ATTEMPT_TIME=0;
@@ -291,7 +296,7 @@ void EnsureFPHistoryIndicator()
  for(int i=0;i<ChartIndicatorsTotal(0,0);i++)
  {
   string name=ChartIndicatorName(0,0,i);
-  if(StringFind(name,"AbutronFPAccountHistoryV100")>=0)
+  if(StringFind(name,InpHistoryIndicator)>=0)
   {
    FP_HISTORY_INSTALLED=true;
    Print("ABUTRON_FP_HISTORY_INDICATOR_ALREADY_ATTACHED");
@@ -299,7 +304,7 @@ void EnsureFPHistoryIndicator()
   }
  }
  ResetLastError();
- int handle=iCustom(_Symbol,_Period,"ABUTRON\\AbutronFPAccountHistoryV100");
+ int handle=iCustom(_Symbol,_Period,"ABUTRON\\"+InpHistoryIndicator);
  if(handle==INVALID_HANDLE)
  {
   Print("ABUTRON_FP_HISTORY_INDICATOR_CREATE_FAILED code=",GetLastError());
@@ -314,7 +319,7 @@ void EnsureFPHistoryIndicator()
  }
  FP_HISTORY_HANDLE=handle;
  FP_HISTORY_INSTALLED=true;
- Print("ABUTRON_FP_HISTORY_INDICATOR_ATTACHED_AFTER_BROKER_AUTH");
+ Print("ABUTRON_FP_HISTORY_INDICATOR_ATTACHED_AFTER_BROKER_AUTH: "+InpHistoryIndicator);
 }
 
 

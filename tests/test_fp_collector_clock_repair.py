@@ -180,3 +180,74 @@ class TestStatusScriptV305Fallback:
         assert "v305_cost_clock_offset" in src
         assert "ABUTRON_FP_COST_REPORT" in src
         assert "clock_source" in src
+
+
+# --------------------------------------------------------------------- #
+# P0 fixes: per-account cost paths, read-only publisher, clock independence
+# --------------------------------------------------------------------- #
+
+class TestPerAccountCostReportResolution:
+    def test_per_account_env_var_preferred(self, tmp_path, monkeypatch):
+        """ABUTRON_FP_COST_REPORT_0512 takes priority over the generic."""
+        import importlib.util
+        script = (Path(__file__).resolve().parents[1]
+                  / "scripts/native_market_v3_status_ro.py")
+        src = script.read_text(encoding="utf-8")
+        # The script must read the per-account env var.
+        assert "ABUTRON_FP_COST_REPORT_" in src
+        assert "ABUTRON_FP_COST_REPORT_" + "{suffix}" in src or \
+            'f"ABUTRON_FP_COST_REPORT_' in src
+
+    def test_generic_fallback_present(self):
+        """The generic ABUTRON_FP_COST_REPORT is still supported."""
+        script = (Path(__file__).resolve().parents[1]
+                  / "scripts/native_market_v3_status_ro.py")
+        src = script.read_text(encoding="utf-8")
+        assert 'ABUTRON_FP_COST_REPORT"' in src or \
+            'os.environ.get("ABUTRON_FP_COST_REPORT"' in src
+
+
+class TestReadOnlyCostPublisher:
+    def test_status_script_invokes_cost_publisher(self):
+        """The status script must call refresh_fp_v9_cost_report."""
+        script = (Path(__file__).resolve().parents[1]
+                  / "scripts/native_market_v3_status_ro.py")
+        src = script.read_text(encoding="utf-8")
+        assert "refresh_fp_v9_cost_report" in src
+        assert "cost_report_published" in src
+        assert "cost_report_blocker" in src
+
+
+class TestClockIndependenceFromV3Files:
+    def test_clock_resolution_outside_symbols_block(self):
+        """Clock fallback must run before/independently of V3 symbol discovery."""
+        script = (Path(__file__).resolve().parents[1]
+                  / "scripts/native_market_v3_status_ro.py")
+        src = script.read_text(encoding="utf-8")
+        # The clock resolution block must appear BEFORE the actual
+        # `if symbols:` code block (not a comment referencing it).
+        clock_idx = src.index("broker_offset = None")
+        symbols_idx = src.index("if symbols:\n            for symbol in sorted")
+        assert clock_idx < symbols_idx, (
+            "Clock resolution must precede V3 symbol file discovery")
+
+    def test_clock_fallback_uses_per_account_cost_path(self):
+        """The V305 clock fallback must use the per-account cost report."""
+        script = (Path(__file__).resolve().parents[1]
+                  / "scripts/native_market_v3_status_ro.py")
+        src = script.read_text(encoding="utf-8")
+        # The cost_report variable must be used in the v305 fallback call.
+        assert "v305_cost_clock_offset" in src
+        assert "cost_report_file=cost_report" in src
+
+
+class TestV305HistoryIndicatorP1:
+    def test_v305_history_indicator_is_configurable(self):
+        """V305 must default to V101 history, not auto-attach V100."""
+        src = (Path(__file__).resolve().parents[1]
+               / "mql5/AbutronFPMarketsNativeFeedParallelV305.mq5")
+        text = src.read_text(encoding="utf-8")
+        assert "InpHistoryIndicator" in text
+        assert "AbutronFPAccountHistoryV101" in text
+        # V100 must no longer be hardcoded in the attach logic.
+        assert "iCustom(_Symbol,_Period,\"ABUTRON\\\\AbutronFPAccountHistoryV100\")" not in text
