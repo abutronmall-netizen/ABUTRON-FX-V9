@@ -216,6 +216,14 @@ def read_native_fp_cost(
         "native_sample_utc": checked,
         "worker_nonce": nonce,
         "broker_source_sha256": hashlib.sha256(cost_bytes).hexdigest(),
+        # Clock-offset fields required by the FP collector fallback
+        # (v305_cost_clock_offset in native_market_v3.py). These are
+        # validated above from the raw V305 export and must be carried
+        # through to the materialized cost report so the collector can
+        # establish a verified broker clock without native history files.
+        "broker_clock_offset_seconds": int(broker_offset),
+        "broker_server_epoch": int(broker_epoch),
+        "sample_epoch": int(sample),
         "instruments": instruments,
     }
 
