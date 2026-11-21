@@ -2,7 +2,7 @@ name: FP V305 Native Cost MetaEditor Compile (QA Only)
 
 on:
   push:
-    branches: [fix/fp-v305-native-cost-20261120]
+    branches: [fix/fp-v305-native-cost-20261120, arena/a097f5f5-abutron-fx-v9]
     paths:
       - 'mql5/AbutronFPMarketsNativeFeedParallelV305.mq5'
       - '.github/workflows/fp-v305-native-cost-compile.yml'
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   compile-fp-v305-data-only:
@@ -96,6 +96,23 @@ jobs:
             Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5/AbutronFPMarketsNativeFeedParallelV305.ex5.sha256.txt')
           Write-Host "FP_V305_READ_ONLY_EX5_SHA256=$hash"
           Write-Host 'NO BROKER PROFILE, NO LIVE OR DEMO ACCOUNTS ATTACHED. NO DEPLOYMENT.'
+
+      - name: Commit updated EX5 SHA256 pin to branch (push only)
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $pin = 'mql5/AbutronFPMarketsNativeFeedParallelV305.ex5.sha256.txt'
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          $status = git status --porcelain $pin
+          if ([string]::IsNullOrWhiteSpace($status)) {
+            Write-Host 'SHA256 pin unchanged; no commit needed'
+            exit 0
+          }
+          git add $pin
+          git commit -m "ci(fp-v305): pin corrected MetaEditor EX5 SHA256"
+          git push
 
       - name: Upload compiler report and cost-source EX5 for QA only
         if: always()
