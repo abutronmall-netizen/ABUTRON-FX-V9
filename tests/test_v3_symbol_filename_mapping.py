@@ -54,3 +54,34 @@ def test_rejects_symlink(tmp_path):
     alias.symlink_to(p)
     with pytest.raises(OSError):
         broker_symbol_from_v3_file(alias)
+
+
+@pytest.mark.parametrize("ea_source", (
+    "AbutronFPMarketsNativeFeedParallelV305.mq5",
+    "ApexNativeWriter.mq5",
+))
+def test_all_13_configured_symbols_round_trip_exactly(tmp_path, ea_source):
+    """All 26 configured instruments retain broker identity in JSONL headers.
+
+    These are offline synthetic records, NOT evidence of live broker quotes.
+    """
+    import re
+
+    source = (Path(__file__).resolve().parents[1] / "mql5" / ea_source).read_text()
+    match = re.search(r'InpV3SymbolList\s*=\s*"([^"]+)"', source)
+    assert match is not None
+    symbols = match.group(1).split("|")
+    assert len(symbols) == 13 and len(set(symbols)) == 13
+    stems = {s.replace(" ", "_") for s in symbols}
+    assert len(stems) == 13
+    for symbol in symbols:
+        file = _write_v3(tmp_path, symbol)
+        assert broker_symbol_from_v3_file(file) == symbol
+
+
+def test_mql_multi_symbol_precision_is_broker_specific():
+    """Static contract check; live broker SYMBOL_DIGITS still requires MT5."""
+    source = (Path(__file__).resolve().parents[1] / "mql5" / "ApexMarketFeedV3.mq5").read_text()
+    assert "SymbolInfoInteger(sym,SYMBOL_DIGITS)" in source
+    assert "SymbolInfoInteger(symbol,SYMBOL_DIGITS)" in source
+    assert "_Digits" not in source
