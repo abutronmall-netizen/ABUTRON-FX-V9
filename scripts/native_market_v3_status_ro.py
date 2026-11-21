@@ -98,7 +98,21 @@ def scan():
     for suffix,(cid,login) in CID.items():
         root=Path("/var/lib/private/abutron-client-mt5-"+cid)
         binary=root/"terminal/MQL5/Indicators/ABUTRON/ApexMarketFeedV3.ex5"
-        entry={"account_suffix":suffix,"broker":"FP Markets","environment":"DEMO",
+        # Derive broker and server from the worker health file rather than
+        # hardcoding FP-specific values. The health file is written by the
+        # worker and contains the actual broker name and server.
+        health_path=root/"worker-health.json"
+        broker_name="FP Markets"
+        server_name="FPMarketsSC-Demo"
+        if health_path.is_file() and not health_path.is_symlink():
+            try:
+                import json as _json
+                health=_json.loads(health_path.read_text())
+                broker_name=health.get("broker",broker_name)
+                server_name=health.get("server",server_name)
+            except (OSError,ValueError,TypeError):
+                pass
+        entry={"account_suffix":suffix,"broker":broker_name,"environment":"DEMO",
                "indicator_pinned_on_disk":False,"native_chart_attested":False,
                "market_prints_verified":False,"symbols":[]}
         if binary.is_file() and not binary.is_symlink():
@@ -182,7 +196,7 @@ def scan():
         if symbols:
             for symbol in sorted(set(symbols))[:25]:
                 detail = read_v3(worker_root=str(root), connection_id=cid,
-                    login=login, server="FPMarketsSC-Demo", symbol=symbol,
+                    login=login, server=server_name, symbol=symbol,
                     approved_binary_sha256=SHA,
                     broker_clock_offset_seconds=broker_offset)
                 entry["symbols"].append(detail.summary())

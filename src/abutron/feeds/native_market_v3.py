@@ -26,6 +26,16 @@ from ..analytics.orderflow import Trade
 
 SCHEMA="abutron.v9.mt5.market_microstructure.readonly.v3"
 NAME=re.compile(r"ABUTRON_NATIVE_MARKET_V3_[A-Za-z0-9._-]+_\d{8}\.jsonl\Z")
+
+def _sanitize_file_symbol(symbol: str) -> str:
+    """Convert a broker symbol to its filename-safe variant.
+
+    Mirrors the MQL5 ApexMarketFeedV3 SanitizeFile(): spaces become
+    underscores, all other characters are kept if alphanumeric, dot,
+    dash, or underscore. Used for globbing V3 output files whose names
+    use the sanitized symbol while JSON content preserves the original.
+    """
+    return symbol.replace(" ", "_")
 HEX32=re.compile(r"[0-9a-f]{32}\Z")
 HEX64=re.compile(r"[0-9a-f]{64}\Z")
 # MQL5 MqlTick.flags: LAST=8, BUY=32, SELL=64.
@@ -278,7 +288,7 @@ def read_v3(
         expected_uid=(root/"terminal/MQL5/Files").stat().st_uid
         if files.stat().st_uid!=expected_uid:
             raise ValueError("NATIVE_EXPORT_DIRECTORY_OWNER_MISMATCH")
-        target=files.glob("ABUTRON_NATIVE_MARKET_V3_"+symbol+"_*.jsonl")
+        target=files.glob("ABUTRON_NATIVE_MARKET_V3_"+_sanitize_file_symbol(symbol)+"_*.jsonl")
         paths=sorted(target)
         if not paths or len(paths)>7:
             raise ValueError("NATIVE_V3_SOURCE_FILES_MISSING_OR_TOO_MANY")
@@ -301,7 +311,8 @@ def read_v3(
                 d=json.loads(raw)
                 if not isinstance(d,dict):
                     raise ValueError("NATIVE_V3_ROW_MALFORMED")
-                if (d.get("schema")!=SCHEMA or d.get("symbol")!=symbol or
+                if (d.get("schema")!=SCHEMA or
+                    _sanitize_file_symbol(d.get("symbol",""))!=_sanitize_file_symbol(symbol) or
                     d.get("account_login")!=str(login) or
                     d.get("broker_server")!=server or
                     d.get("environment")!="DEMO"):

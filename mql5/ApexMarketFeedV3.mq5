@@ -34,8 +34,25 @@ string Sanitize(string value)
    {
       ushort ch=StringGetCharacter(value,k);
       if((ch>=48 && ch<=57)||(ch>=65 && ch<=90)||
+         (ch>=97 && ch<=122)||ch==46||ch==45||ch==95||ch==32)
+         out+=ShortToString(ch);
+   }
+   return out;
+}
+string SanitizeFile(string value)
+{
+   // Filename-safe variant: replaces spaces with underscores so that
+   // Deriv symbols like "Volatility 50 Index.0" produce a clean
+   // filename while preserving the broker identity in JSON content.
+   string out="";
+   for(int k=0;k<StringLen(value);k++)
+   {
+      ushort ch=StringGetCharacter(value,k);
+      if((ch>=48 && ch<=57)||(ch>=65 && ch<=90)||
          (ch>=97 && ch<=122)||ch==46||ch==45||ch==95)
          out+=ShortToString(ch);
+      else if(ch==32)
+         out+="_";
    }
    return out;
 }
@@ -52,7 +69,7 @@ string RootFile()
    MqlDateTime t;
    TimeToStruct(TimeGMT(),t);
    return "ABUTRON_V9_NATIVE\\ABUTRON_NATIVE_MARKET_V3_"+
-      Sanitize(g_symbol)+"_"+StringFormat("%04d%02d%02d",t.year,t.mon,t.day)+".jsonl";
+      SanitizeFile(g_symbol)+"_"+StringFormat("%04d%02d%02d",t.year,t.mon,t.day)+".jsonl";
 }
 string Context()
 {

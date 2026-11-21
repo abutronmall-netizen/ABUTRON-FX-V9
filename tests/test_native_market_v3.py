@@ -176,3 +176,102 @@ def test_independent_native_history_clock_must_match_reconciliation(tmp_path):
     import pytest
     with pytest.raises(ValueError,match="RECONCILIATION_UNVERIFIED"):
         trusted_fp_demo_clock_offset(**args)
+
+
+def test_deriv_symbol_with_spaces_accepted(tmp_path:Path):
+    """Deriv symbols like 'Volatility 50 Index.0' must be accepted.
+
+    The V3 indicator sanitizes filenames (spaces -> underscores) but
+    preserves the original symbol in JSON content. read_v3 must
+    glob by the sanitized filename while accepting the original
+    symbol in identity checks.
+    """
+    worker=tmp_path/"worker"
+    files=worker/"terminal/MQL5/Files/ABUTRON_V9_NATIVE"
+    files.mkdir(parents=True)
+    binary=worker/"terminal/MQL5/Indicators/ABUTRON/ApexMarketFeedV3.ex5"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(BIN)
+    (worker/"worker-health.json").write_text(json.dumps({
+        "id":CONN,"broker":"Deriv","mode":"DEMO",
+        "server":"Deriv-Demo","status":"CONNECTED","heartbeat_fresh":True,
+        "nonce":"b"*32
+    }))
+    deriv_symbol="Volatility 50 Index.0"
+    deriv_file=deriv_symbol.replace(" ","_")
+    ms=int(time.time()*1000)-2000
+    base={"schema":"abutron.v9.mt5.market_microstructure.readonly.v3",
+          "symbol":deriv_symbol,"broker_server":"Deriv-Demo",
+          "account_login":LOGIN,"environment":"DEMO","time_msc":ms}
+    rows=[
+        {"record_type":"QUOTE","flags":2,"price":5000.0,
+         "bid":4999.9,"ask":5000.1,"volume_real":0.0,
+         "volume":0,"aggressor_side":"NONE"},
+        {"record_type":"MARKET_PRINT","flags":40,"price":5000.05,
+         "bid":4999.9,"ask":5000.1,"volume_real":1.0,
+         "volume":1,"aggressor_side":"BUY"},
+        {"record_type":"DOM","levels":[{"book_type":1,"price":5000.2,
+          "volume_real":10.0,"volume":10}]},
+        {"record_type":"STATUS","print_records":1,"quote_records":1,
+         "dom_records":1,"dropped_records":0,"dom_subscribed":True}
+    ]
+    def broker_time(row):
+        if row["record_type"] in ("QUOTE","MARKET_PRINT"):
+            return {**base,**row,"time_msc":ms+7200000}
+        return {**base,**row}
+    p=files/("ABUTRON_NATIVE_MARKET_V3_"+deriv_file+"_20261121.jsonl")
+    p.write_text("".join(json.dumps(broker_time(v))+"\n" for v in rows))
+    sha=hashlib.sha256(BIN).hexdigest()
+    result=read_v3(worker_root=str(worker),connection_id=CONN,
+        login=LOGIN,server="Deriv-Demo",symbol=deriv_symbol,
+        approved_binary_sha256=sha,broker_clock_offset_seconds=7200)
+    assert result.identity_verified
+    assert result.pinned_binary_verified
+    assert result.accepted_quotes>=1
+    assert result.accepted_market_prints>=1
+    # Not fully certified without terminal-log chart attestation,
+    # but the symbol with spaces is accepted and data is parsed.
+    assert "NATIVE_V3_ROW_IDENTITY_MISMATCH" not in result.blockers
+
+
+def test_deriv_symbol_sanitized_filename_identity(tmp_path:Path):
+    """When the caller passes the sanitized filename variant as the
+    symbol, read_v3 must still match it against the original symbol
+    stored in JSON content."""
+    worker=tmp_path/"worker"
+    files=worker/"terminal/MQL5/Files/ABUTRON_V9_NATIVE"
+    files.mkdir(parents=True)
+    binary=worker/"terminal/MQL5/Indicators/ABUTRON/ApexMarketFeedV3.ex5"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(BIN)
+    (worker/"worker-health.json").write_text(json.dumps({
+        "id":CONN,"broker":"Deriv","mode":"DEMO",
+        "server":"Deriv-Demo","status":"CONNECTED","heartbeat_fresh":True,
+        "nonce":"b"*32
+    }))
+    deriv_symbol="Volatility 50 Index.0"
+    deriv_file=deriv_symbol.replace(" ","_")
+    ms=int(time.time()*1000)-2000
+    base={"schema":"abutron.v9.mt5.market_microstructure.readonly.v3",
+          "symbol":deriv_symbol,"broker_server":"Deriv-Demo",
+          "account_login":LOGIN,"environment":"DEMO","time_msc":ms}
+    rows=[
+        {"record_type":"QUOTE","flags":2,"price":5000.0,
+         "bid":4999.9,"ask":5000.1,"volume_real":0.0,
+         "volume":0,"aggressor_side":"NONE"},
+        {"record_type":"STATUS","print_records":0,"quote_records":1,
+         "dom_records":0,"dropped_records":0,"dom_subscribed":False}
+    ]
+    def broker_time(row):
+        if row["record_type"] in ("QUOTE","MARKET_PRINT"):
+            return {**base,**row,"time_msc":ms+7200000}
+        return {**base,**row}
+    p=files/("ABUTRON_NATIVE_MARKET_V3_"+deriv_file+"_20261121.jsonl")
+    p.write_text("".join(json.dumps(broker_time(v))+"\n" for v in rows))
+    sha=hashlib.sha256(BIN).hexdigest()
+    # Pass the sanitized filename variant as the symbol
+    result=read_v3(worker_root=str(worker),connection_id=CONN,
+        login=LOGIN,server="Deriv-Demo",symbol=deriv_file,
+        approved_binary_sha256=sha,broker_clock_offset_seconds=7200)
+    assert result.identity_verified
+    assert result.accepted_quotes>=1
