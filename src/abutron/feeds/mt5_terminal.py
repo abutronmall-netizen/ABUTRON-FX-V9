@@ -35,6 +35,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -169,7 +170,7 @@ class Mt5TerminalManager:
                                  expert_name: str,
                                  ex5_path: str,
                                  expected_sha: str) -> str:
-        """Stage a feed EA binary in the terminal's MQL5/Experts directory.
+        """Stage a feed EA binary directly in MQL5/Experts/ABUTRON/.
 
         This is the mechanism for deploying V305 on chart03. The existing
         chart03 .chr file references the EA by name; when MT5 restarts, it
@@ -177,9 +178,16 @@ class Mt5TerminalManager:
         EX5 binary here ensures the next terminal initialization loads V305
         instead of the older V307.
 
-        The binary is staged under MQL5/Experts/<expert_name>/.ex5 using
-        the existing atomic-install pattern (hash-check, fsync, atomic
-        replace).
+        The binary is placed directly in MQL5/Experts/ABUTRON/ as
+        <EAName>.ex5 — NOT in a nested subdirectory. MT5's Experts loader
+        searches MQL5/Experts/ and subdirectories, but the .chr file
+        references the EA by its full relative path. Installing the binary
+        in the correct location ensures MT5 loads it.
+
+        For 1636, whose chart03 references V307
+        (``AbutronFPMarketsNativeFeedParallelV307_FP1636.ex5``), use
+        update_chart_reference() to change the chart reference to V305
+        before or after staging.
 
         Args:
             connection_id: The terminal connection ID.
@@ -190,28 +198,157 @@ class Mt5TerminalManager:
 
         Returns the destination path of the staged binary.
         """
-        if "/" in expert_name or expert_name.startswith("\\"):
-            raise Mt5Error("expert_name must be a backslash-relative path")
-        if ".." in expert_name:
-            raise Mt5Error("expert_name must not contain path traversal (..)")
-        if re.match(r"^[A-Za-z]:[\\/]", expert_name):
-            raise Mt5Error("expert_name must not be an absolute drive-letter path")
+        # Validate expert_name
+        self._validate_expert_name(expert_name, "expert_name")
 
         term = self._terminals.get(connection_id)
         if term is None:
             raise Mt5Error(f"terminal not found: {connection_id}")
 
-        # Resolve the Experts directory inside the terminal prefix
+        # Resolve the Experts directory inside the terminal prefix.
+        # The binary goes DIRECTLY in MQL5/Experts/ABUTRON/, NOT in a
+        # nested subdirectory. The expert_name "ABUTRON\\EAName" means
+        # the binary is MQL5/Experts/ABUTRON/EAName.ex5.
         experts_dir = os.path.join(
             term.wine_prefix, "drive_c", "Program Files",
             "MetaTrader 5", "MQL5", "Experts")
-        dest_dir = os.path.join(experts_dir, expert_name.replace("\\", os.sep))
+        # expert_name is "ABUTRON\\AbutronFPMarketsNativeFeedParallelV305"
+        # — the directory part is "ABUTRON", the binary filename is the
+        # basename + ".ex5". The binary sits directly in ABUTRON/, not
+        # in a subdirectory named after the EA.
+        dir_parts = expert_name.split("\\")
+        dest_dir = os.path.join(experts_dir, *dir_parts[:-1])
         os.makedirs(dest_dir, exist_ok=True)
-        dest_path = os.path.join(dest_dir, expert_name.split("\\")[-1] + ".ex5")
+        ea_basename = dir_parts[-1]
+        dest_path = os.path.join(dest_dir, ea_basename + ".ex5")
 
         self._atomic_install(ex5_path, dest_path, term.export_dir,
                              expected_sha=expected_sha)
         return dest_path
+
+    def update_chart_reference(self, connection_id: str,
+                               chart_file: str,
+                               old_ea_name: str,
+                               new_ea_name: str) -> None:
+        """Update a chart .chr file's EA reference from old to new.
+
+        Some accounts (e.g. 1636) have chart03 referencing a different EA
+        name (e.g. ``AbutronFPMarketsNativeFeedParallelV307_FP1636.ex5``)
+        rather than the standard V305 name. This method updates the
+        .chr file's binary reference so MT5 loads the corrected EA on
+        the next chart restoration.
+
+        The .chr file is a binary chart-state file. This method performs
+        a byte-level search-and-replace of the old EA name string with
+        the new EA name. The .chr file is backed up before modification.
+
+        Args:
+            connection_id: The terminal connection ID.
+            chart_file: The .chr filename (e.g. "chart03.chr").
+            old_ea_name: The EA name currently referenced in the .chr.
+            new_ea_name: The EA name to replace it with.
+        """
+        term = self._terminals.get(connection_id)
+        if term is None:
+            raise Mt5Error(f"terminal not found: {connection_id}")
+
+        if not chart_file or not chart_file.endswith(".chr"):
+            raise Mt5Error("chart_file must be a .chr file")
+
+        # Validate EA names
+        self._validate_expert_name(old_ea_name, "old_ea_name")
+        self._validate_expert_name(new_ea_name, "new_ea_name")
+
+        # Resolve the chart file path under MQL5/Profiles/Charts/
+        charts_dir = os.path.join(
+            term.wine_prefix, "drive_c", "Program Files",
+            "MetaTrader 5", "MQL5", "Profiles", "Charts", "Default")
+        chart_path = os.path.join(charts_dir, chart_file)
+
+        if not os.path.isfile(chart_path):
+            raise Mt5Error(f"chart file not found: {chart_path}")
+
+        # Read the .chr file
+        with open(chart_path, "rb") as fh:
+            data = fh.read()
+
+        # Check if the old EA name exists in the .chr file
+        old_bytes = old_ea_name.encode("utf-16-le")
+        if old_bytes not in data:
+            # Also try ANSI encoding
+            old_bytes = old_ea_name.encode("ascii")
+            if old_bytes not in data:
+                raise Mt5Error(
+                    f"old EA name '{old_ea_name}' not found in {chart_file}")
+
+        # Back up the original .chr file
+        backup_path = chart_path + ".bak"
+        shutil.copy2(chart_path, backup_path)
+
+        # Replace old EA name with new EA name
+        new_bytes = new_ea_name.encode("utf-16-le")
+        data = data.replace(old_bytes, new_bytes)
+
+        # Write back atomically
+        fd, tmp_path = tempfile.mkstemp(prefix=".chart", dir=charts_dir)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp_path, chart_path)
+            self._qa_fsync_dir(charts_dir)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    @staticmethod
+    def _validate_expert_name(expert_name: str, field: str) -> None:
+        """Validate an expert name for safe use in paths and config.
+
+        Rejects control characters, path traversal, forward slashes,
+        absolute paths, and drive-letter paths.
+
+        Raises Mt5Error if the name is invalid.
+        """
+        if not expert_name:
+            raise Mt5Error(f"{field} is required")
+        if any(c in expert_name for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in expert_name):
+            raise Mt5Error(f"{field} must not contain control characters")
+        if "/" in expert_name or expert_name.startswith("\\"):
+            raise Mt5Error(f"{field} must be a backslash-relative path (e.g. ABUTRON\\EAName)")
+        if ".." in expert_name:
+            raise Mt5Error(f"{field} must not contain path traversal (..)")
+        if re.match(r"^[A-Za-z]:[\\/]", expert_name):
+            raise Mt5Error(f"{field} must not be an absolute drive-letter path")
+
+    @staticmethod
+    def _validate_symbol(symbol: str, field: str) -> None:
+        """Validate a symbol name for safe use in config files.
+
+        Rejects control characters, newlines, and null bytes.
+
+        Raises Mt5Error if the symbol is invalid.
+        """
+        if not symbol:
+            raise Mt5Error(f"{field} is required")
+        if any(c in symbol for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in symbol):
+            raise Mt5Error(f"{field} must not contain control characters")
+
+    @staticmethod
+    def _validate_period(period: str, field: str) -> None:
+        """Validate a timeframe against the MT5 ENUM_TIMEFRAMES set.
+
+        Raises Mt5Error if the period is invalid.
+        """
+        if not period:
+            raise Mt5Error(f"{field} is required")
+        if any(c in period for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in period):
+            raise Mt5Error(f"{field} must not contain control characters")
+        if period not in VALID_MT5_PERIODS:
+            raise Mt5Error(
+                f"{field} '{period}' is not a valid MT5 timeframe. "
+                f"Valid periods: {sorted(VALID_MT5_PERIODS)}")
 
     @staticmethod
     def _convert_to_wine_path(linux_path: str, prefix: str) -> str:
@@ -269,31 +406,10 @@ class Mt5TerminalManager:
 
         Returns the absolute path to the config file (Linux filesystem).
         """
-        # Validate auth expert
-        if not auth_expert:
-            raise Mt5Error("auth_expert is required")
-        if any(c in auth_expert for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in auth_expert):
-            raise Mt5Error("auth_expert must not contain control characters")
-        if "/" in auth_expert or auth_expert.startswith("\\"):
-            raise Mt5Error("auth_expert must be a backslash-relative path (e.g. ABUTRON\\EAName)")
-        if ".." in auth_expert:
-            raise Mt5Error("auth_expert must not contain path traversal (..)")
-        if re.match(r"^[A-Za-z]:[\\/]", auth_expert):
-            raise Mt5Error("auth_expert must not be an absolute drive-letter path")
-
-        # Validate startup symbol and period (both required)
-        if not startup_symbol:
-            raise Mt5Error("startup_symbol is required to define the auth expert's chart")
-        if any(c in startup_symbol for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in startup_symbol):
-            raise Mt5Error("startup_symbol must not contain control characters")
-        if not startup_period:
-            raise Mt5Error("startup_period is required to define the auth expert's chart")
-        if any(c in startup_period for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in startup_period):
-            raise Mt5Error("startup_period must not contain control characters")
-        if startup_period not in VALID_MT5_PERIODS:
-            raise Mt5Error(
-                f"startup_period '{startup_period}' is not a valid MT5 timeframe. "
-                f"Valid periods: {sorted(VALID_MT5_PERIODS)}")
+        # Validate all inputs using shared validation functions
+        self._validate_expert_name(auth_expert, "auth_expert")
+        self._validate_symbol(startup_symbol, "startup_symbol")
+        self._validate_period(startup_period, "startup_period")
 
         config_dir = os.path.join(prefix, "drive_c", "Program Files",
                                    "MetaTrader 5", "MQL5", "Config")
@@ -328,21 +444,10 @@ class Mt5TerminalManager:
         if not auth_expert:
             return  # No startup expert configured — nothing to validate
 
-        if any(c in auth_expert for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in auth_expert):
-            raise Mt5Error("auth_expert must not contain control characters")
-        if "/" in auth_expert or auth_expert.startswith("\\"):
-            raise Mt5Error("auth_expert must be a backslash-relative path")
-        if ".." in auth_expert:
-            raise Mt5Error("auth_expert must not contain path traversal (..)")
-        if re.match(r"^[A-Za-z]:[\\/]", auth_expert):
-            raise Mt5Error("auth_expert must not be an absolute drive-letter path")
-        if not startup_symbol:
-            raise Mt5Error("startup_symbol is required")
-        if not startup_period:
-            raise Mt5Error("startup_period is required")
-        if startup_period not in VALID_MT5_PERIODS:
-            raise Mt5Error(
-                f"startup_period '{startup_period}' is not a valid MT5 timeframe")
+        # Use the same shared validation functions as _write_startup_config
+        self._validate_expert_name(auth_expert, "auth_expert")
+        self._validate_symbol(startup_symbol, "startup_symbol")
+        self._validate_period(startup_period, "startup_period")
 
     def _stage_worker_files(self, connection_id: str, export_dir: str) -> None:
         """Legacy setup, without a false claim that an MQ5 is installed.

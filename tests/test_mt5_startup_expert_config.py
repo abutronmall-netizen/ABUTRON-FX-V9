@@ -293,6 +293,20 @@ class TestValidateBeforeRestart:
         except Mt5Error:
             pass
 
+    def test_symbol_control_chars_raise(self, tmp_path):
+        """validate_before_restart must reject control chars in startup_symbol,
+        matching _write_startup_config's validation."""
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        try:
+            mgr.validate_before_restart(
+                "cid123",
+                auth_expert="ABUTRON\\MyAuthEA",
+                startup_symbol="EURUSD\n[Common]\r\n",
+                startup_period="H1")
+            assert False, "Should have raised for newline in symbol"
+        except Mt5Error:
+            pass
+
     def test_no_auth_expert_passes(self, tmp_path):
         mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
         # No auth expert — nothing to validate, should pass
@@ -407,6 +421,43 @@ class TestStageFeedExpertBinary:
             assert False, "Should have rejected unknown connection"
         except Mt5Error:
             pass
+
+    def test_binary_goes_directly_in_abtron_not_nested(self, tmp_path):
+        """The EX5 must be in MQL5/Experts/ABUTRON/EAName.ex5, not in a
+        nested subdirectory named after the EA."""
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        prefix = str(tmp_path / "prefix-test")
+        os.makedirs(prefix, exist_ok=True)
+        ex5_path = str(tmp_path / "test.ex5")
+        Path(ex5_path).write_bytes(b"fake ex5 binary content")
+        sha = hashlib.sha256(Path(ex5_path).read_bytes()).hexdigest()
+
+        export_dir = os.path.join(prefix, "drive_c", "Program Files",
+                                  "MetaTrader 5", "MQL5", "Files")
+        os.makedirs(export_dir, exist_ok=True)
+
+        from abutron.feeds.mt5_terminal import Terminal
+        term = Terminal("cid123", "FP Markets", 1000, "FPMarketsSC-Demo",
+                        prefix, export_dir)
+        mgr._terminals["cid123"] = term
+
+        dest = mgr.stage_feed_expert_binary(
+            "cid123",
+            "ABUTRON\\AbutronFPMarketsNativeFeedParallelV305",
+            ex5_path, sha)
+
+        # The destination should be MQL5/Experts/ABUTRON/EAName.ex5
+        expected = os.path.join(
+            prefix, "drive_c", "Program Files", "MetaTrader 5",
+            "MQL5", "Experts", "ABUTRON",
+            "AbutronFPMarketsNativeFeedParallelV305.ex5")
+        assert dest == expected
+        # The nested directory should NOT exist
+        nested = os.path.join(
+            prefix, "drive_c", "Program Files", "MetaTrader 5",
+            "MQL5", "Experts", "ABUTRON",
+            "AbutronFPMarketsNativeFeedParallelV305")
+        assert not os.path.isdir(nested)
 
 
 class TestValidPeriods:
