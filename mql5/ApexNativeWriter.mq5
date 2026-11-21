@@ -47,6 +47,7 @@ input ENUM_TIMEFRAMES InpExportPeriod = PERIOD_M5;  // native export timeframe
 // it alongside the order-capable writer is safe: it never places orders.
 input string  InpV3Indicator    = "ApexMarketFeedV3";
 input string  InpV3IndicatorDir = "ABUTRON";
+input string  InpV3SymbolList   = "Boom 1000 Index.0|Boom 600 Index.0|Boom 300 Index.0|Boom 150 Index.0|Crash 1000 Index.0|Crash 600 Index.0|Crash 300 Index.0|Crash 150 Index.0|Volatility 10 Index.0|Volatility 25 Index.0|Volatility 50 Index.0|Volatility 75 Index.0|Volatility 100 Index.0";
 bool g_v3_installed = false;
 int  g_v3_handle    = INVALID_HANDLE;
 datetime g_v3_attempt_time = 0;
@@ -68,7 +69,11 @@ void EnsureV3Indicator()
    }
    ResetLastError();
    string v3_path = InpV3IndicatorDir + "\\" + InpV3Indicator;
-   int handle = iCustom(_Symbol, _Period, v3_path);
+   // Pass the full Deriv symbol list via InpSymbolList so the V3
+   // indicator collects ticks and DOM for all 13 Deriv synthetic
+   // indices, not just _Symbol.
+   string v3_params = "InpSymbolList=" + InpV3SymbolList;
+   int handle = iCustom(_Symbol, _Period, v3_path, v3_params);
    if(handle == INVALID_HANDLE)
    {
       Print("ABUTRON_DERIV_V3_INDICATOR_CREATE_FAILED code=", GetLastError(), " path=", v3_path);
@@ -83,7 +88,7 @@ void EnsureV3Indicator()
    }
    g_v3_handle = handle;
    g_v3_installed = true;
-   Print("ABUTRON_DERIV_V3_INDICATOR_ATTACHED_AFTER_DEMO_AUTH: " + v3_path);
+   Print("ABUTRON_DERIV_V3_INDICATOR_ATTACHED_AFTER_DEMO_AUTH: " + v3_path + " symbols=" + InpV3SymbolList);
 }
 
 string g_activation_secret = "";                // resolved at OnInit

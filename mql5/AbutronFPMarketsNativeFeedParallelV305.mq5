@@ -340,6 +340,7 @@ void EnsureFPHistoryIndicator()
 // is configurable via InpV3IndicatorDir + InpV3Indicator.
 input string InpV3Indicator = "ApexMarketFeedV3";
 input string InpV3IndicatorDir = "ABUTRON";
+input string InpV3SymbolList = "XAUUSD.r|BTCUSD|EURUSD.r|GBPUSD.r|USDJPY.r|AUDUSD.r|US100|US30|US500|GER40|XTIUSD|USDCHF.r|NZDUSD.r";
 bool FP_V3_INSTALLED=false;
 int FP_V3_HANDLE=INVALID_HANDLE;
 datetime FP_V3_ATTEMPT_TIME=0;
@@ -361,7 +362,10 @@ void EnsureV3Indicator()
  }
  ResetLastError();
  string v3_path=InpV3IndicatorDir+"\\"+InpV3Indicator;
- int handle=iCustom(_Symbol,_Period,v3_path);
+ // Pass the full FP symbol list via InpSymbolList so the V3 indicator
+ // collects ticks and DOM for all 13 FP instruments, not just _Symbol.
+ string v3_params="InpSymbolList="+InpV3SymbolList;
+ int handle=iCustom(_Symbol,_Period,v3_path,v3_params);
  if(handle==INVALID_HANDLE)
  {
   Print("ABUTRON_FP_V3_INDICATOR_CREATE_FAILED code=",GetLastError()," path=",v3_path);
@@ -376,7 +380,7 @@ void EnsureV3Indicator()
  }
  FP_V3_HANDLE=handle;
  FP_V3_INSTALLED=true;
- Print("ABUTRON_FP_V3_INDICATOR_ATTACHED_AFTER_BROKER_AUTH: "+v3_path);
+ Print("ABUTRON_FP_V3_INDICATOR_ATTACHED_AFTER_BROKER_AUTH: "+v3_path+" symbols="+InpV3SymbolList);
 }
 
 
