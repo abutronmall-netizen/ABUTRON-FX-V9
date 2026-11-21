@@ -244,13 +244,15 @@ def v305_cost_clock_offset(
     return offset
 
 
-def native_mt5_chart_attached(worker_root: Path, symbol: str) -> bool:
+def native_mt5_chart_attached(worker_root: Path, symbol: str, *, allow_multisymbol_host: bool=False) -> bool:
     """Independent native terminal-log chart-load proof (never self-attested by V3).
 
     A successful MT5 indicator-load log is evidence that *MetaTrader* loaded the
     pinned indicator. Coupled with currently streaming account-bound V3 data
     this proves the chart is still running. No GUI assumption or mock STATUS
-    row alone can prove attachment.
+    row alone can prove attachment. V3.01 can attach one indicator to a
+    host chart yet export multiple symbols. For a validated multi-symbol
+    stream only, accept a chart-load event for that account's host symbol.
     """
     terminal=worker_root/"terminal"
     logs=terminal/"logs"
@@ -260,9 +262,11 @@ def native_mt5_chart_attached(worker_root: Path, symbol: str) -> bool:
     today=datetime.now(timezone.utc).date()
     candidates=[logs/(d.strftime("%Y%m%d")+".log") for d in
         (today, today-timedelta(days=1))]
+    chart_symbol=(r"[A-Za-z0-9._ -]{1,96}" if allow_multisymbol_host
+                  else re.escape(symbol))
     event_re=re.compile(
         r"Indicators\tcustom indicator ApexMarketFeedV3 \("+
-        re.escape(symbol)+r",(M1|M5|M15|M30|H1|H4|D1)\) loaded succesfully")
+        chart_symbol+r",(M1|M5|M15|M30|H1|H4|D1)\) loaded succesfully")
     for path in candidates:
         if not path.is_file() or path.is_symlink():
             continue
@@ -292,7 +296,8 @@ def native_mt5_chart_attached(worker_root: Path, symbol: str) -> bool:
 def read_v3(
     *, worker_root: str, connection_id: str, login: str,
     server: str, symbol: str, approved_binary_sha256: str,
-    max_age_seconds: int=240, broker_clock_offset_seconds: int | None=None
+    max_age_seconds: int=240, broker_clock_offset_seconds: int | None=None,
+    multisymbol_host: bool=False
 ) -> NativeMarketV3Result:
     result=NativeMarketV3Result(account=str(login)[-4:],symbol=symbol)
     try:
@@ -454,7 +459,8 @@ def read_v3(
         # Cross-check independent MT5 terminal log AND live, identity-bound
         # rows. A broker-origin log entry alone or a generated STATUS alone
         # cannot prove active attachment.
-        result.native_chart_attested=native_mt5_chart_attached(root,symbol)
+        result.native_chart_attested=native_mt5_chart_attached(
+            root,symbol,allow_multisymbol_host=multisymbol_host)
         if not result.native_chart_attested:
             result.blockers.append("NATIVE_V3_CHART_ATTACHMENT_ATTESTATION_PENDING")
         result.verified_native_quote_ticks=bool(
