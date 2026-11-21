@@ -26,7 +26,7 @@ def _record(kind: str, *, symbol: str = SYMBOL, digits: int = 5,
         '{"schema":"' + SCHEMA + '",'
         '"symbol":"' + symbol + '",'
         '"broker_server":"FPMarketsSC-Demo",'
-        '"account_login":' + str(login) + ','
+        '"account_login":"' + str(login) + '",'
         '"environment":"DEMO","record_type":"' + kind + '",'
         '"time_msc":1795260000000'
     )
@@ -110,3 +110,15 @@ def test_status_dom_false_valid_and_malformed_dom_state_rejected(tmp_path):
     result = verifier.verify_symbol(tmp_path, SYMBOL, DAY)
     assert not result["ok"]
     assert any("dom_subscribed not boolean" in e for e in result["errors"])
+
+
+def test_account_login_must_be_a_numeric_json_string(tmp_path):
+    """V3.01 Context() emits IntegerToString into a quoted JSON field."""
+    good = _record("QUOTE")
+    assert '"account_login":"123456"' in good
+    _write(tmp_path, good, _record("STATUS"))
+    assert verifier.verify_symbol(tmp_path, SYMBOL, DAY)["ok"]
+    bad = good.replace('"account_login":"123456"', '"account_login":123456')
+    _write(tmp_path, bad, _record("STATUS"))
+    errors = verifier.verify_symbol(tmp_path, SYMBOL, DAY)["errors"]
+    assert any("invalid broker identity" in x for x in errors)
