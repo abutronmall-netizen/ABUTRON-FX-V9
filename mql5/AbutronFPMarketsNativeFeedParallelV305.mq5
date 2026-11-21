@@ -328,6 +328,57 @@ void EnsureFPHistoryIndicator()
  Print("ABUTRON_FP_HISTORY_INDICATOR_ATTACHED_AFTER_BROKER_AUTH: "+hist_path);
 }
 
+// V3 market-microstructure indicator attachment. ApexMarketFeedV3 is a
+// custom indicator (OnCalculate) that runs alongside the chart's EA.
+// MT5 discards indicator entries during chart initialization in this
+// isolated profile, so attach the ALREADY signed indicator only after
+// authenticated MT5 proof, using the same iCustom()/ChartIndicatorAdd()
+// mechanism as the V101 history indicator.
+//
+// The V3 indicator EX5 is staged by stage_v3_indicator_binary() into
+// MQL5/Indicators/ABUTRON/ApexMarketFeedV3.ex5. The full relative path
+// is configurable via InpV3IndicatorDir + InpV3Indicator.
+input string InpV3Indicator = "ApexMarketFeedV3";
+input string InpV3IndicatorDir = "ABUTRON";
+bool FP_V3_INSTALLED=false;
+int FP_V3_HANDLE=INVALID_HANDLE;
+datetime FP_V3_ATTEMPT_TIME=0;
+void EnsureV3Indicator()
+{
+ if(FP_V3_INSTALLED)return;
+ if(TimeLocal()-FP_V3_ATTEMPT_TIME<30)return;
+ FP_V3_ATTEMPT_TIME=TimeLocal();
+ // Don't attach a duplicate when MT5 already restored the indicator.
+ for(int i=0;i<ChartIndicatorsTotal(0,0);i++)
+ {
+  string name=ChartIndicatorName(0,0,i);
+  if(StringFind(name,InpV3Indicator)>=0)
+  {
+   FP_V3_INSTALLED=true;
+   Print("ABUTRON_FP_V3_INDICATOR_ALREADY_ATTACHED");
+   return;
+  }
+ }
+ ResetLastError();
+ string v3_path=InpV3IndicatorDir+"\\"+InpV3Indicator;
+ int handle=iCustom(_Symbol,_Period,v3_path);
+ if(handle==INVALID_HANDLE)
+ {
+  Print("ABUTRON_FP_V3_INDICATOR_CREATE_FAILED code=",GetLastError()," path=",v3_path);
+  return;
+ }
+ ResetLastError();
+ if(!ChartIndicatorAdd(0,0,handle))
+ {
+  Print("ABUTRON_FP_V3_INDICATOR_ATTACH_FAILED code=",GetLastError());
+  IndicatorRelease(handle);
+  return;
+ }
+ FP_V3_HANDLE=handle;
+ FP_V3_INSTALLED=true;
+ Print("ABUTRON_FP_V3_INDICATOR_ATTACHED_AFTER_BROKER_AUTH: "+v3_path);
+}
+
 
 // Bind only to the authenticated running FP DEMO MT5 feed heartbeat.
 // No one-time challenge reuse, no password and no heartbeat writer.
@@ -413,6 +464,7 @@ void OnTimer(){
    FP_ANNOUNCED_OFFLINE=false;
  }
  EnsureFPHistoryIndicator();
+ EnsureV3Indicator();
  // Separate 20s cost refresh maintains the consumer's 65s freshness.
  // Existing catalog/quote/bars cadence is unchanged.
  if(FP_MODE=="DEMO" && TimeLocal()-FP_COST_LAST>=20){

@@ -226,6 +226,52 @@ class Mt5TerminalManager:
                              expected_sha=expected_sha)
         return dest_path
 
+    def stage_v3_indicator_binary(self, connection_id: str,
+                                  indicator_name: str,
+                                  ex5_path: str,
+                                  expected_sha: str) -> str:
+        """Stage the V3 indicator EX5 binary in MQL5/Indicators/ABUTRON/.
+
+        ApexMarketFeedV3 is a custom indicator that must be loaded from
+        MQL5/Indicators/ for iCustom() to find it. The V305 EA attaches it
+        to chart03 via ChartIndicatorAdd() using the same mechanism as
+        the V101 history indicator (EnsureFPHistoryIndicator).
+
+        The binary is placed directly in MQL5/Indicators/ABUTRON/ as
+        <IndicatorName>.ex5 — NOT in a nested subdirectory. MT5's
+        Indicators loader searches MQL5/Indicators/ and subdirectories.
+
+        Args:
+            connection_id: The terminal connection ID.
+            indicator_name: Backslash-relative indicator path (e.g.
+                "ABUTRON\\ApexMarketFeedV3").
+            ex5_path: Linux path to the verified EX5 binary.
+            expected_sha: Expected SHA-256 of the binary.
+
+        Returns the destination path of the staged binary.
+        """
+        # Validate indicator_name (same rules as expert names)
+        self._validate_expert_name(indicator_name, "indicator_name")
+
+        term = self._terminals.get(connection_id)
+        if term is None:
+            raise Mt5Error(f"terminal not found: {connection_id}")
+
+        # Resolve the Indicators directory inside the terminal prefix.
+        # The binary goes DIRECTLY in MQL5/Indicators/ABUTRON/.
+        indicators_dir = os.path.join(
+            term.wine_prefix, "drive_c", "Program Files",
+            "MetaTrader 5", "MQL5", "Indicators")
+        dir_parts = indicator_name.split("\\")
+        dest_dir = os.path.join(indicators_dir, *dir_parts[:-1])
+        os.makedirs(dest_dir, exist_ok=True)
+        ind_basename = dir_parts[-1]
+        dest_path = os.path.join(dest_dir, ind_basename + ".ex5")
+
+        self._atomic_install(ex5_path, dest_path, term.export_dir,
+                             expected_sha=expected_sha)
+        return dest_path
+
     def update_chart_reference(self, connection_id: str,
                                chart_file: str,
                                old_ea_name: str,

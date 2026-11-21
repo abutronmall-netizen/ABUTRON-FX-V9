@@ -560,3 +560,73 @@ class TestUpdateChartReference:
             assert False, "Should have rejected unknown connection"
         except Mt5Error:
             pass
+
+
+class TestStageV3IndicatorBinary:
+    """stage_v3_indicator_binary() must stage EX5 in MQL5/Indicators/ABUTRON/."""
+
+    def _make_terminal(self, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        prefix = str(tmp_path / "prefix-v3ind")
+        os.makedirs(prefix, exist_ok=True)
+        export_dir = os.path.join(prefix, "drive_c", "Program Files",
+                                  "MetaTrader 5", "MQL5", "Files")
+        os.makedirs(export_dir, exist_ok=True)
+        from abutron.feeds.mt5_terminal import Terminal
+        term = Terminal("cid123", "FP Markets", 1000, "FPMarketsSC-Demo",
+                        prefix, export_dir)
+        mgr._terminals["cid123"] = term
+        return mgr, prefix
+
+    def test_stages_binary_in_indicators_dir(self, tmp_path):
+        mgr, prefix = self._make_terminal(tmp_path)
+        ex5_path = str(tmp_path / "v3.ex5")
+        Path(ex5_path).write_bytes(b"fake v3 indicator binary")
+        sha = hashlib.sha256(Path(ex5_path).read_bytes()).hexdigest()
+
+        dest = mgr.stage_v3_indicator_binary(
+            "cid123", "ABUTRON\\ApexMarketFeedV3", ex5_path, sha)
+
+        expected = os.path.join(
+            prefix, "drive_c", "Program Files", "MetaTrader 5",
+            "MQL5", "Indicators", "ABUTRON", "ApexMarketFeedV3.ex5")
+        assert dest == expected
+        assert os.path.isfile(dest)
+
+    def test_binary_goes_directly_in_abtron_not_nested(self, tmp_path):
+        mgr, prefix = self._make_terminal(tmp_path)
+        ex5_path = str(tmp_path / "v3.ex5")
+        Path(ex5_path).write_bytes(b"fake v3 indicator binary")
+        sha = hashlib.sha256(Path(ex5_path).read_bytes()).hexdigest()
+
+        dest = mgr.stage_v3_indicator_binary(
+            "cid123", "ABUTRON\\ApexMarketFeedV3", ex5_path, sha)
+
+        nested = os.path.join(
+            prefix, "drive_c", "Program Files", "MetaTrader 5",
+            "MQL5", "Indicators", "ABUTRON", "ApexMarketFeedV3",
+            "ApexMarketFeedV3.ex5")
+        assert not os.path.isdir(os.path.dirname(nested))
+        assert dest != nested
+
+    def test_rejects_path_traversal(self, tmp_path):
+        mgr, _ = self._make_terminal(tmp_path)
+        ex5_path = str(tmp_path / "v3.ex5")
+        Path(ex5_path).write_bytes(b"fake")
+        try:
+            mgr.stage_v3_indicator_binary(
+                "cid123", "ABUTRON\\..\\..\\evil", ex5_path, "abc")
+            assert False, "Should have rejected traversal"
+        except Mt5Error:
+            pass
+
+    def test_rejects_unknown_connection(self, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        ex5_path = str(tmp_path / "v3.ex5")
+        Path(ex5_path).write_bytes(b"fake")
+        try:
+            mgr.stage_v3_indicator_binary(
+                "unknown", "ABUTRON\\ApexMarketFeedV3", ex5_path, "abc")
+            assert False, "Should have rejected unknown connection"
+        except Mt5Error:
+            pass
