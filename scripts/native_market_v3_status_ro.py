@@ -201,7 +201,8 @@ def scan():
                 detail = read_v3(worker_root=str(root), connection_id=cid,
                     login=login, server=server_name, symbol=symbol,
                     approved_binary_sha256=SHA,
-                    broker_clock_offset_seconds=broker_offset)
+                    broker_clock_offset_seconds=broker_offset,
+                    multisymbol_host=len(set(symbols))>1)
                 entry["symbols"].append(detail.summary())
                 if detail.native_chart_attested:
                     entry["native_chart_attested"] = True
