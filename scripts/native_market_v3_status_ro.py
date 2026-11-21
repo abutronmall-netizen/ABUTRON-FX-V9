@@ -18,7 +18,7 @@ import tempfile
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
 from abutron.feeds.native_market_v3 import read_v3, trusted_fp_demo_clock_offset, broker_symbol_from_v3_file
 
-SHA="a4a5bdbec180f8b4f7d0945b1611a945ca36d1ed49e4e23137133b9e4d592f67"
+SHA="321bc0d80b783f308a23b9823e4c3da95b138ea95c2e0f595a826fdd3c6f3d29"
 # Account profiles are resolved from explicit JSON, otherwise authorized
 # read-only CRM. Only the two FP Markets DEMO monitor accounts are eligible.
 SUPPORTED_FP_DEMO = frozenset(("0512", "1636"))
