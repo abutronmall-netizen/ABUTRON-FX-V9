@@ -69,11 +69,10 @@ void EnsureV3Indicator()
    }
    ResetLastError();
    string v3_path = InpV3IndicatorDir + "\\" + InpV3Indicator;
-   // Pass the full Deriv symbol list via InpSymbolList so the V3
-   // indicator collects ticks and DOM for all 13 Deriv synthetic
-   // indices, not just _Symbol.
-   string v3_params = "InpSymbolList=" + InpV3SymbolList;
-   int handle = iCustom(_Symbol, _Period, v3_path, v3_params);
+   // Pass all indicator inputs positionally in declaration order:
+   //   ExportIntervalSec, MaxTicksPerPoll, MaxFileSizeMB, CollectBook, InpSymbolList
+   int handle = iCustom(_Symbol, _Period, v3_path,
+      5, 1500, 24, true, InpV3SymbolList);
    if(handle == INVALID_HANDLE)
    {
       Print("ABUTRON_DERIV_V3_INDICATOR_CREATE_FAILED code=", GetLastError(), " path=", v3_path);

@@ -144,8 +144,11 @@ int OnInit()
          // Trim whitespace
          StringTrimLeft(s);
          StringTrimRight(s);
-         if(s!="")ArrayResize(g_symbols,ArraySize(g_symbols)+1);
-         if(ArraySize(g_symbols)>0)g_symbols[ArrayLast()]=s;
+         if(s=="")continue;
+         int next=ArraySize(g_symbols);
+         if(ArrayResize(g_symbols,next+1)!=next+1)
+            return INIT_FAILED;
+         g_symbols[next]=s;
       }
    }
    if(ArraySize(g_symbols)==0)
@@ -231,13 +234,14 @@ void ExportTicks()
          if(!traded && !quote)continue;
          string kind=(traded?"MARKET_PRINT":"QUOTE");
          string side=(traded?(buy?"BUY":"SELL"):"NONE");
+         int digits=(int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
          string record="{"+Context(sym)+
             "\"record_type\":\""+kind+"\","+
             "\"time_msc\":"+IntegerToString((long)t.time_msc)+","+
             "\"flags\":"+IntegerToString((long)t.flags)+","+
-            "\"price\":"+DoubleToString(t.last,_Digits)+","+
-            "\"bid\":"+DoubleToString(t.bid,_Digits)+","+
-            "\"ask\":"+DoubleToString(t.ask,_Digits)+","+
+            "\"price\":"+DoubleToString(t.last,digits)+","+
+            "\"bid\":"+DoubleToString(t.bid,digits)+","+
+            "\"ask\":"+DoubleToString(t.ask,digits)+","+
             "\"volume_real\":"+DoubleToString(t.volume_real,8)+","+
             "\"volume\":"+IntegerToString((long)t.volume)+","+
             "\"aggressor_side\":\""+side+"\"}";
@@ -261,6 +265,7 @@ void ExportDepth()
       if(!MarketBookGet(sym,book)||ArraySize(book)==0)continue;
       int h=OpenAppend(sym);
       if(h==INVALID_HANDLE)continue;
+      int digits=(int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
       string body="{"+Context(sym)+
          "\"record_type\":\"DOM\","+
          "\"time_msc\":"+IntegerToString((long)now*1000)+","+
@@ -269,7 +274,7 @@ void ExportDepth()
       {
          if(i>0)body+=",";
          body+="{\"book_type\":"+IntegerToString((int)book[i].type)+
-               ",\"price\":"+DoubleToString(book[i].price,_Digits)+
+               ",\"price\":"+DoubleToString(book[i].price,digits)+
                ",\"volume_real\":"+DoubleToString(book[i].volume_real,8)+
                ",\"volume\":"+IntegerToString((long)book[i].volume)+"}";
       }
@@ -324,6 +329,7 @@ void OnBookEvent(const string &symbol)
    if(!MarketBookGet(symbol,book)||ArraySize(book)==0)return;
    int h=OpenAppend(symbol);
    if(h==INVALID_HANDLE)return;
+   int digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
    string body="{"+Context(symbol)+
       "\"record_type\":\"DOM\","+
       "\"time_msc\":"+IntegerToString((long)now*1000)+","+
@@ -332,7 +338,7 @@ void OnBookEvent(const string &symbol)
    {
       if(i>0)body+=",";
       body+="{\"book_type\":"+IntegerToString((int)book[i].type)+
-            ",\"price\":"+DoubleToString(book[i].price,_Digits)+
+            ",\"price\":"+DoubleToString(book[i].price,digits)+
             ",\"volume_real\":"+DoubleToString(book[i].volume_real,8)+
             ",\"volume\":"+IntegerToString((long)book[i].volume)+"}";
    }
