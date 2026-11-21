@@ -16,9 +16,9 @@ import sys
 import tempfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
-from abutron.feeds.native_market_v3 import read_v3, trusted_fp_demo_clock_offset
+from abutron.feeds.native_market_v3 import read_v3, trusted_fp_demo_clock_offset, broker_symbol_from_v3_file
 
-SHA="a4a5bdbec180f8b4f7d0945b1611a945ca36d1ed49e4e23137133b9e4d592f67"
+SHA="321bc0d80b783f308a23b9823e4c3da95b138ea95c2e0f595a826fdd3c6f3d29"
 # Account profiles are resolved from explicit JSON, otherwise authorized
 # read-only CRM. Only the two FP Markets DEMO monitor accounts are eligible.
 SUPPORTED_FP_DEMO = frozenset(("0512", "1636"))
@@ -98,7 +98,21 @@ def scan():
     for suffix,(cid,login) in CID.items():
         root=Path("/var/lib/private/abutron-client-mt5-"+cid)
         binary=root/"terminal/MQL5/Indicators/ABUTRON/ApexMarketFeedV3.ex5"
-        entry={"account_suffix":suffix,"broker":"FP Markets","environment":"DEMO",
+        # Derive broker and server from the worker health file rather than
+        # hardcoding FP-specific values. The health file is written by the
+        # worker and contains the actual broker name and server.
+        health_path=root/"worker-health.json"
+        broker_name="FP Markets"
+        server_name="FPMarketsSC-Demo"
+        if health_path.is_file() and not health_path.is_symlink():
+            try:
+                import json as _json
+                health=_json.loads(health_path.read_text())
+                broker_name=health.get("broker",broker_name)
+                server_name=health.get("server",server_name)
+            except (OSError,ValueError,TypeError):
+                pass
+        entry={"account_suffix":suffix,"broker":broker_name,"environment":"DEMO",
                "indicator_pinned_on_disk":False,"native_chart_attested":False,
                "market_prints_verified":False,"symbols":[]}
         if binary.is_file() and not binary.is_symlink():
@@ -108,31 +122,90 @@ def scan():
         symbols=[]
         if base.is_dir() and not base.is_symlink():
             for p in base.glob("ABUTRON_NATIVE_MARKET_V3_*_????????.jsonl"):
-                sym=p.name.removeprefix("ABUTRON_NATIVE_MARKET_V3_")[:-15]
-                if sym and re.fullmatch(r"[A-Za-z0-9._-]{1,64}",sym):
-                    symbols.append(sym)
-        if symbols:
-            if suffix=="0512":
-                hist="/var/lib/apex-signup/fp-native-history/"+cid+".json"
-                recon="/var/lib/abutron-fp-execution/reconciliation/latest.json"
-            else:
-                hist="/var/lib/apex/operator-live/fp-native-history-account-"+cid+".json"
-                recon="/var/lib/abutron-fp-execution/1636/reconciliation/latest.json"
+                try:
+                    symbols.append(broker_symbol_from_v3_file(p))
+                except (OSError, ValueError):
+                    # An unreadable, malformed or foreign file cannot provide
+                    # an account-symbol discovery record.
+                    continue
+
+        # --- P0-1: Per-account cost-report path resolution ---
+        # Each DEMO account gets its own ABUTRON_FP_COST_REPORT_{suffix}
+        # env var. Falls back to the generic ABUTRON_FP_COST_REPORT for
+        # backward compatibility, but per-account paths are preferred.
+        cost_report = os.environ.get(
+            f"ABUTRON_FP_COST_REPORT_{suffix}",
+            os.environ.get("ABUTRON_FP_COST_REPORT", ""))
+
+        # --- P0-2: Read-only cost-report publisher ---
+        # Invoke the corrected V305 intake from the read-only collector,
+        # independently of trading dispatch. This publishes the
+        # account-bound cost report (with clock fields) so the collector
+        # fallback can use it. Runs before clock resolution so the cost
+        # report is fresh when the fallback reads it.
+        feed_files = str(root / "terminal/MQL5/Files")
+        if cost_report and feed_files:
             try:
-                broker_offset=trusted_fp_demo_clock_offset(
-                    native_history_file=hist,
-                    native_reconciliation_file=recon,account_suffix=suffix)
-            except (OSError,ValueError,TypeError) as exc:
-                broker_offset=None
-                entry["clock_proof_blocker"]=str(exc)[:120]
+                from abutron.feeds.fp_native_cost import (
+                    refresh_fp_v9_cost_report)
+                refresh_fp_v9_cost_report(
+                    feed_files=feed_files, crm_db=str(CRM_DB),
+                    connection_id=cid, expected_suffix=suffix,
+                    target=cost_report)
+                entry["cost_report_published"] = True
+            except (OSError, ValueError, TypeError) as exc:
+                entry["cost_report_blocker"] = str(exc)[:120]
+
+        # --- P0-3: Clock fallback independent of V3 file discovery ---
+        # Resolve the broker clock offset BEFORE checking for V3 symbol
+        # files. Previously the fallback only ran inside the `if symbols:`
+        # block, so when no V3 files existed the clock was never resolved
+        # and the collector could not proceed. Now the clock is resolved
+        # independently, using the history/reconciliation path first and
+        # the V305 cost report as fallback.
+        broker_offset = None
+        if suffix == "0512":
+            hist = "/var/lib/apex-signup/fp-native-history/" + cid + ".json"
+            recon = "/var/lib/abutron-fp-execution/reconciliation/latest.json"
+        else:
+            hist = "/var/lib/apex/operator-live/fp-native-history-account-" + cid + ".json"
+            recon = "/var/lib/abutron-fp-execution/1636/reconciliation/latest.json"
+        try:
+            broker_offset = trusted_fp_demo_clock_offset(
+                native_history_file=hist,
+                native_reconciliation_file=recon, account_suffix=suffix)
+        except (OSError, ValueError, TypeError) as exc:
+            # Fallback: use the V305 native cost report's broker-clock
+            # offset when native history/reconciliation files are
+            # unavailable (FP_NATIVE_SOURCE_FileNotFoundError).
+            v305_error = None
+            if cost_report:
+                try:
+                    from abutron.feeds.native_market_v3 import (
+                        v305_cost_clock_offset)
+                    broker_offset = v305_cost_clock_offset(
+                        cost_report_file=cost_report,
+                        account_suffix=suffix)
+                    entry["clock_source"] = "V305_COST_REPORT"
+                except (OSError, ValueError, TypeError) as exc2:
+                    v305_error = str(exc2)[:120]
+            if v305_error is not None:
+                broker_offset = None
+                entry["clock_proof_blocker"] = (
+                    f"history:{str(exc)[:60]};v305:{v305_error}")
+            elif v305_error is None and broker_offset is None:
+                entry["clock_proof_blocker"] = str(exc)[:120]
+
+        if symbols:
             for symbol in sorted(set(symbols))[:25]:
-                detail=read_v3(worker_root=str(root),connection_id=cid,
-                    login=login,server="FPMarketsSC-Demo",symbol=symbol,
+                detail = read_v3(worker_root=str(root), connection_id=cid,
+                    login=login, server=server_name, symbol=symbol,
                     approved_binary_sha256=SHA,
-                    broker_clock_offset_seconds=broker_offset)
+                    broker_clock_offset_seconds=broker_offset,
+                    multisymbol_host=len(set(symbols))>1)
                 entry["symbols"].append(detail.summary())
                 if detail.native_chart_attested:
-                    entry["native_chart_attested"]=True
+                    entry["native_chart_attested"] = True
         if not entry["indicator_pinned_on_disk"]:
             entry["state"]="BINARY_NOT_PINNED"
         elif not symbols:

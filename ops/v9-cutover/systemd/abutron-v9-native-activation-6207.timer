@@ -1,0 +1,11 @@
+[Unit]
+Description=ABUTRON V9 DEMO 6207 native CRM activation every five seconds
+
+[Timer]
+OnCalendar=*-*-* *:*:02/5
+AccuracySec=1s
+Persistent=false
+Unit=abutron-v9-native-activation-6207.service
+
+[Install]
+WantedBy=timers.target

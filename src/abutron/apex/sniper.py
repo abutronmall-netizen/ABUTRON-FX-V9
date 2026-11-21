@@ -99,7 +99,7 @@ class SniperEntryEngine:
         """
         of = of_features or {}
         fp = fp_features or {}
-        price = closes[-1] if closes else 0.0
+        price = closes[-1] if len(closes) else 0.0
         a = atr_val or 0.0
         is_buy = direction == "BUY"
 
@@ -107,8 +107,8 @@ class SniperEntryEngine:
         ema_val = ema(closes, 21) if len(closes) >= 21 else None
         dn_low, dn_high = donchian(highs, lows, 20) if len(highs) >= 20 \
             else (None, None)
-        swing_low = min(lows[-10:]) if lows else None
-        swing_high = max(highs[-10:]) if highs else None
+        swing_low = min(lows[-10:]) if len(lows) else None
+        swing_high = max(highs[-10:]) if len(highs) else None
         rsi_val = rsi(closes, 14) if len(closes) >= 15 else None
 
         # Candidate pullback levels toward which price tends back. For a

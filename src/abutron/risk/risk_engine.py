@@ -8,12 +8,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import time
 from typing import Any, Dict, List, Optional
 
 from ..config import (DEFAULT_PORTFOLIO_RISK_CAP_PCT,
-                      DEFAULT_TRAILING_ATR_MULT, utc_now)
+                      DEFAULT_TRAILING_ATR_MULT, EXPOSURE_CERT_TTL_SECONDS,
+                      utc_now)
 from ..db import engine_db
 from ..events import EventLog, make_event
+
+
+def _certification_stale(certified_at: str, ttl_seconds: int) -> bool:
+    """Return True if a certification timestamp is missing or older than TTL.
+
+    A missing timestamp is always stale (fail-closed). Timestamps use the
+    ISO ``%Y-%m-%dT%H:%M:%SZ`` format produced by ``utc_now()``.
+    """
+    if not certified_at:
+        return True
+    try:
+        parsed = time.strptime(certified_at, "%Y-%m-%dT%H:%M:%SZ")
+        cert_epoch = time.mktime(parsed)
+    except (ValueError, TypeError):
+        return True
+    return (time.time() - cert_epoch) > ttl_seconds
 
 
 @dataclass
@@ -91,12 +109,19 @@ class RiskEngine:
                 complete = False
                 continue
             equity = acct.get("equity")
+            # Issue #36: a certification older than the TTL is stale and is
+            # treated as uncertified (fail-closed) until the broker worker
+            # publishes a fresh authenticated snapshot.
+            cert_stale = _certification_stale(
+                acct.get("exposure_certified_at", ""),
+                EXPOSURE_CERT_TTL_SECONDS)
             if (type(equity) not in (int, float)
                     or not math.isfinite(equity) or equity <= 0
                     or acct.get("account_currency") != "USD"
                     # Accept both True (bool) and 1 (int from SQLite) as
                     # "verified"; 0/None/False fail-closed.
-                    or not acct.get("native_positions_verified")):
+                    or not acct.get("native_positions_verified")
+                    or cert_stale):
                 complete = False
                 unknown.append(cid)
             else:
@@ -112,7 +137,9 @@ class RiskEngine:
                 native_loss = row.get("broker_native_stop_risk_usd")
                 # These fields must originate from a broker-reconciled
                 # native position and actual entry-to-SL OrderCalcProfit.
-                verified = row.get("broker_native_ordercalcprofit_verified") is True
+                # Use truthiness, NOT `is True`: SQLite stores booleans as
+                # int 0/1, and `1 is True` is False (identity, not equality).
+                verified = bool(row.get("broker_native_ordercalcprofit_verified"))
                 entry = row.get("fill_price")
                 stop = row.get("stop_loss")
                 volume = row.get("volume")

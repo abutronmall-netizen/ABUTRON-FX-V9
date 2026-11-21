@@ -1,0 +1,11 @@
+{
+  "authorized_by": "abutron-operator",
+  "authorized_at": 0,
+  "connections": [
+    "REPLACE_WITH_6207_CONNECTION_ID",
+    "REPLACE_WITH_7593_CONNECTION_ID",
+    "REPLACE_WITH_9244_CONNECTION_ID"
+  ],
+  "reason": "Operator authorization: enable V9 native order dispatch on all Deriv DEMO accounts. Risk invariants (0.15%/trade, 20% ceiling, R:R >= 1.50, exposure certification) remain enforced.",
+  "active": true
+}

@@ -26,6 +26,55 @@ from ..analytics.orderflow import Trade
 
 SCHEMA="abutron.v9.mt5.market_microstructure.readonly.v3"
 NAME=re.compile(r"ABUTRON_NATIVE_MARKET_V3_[A-Za-z0-9._-]+_\d{8}\.jsonl\Z")
+
+def _sanitize_file_symbol(symbol: str) -> str:
+    """Convert a broker symbol to its filename-safe variant.
+
+    Mirrors the MQL5 ApexMarketFeedV3 SanitizeFile(): spaces become
+    underscores, all other characters are kept if alphanumeric, dot,
+    dash, or underscore. Used for globbing V3 output files whose names
+    use the sanitized symbol while JSON content preserves the original.
+    """
+    return symbol.replace(" ", "_")
+
+def broker_symbol_from_v3_file(path: Path) -> str:
+    """Discover the exact broker symbol from a V3 JSONL header.
+
+    V3 filenames replace spaces with underscores, so the filename alone
+    cannot distinguish e.g. "Volatility 50 Index.0" from a literal
+    "Volatility_50_Index.0". The V3 reader subsequently authenticates the
+    full record stream against this exact symbol, account and session.
+    This discovery helper never certifies broker provenance by itself.
+    """
+    path = Path(path)
+    if not NAME.fullmatch(path.name):
+        raise ValueError("NATIVE_V3_FILENAME_INVALID")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (
+            st.st_size < 2 or st.st_size > 26 * 1024 * 1024 or st.st_mode & 0o022
+        ):
+            raise ValueError("NATIVE_V3_DISCOVERY_SOURCE_INVALID")
+        prefix = os.read(fd, 65536)
+    finally:
+        os.close(fd)
+    if b"\n" not in prefix:
+        raise ValueError("NATIVE_V3_DISCOVERY_HEADER_INCOMPLETE")
+    try:
+        first = json.loads(prefix.split(b"\n", 1)[0].decode("utf-8-sig"))
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("NATIVE_V3_DISCOVERY_HEADER_INVALID") from exc
+    if not isinstance(first, dict) or first.get("schema") != SCHEMA:
+        raise ValueError("NATIVE_V3_DISCOVERY_SCHEMA_INVALID")
+    symbol = first.get("symbol")
+    if not isinstance(symbol, str) or not re.fullmatch(r"[A-Za-z0-9._ -]{1,64}", symbol):
+        raise ValueError("NATIVE_V3_DISCOVERY_SYMBOL_INVALID")
+    stem = path.name[len("ABUTRON_NATIVE_MARKET_V3_"):-15]
+    if _sanitize_file_symbol(symbol) != stem:
+        raise ValueError("NATIVE_V3_DISCOVERY_SYMBOL_FILENAME_MISMATCH")
+    return symbol
+
 HEX32=re.compile(r"[0-9a-f]{32}\Z")
 HEX64=re.compile(r"[0-9a-f]{64}\Z")
 # MQL5 MqlTick.flags: LAST=8, BUY=32, SELL=64.
@@ -156,13 +205,54 @@ def trusted_fp_demo_clock_offset(
     raise ValueError("FP_CLOCK_NATIVE_RECONCILIATION_EXHAUSTED")
 
 
-def native_mt5_chart_attached(worker_root: Path, symbol: str) -> bool:
+def v305_cost_clock_offset(
+    *, cost_report_file: str, account_suffix: str
+) -> int:
+    """Return the broker clock offset from a V305 native cost report.
+
+    This is a fallback clock source for FP Markets DEMO accounts when
+    the native history / reconciliation files are unavailable (e.g.
+    FP_NATIVE_SOURCE_FileNotFoundError). The V305 exporter measures the
+    broker-server clock against UTC and publishes the offset in its
+    cost report JSON. The offset must be a whole number of hours and
+    within the allowed range; anything else is rejected fail-closed.
+
+    The cost report must be root-owned, regular, fresh (65s TTL), and
+    must carry a genuine broker-probe verification flag.
+    """
+    if not re.fullmatch(r"[0-9]{4}", account_suffix):
+        raise ValueError("FP_CLOCK_ACCOUNT_SUFFIX_INVALID")
+    cost_path = Path(cost_report_file)
+    try:
+        blob = _read_bound(cost_path, max_bytes=1_500_000, max_age=65,
+                           expected_uid=0)
+    except OSError as exc:
+        raise ValueError("FP_CLOCK_V305_COST_NOT_AVAILABLE: "
+                         + type(exc).__name__) from exc
+    try:
+        cost = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("FP_CLOCK_V305_COST_NOT_AVAILABLE") from exc
+    if (cost.get("account_suffix") != account_suffix
+            or cost.get("environment") != "DEMO"
+            or cost.get("native_bid_ask_and_ordercalcprofit_verified") is not True
+            or "broker_clock_offset_seconds" not in cost):
+        raise ValueError("FP_CLOCK_V305_COST_NOT_AVAILABLE")
+    offset = cost["broker_clock_offset_seconds"]
+    if type(offset) is not int or offset not in (0, 3600, 7200, 10800, 14400):
+        raise ValueError("FP_CLOCK_V305_OFFSET_INVALID")
+    return offset
+
+
+def native_mt5_chart_attached(worker_root: Path, symbol: str, *, allow_multisymbol_host: bool=False) -> bool:
     """Independent native terminal-log chart-load proof (never self-attested by V3).
 
     A successful MT5 indicator-load log is evidence that *MetaTrader* loaded the
     pinned indicator. Coupled with currently streaming account-bound V3 data
     this proves the chart is still running. No GUI assumption or mock STATUS
-    row alone can prove attachment.
+    row alone can prove attachment. V3.01 can attach one indicator to a
+    host chart yet export multiple symbols. For a validated multi-symbol
+    stream only, accept a chart-load event for that account's host symbol.
     """
     terminal=worker_root/"terminal"
     logs=terminal/"logs"
@@ -172,9 +262,11 @@ def native_mt5_chart_attached(worker_root: Path, symbol: str) -> bool:
     today=datetime.now(timezone.utc).date()
     candidates=[logs/(d.strftime("%Y%m%d")+".log") for d in
         (today, today-timedelta(days=1))]
+    chart_symbol=(r"[A-Za-z0-9._ -]{1,96}" if allow_multisymbol_host
+                  else re.escape(symbol))
     event_re=re.compile(
         r"Indicators\tcustom indicator ApexMarketFeedV3 \("+
-        re.escape(symbol)+r",(M1|M5|M15|M30|H1|H4|D1)\) loaded succesfully")
+        chart_symbol+r",(M1|M5|M15|M30|H1|H4|D1)\) loaded succesfully")
     for path in candidates:
         if not path.is_file() or path.is_symlink():
             continue
@@ -204,7 +296,8 @@ def native_mt5_chart_attached(worker_root: Path, symbol: str) -> bool:
 def read_v3(
     *, worker_root: str, connection_id: str, login: str,
     server: str, symbol: str, approved_binary_sha256: str,
-    max_age_seconds: int=240, broker_clock_offset_seconds: int | None=None
+    max_age_seconds: int=240, broker_clock_offset_seconds: int | None=None,
+    multisymbol_host: bool=False
 ) -> NativeMarketV3Result:
     result=NativeMarketV3Result(account=str(login)[-4:],symbol=symbol)
     try:
@@ -239,7 +332,7 @@ def read_v3(
         expected_uid=(root/"terminal/MQL5/Files").stat().st_uid
         if files.stat().st_uid!=expected_uid:
             raise ValueError("NATIVE_EXPORT_DIRECTORY_OWNER_MISMATCH")
-        target=files.glob("ABUTRON_NATIVE_MARKET_V3_"+symbol+"_*.jsonl")
+        target=files.glob("ABUTRON_NATIVE_MARKET_V3_"+_sanitize_file_symbol(symbol)+"_*.jsonl")
         paths=sorted(target)
         if not paths or len(paths)>7:
             raise ValueError("NATIVE_V3_SOURCE_FILES_MISSING_OR_TOO_MANY")
@@ -262,7 +355,8 @@ def read_v3(
                 d=json.loads(raw)
                 if not isinstance(d,dict):
                     raise ValueError("NATIVE_V3_ROW_MALFORMED")
-                if (d.get("schema")!=SCHEMA or d.get("symbol")!=symbol or
+                if (d.get("schema")!=SCHEMA or
+                    _sanitize_file_symbol(d.get("symbol",""))!=_sanitize_file_symbol(symbol) or
                     d.get("account_login")!=str(login) or
                     d.get("broker_server")!=server or
                     d.get("environment")!="DEMO"):
@@ -365,7 +459,8 @@ def read_v3(
         # Cross-check independent MT5 terminal log AND live, identity-bound
         # rows. A broker-origin log entry alone or a generated STATUS alone
         # cannot prove active attachment.
-        result.native_chart_attested=native_mt5_chart_attached(root,symbol)
+        result.native_chart_attested=native_mt5_chart_attached(
+            root,symbol,allow_multisymbol_host=multisymbol_host)
         if not result.native_chart_attested:
             result.blockers.append("NATIVE_V3_CHART_ATTACHMENT_ATTESTATION_PENDING")
         result.verified_native_quote_ticks=bool(

@@ -241,7 +241,7 @@ class TestSniperEngineIntegration:
 # Execution path — the sniper entry geometry reaches the order request
 # ---------------------------------------------------------------------------
 class TestSniperExecutionPath:
-    def test_gateway_sends_sniper_entry_geometry(self):
+    def test_gateway_sends_sniper_entry_geometry(self, monkeypatch):
         from abutron.events import EventLog
         from abutron.execution.writer_gateway import SingleWriterGateway
 
@@ -254,6 +254,19 @@ class TestSniperExecutionPath:
             return "ACK", {"status": "ack", "ticket": 4242}
 
         gw._deliver_to_ea = _fake_deliver
+        # Arm the gateway (fail-closed: unarmed writer rejects)
+        import hashlib
+        monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "test-secret-1234567890")
+        ea_path = os.path.join(DATA_ROOT, "t_sniper_ea.ex5")
+        with open(ea_path, "wb") as f:
+            f.write(b"fake-ea-binary")
+        ea_sha = hashlib.sha256(b"fake-ea-binary").hexdigest()
+        files_dir = os.path.join(DATA_ROOT, "t_sniper_mql5", "MQL5", "Files")
+        os.makedirs(files_dir, exist_ok=True)
+        gw.arm(connection_id="c1", ea_path=ea_path,
+               expected_sha256=ea_sha, activation_revision="rev1",
+               broker="fpmarkets", mql5_files_dir=files_dir,
+               existing_secret=False)
         cand = {
             "candidate_id": "cand_snip", "symbol": "GBPUSD.r",
             "direction": "BUY", "volume": 0.5,
@@ -270,7 +283,7 @@ class TestSniperExecutionPath:
         assert captured["stop_loss"] == 1.2532
         assert captured["take_profit"] == 1.2560
 
-    def test_dispatcher_receipt_uses_trigger_price(self):
+    def test_dispatcher_receipt_uses_trigger_price(self, monkeypatch):
         from abutron.events import EventLog
         from abutron.execution.dispatcher import NativeDispatcher
         from abutron.execution.writer_gateway import SingleWriterGateway
@@ -285,6 +298,19 @@ class TestSniperExecutionPath:
             return "ACK", {"status": "ack", "ticket": 7007}
 
         gw._deliver_to_ea = _fake_deliver
+        # Arm the gateway (fail-closed: unarmed writer rejects)
+        import hashlib
+        monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "test-secret-1234567890")
+        ea_path = os.path.join(DATA_ROOT, "t_sniper_disp_ea.ex5")
+        with open(ea_path, "wb") as f:
+            f.write(b"fake-ea-binary2")
+        ea_sha = hashlib.sha256(b"fake-ea-binary2").hexdigest()
+        files_dir = os.path.join(DATA_ROOT, "t_sniper_disp_mql5", "MQL5", "Files")
+        os.makedirs(files_dir, exist_ok=True)
+        gw.arm(connection_id="snip_disp", ea_path=ea_path,
+               expected_sha256=ea_sha, activation_revision="rev1",
+               broker="fpmarkets", mql5_files_dir=files_dir,
+               existing_secret=False)
         rm = ReceiptManager(log)
         disp = NativeDispatcher(log, gw, rm)
 

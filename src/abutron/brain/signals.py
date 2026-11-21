@@ -536,7 +536,7 @@ def _apply_gemma_overlay(scores: List[Dict[str, float]], *,
     compact = {
         "symbol": symbol,
         "bars": len(closes),
-        "last_close": float(closes[-1]) if closes else 0.0,
+        "last_close": float(closes[-1]) if len(closes) else 0.0,
         "recent_closes": [round(float(v), 6) for v in list(closes)[-40:]],
         "recent_highs": [round(float(v), 6) for v in list(highs)[-20:]],
         "recent_lows": [round(float(v), 6) for v in list(lows)[-20:]],

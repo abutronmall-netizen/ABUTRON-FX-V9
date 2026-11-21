@@ -190,7 +190,16 @@ def test_service_starts_without_vendored_apex():
                 "volume": 10.0},
         manifest=[{"broker": "deriv", "symbol": "Volatility 100 Index.0"}],
         equity=10000.0)
-    if not ai.apex_available():
+    # When the agentic engine is enabled it is the authoritative decision
+    # path and runs BEFORE the apex-availability check, so the vendored APEX
+    # source is no longer required for the platform to serve decisions. In
+    # that case the agentic engine produces its own status (HOLD/REJECTED/
+    # BLOCKED/READY) and vendor absence is not a blocker. Only when the
+    # agentic engine is absent does vendor absence yield APEX_VENDOR_MISSING.
+    if ai._agentic_engine is not None:
+        assert out["status"] in ("HOLD", "REJECTED", "BLOCKED", "READY")
+        assert out["candidate"] is None or out["status"] == "READY"
+    elif not ai.apex_available():
         assert out["status"] == "APEX_VENDOR_MISSING"
         assert out["candidate"] is None
     else:
