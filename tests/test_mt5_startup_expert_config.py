@@ -471,3 +471,92 @@ class TestValidPeriods:
 
     def test_does_not_contain_m45(self):
         assert "M45" not in VALID_MT5_PERIODS
+
+
+class TestUpdateChartReference:
+    """update_chart_reference() must preserve .chr permissions and ownership."""
+
+    def _make_chr(self, tmp_path, content=b"\x00\x01chart-data"):
+        """Create a minimal terminal with a .chr file in the Charts dir."""
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        prefix = str(tmp_path / "prefix-chr")
+        charts_dir = os.path.join(
+            prefix, "drive_c", "Program Files", "MetaTrader 5",
+            "MQL5", "Profiles", "Charts", "Default")
+        os.makedirs(charts_dir, exist_ok=True)
+        chr_path = os.path.join(charts_dir, "chart03.chr")
+        # Simulate UTF-16 LE V307 reference
+        v307 = "AbutronFPMarketsNativeFeedParallelV307_FP1636".encode("utf-16-le")
+        Path(chr_path).write_bytes(content + v307 + b"\x00\x01trailer")
+        # Set non-default permissions (0640)
+        os.chmod(chr_path, 0o640)
+
+        export_dir = os.path.join(prefix, "drive_c", "Program Files",
+                                  "MetaTrader 5", "MQL5", "Files")
+        os.makedirs(export_dir, exist_ok=True)
+        from abutron.feeds.mt5_terminal import Terminal
+        term = Terminal("cid1636", "FP Markets", 1636, "FPMarketsSC-Demo",
+                        prefix, export_dir)
+        mgr._terminals["cid1636"] = term
+        return mgr, chr_path, prefix
+
+    def test_preserves_file_permissions(self, tmp_path):
+        """Atomic replacement must preserve original mode (e.g. 0640)."""
+        mgr, chr_path, prefix = self._make_chr(tmp_path)
+        before_mode = os.stat(chr_path).st_mode & 0o777
+        assert before_mode == 0o640
+
+        mgr.update_chart_reference(
+            "cid1636", "chart03.chr",
+            old_ea_name="AbutronFPMarketsNativeFeedParallelV307_FP1636",
+            new_ea_name="AbutronFPMarketsNativeFeedParallelV305")
+
+        after_mode = os.stat(chr_path).st_mode & 0o777
+        assert after_mode == 0o640, (
+            f"permissions changed from {oct(before_mode)} to {oct(after_mode)}")
+
+    def test_backup_file_created(self, tmp_path):
+        """A .bak backup of the original .chr must be created."""
+        mgr, chr_path, prefix = self._make_chr(tmp_path)
+        mgr.update_chart_reference(
+            "cid1636", "chart03.chr",
+            old_ea_name="AbutronFPMarketsNativeFeedParallelV307_FP1636",
+            new_ea_name="AbutronFPMarketsNativeFeedParallelV305")
+        backup = chr_path + ".bak"
+        assert os.path.isfile(backup)
+
+    def test_replaces_v307_reference(self, tmp_path):
+        """The V307 name must be replaced with V305 in the .chr file."""
+        mgr, chr_path, prefix = self._make_chr(tmp_path)
+        mgr.update_chart_reference(
+            "cid1636", "chart03.chr",
+            old_ea_name="AbutronFPMarketsNativeFeedParallelV307_FP1636",
+            new_ea_name="AbutronFPMarketsNativeFeedParallelV305")
+        with open(chr_path, "rb") as fh:
+            data = fh.read()
+        v307 = "AbutronFPMarketsNativeFeedParallelV307_FP1636".encode("utf-16-le")
+        v305 = "AbutronFPMarketsNativeFeedParallelV305".encode("utf-16-le")
+        assert v307 not in data
+        assert v305 in data
+
+    def test_rejects_non_chr_file(self, tmp_path):
+        mgr, chr_path, prefix = self._make_chr(tmp_path)
+        try:
+            mgr.update_chart_reference(
+                "cid1636", "chart03.txt",
+                old_ea_name="AbutronFPMarketsNativeFeedParallelV307_FP1636",
+                new_ea_name="AbutronFPMarketsNativeFeedParallelV305")
+            assert False, "Should have rejected non-.chr file"
+        except Mt5Error:
+            pass
+
+    def test_rejects_unknown_connection(self, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        try:
+            mgr.update_chart_reference(
+                "unknown", "chart03.chr",
+                old_ea_name="AbutronFPMarketsNativeFeedParallelV307_FP1636",
+                new_ea_name="AbutronFPMarketsNativeFeedParallelV305")
+            assert False, "Should have rejected unknown connection"
+        except Mt5Error:
+            pass

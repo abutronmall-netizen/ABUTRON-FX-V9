@@ -289,13 +289,18 @@ class Mt5TerminalManager:
         new_bytes = new_ea_name.encode("utf-16-le")
         data = data.replace(old_bytes, new_bytes)
 
-        # Write back atomically
+        # Write back atomically, preserving original permissions and
+        # ownership so the replacement does not tighten file mode (e.g.
+        # from 0640 to 0600) or drop ownership.
+        orig_stat = os.stat(chart_path)
         fd, tmp_path = tempfile.mkstemp(prefix=".chart", dir=charts_dir)
         try:
             with os.fdopen(fd, "wb") as out:
                 out.write(data)
                 out.flush()
                 os.fsync(out.fileno())
+            os.chmod(tmp_path, orig_stat.st_mode & 0o777)
+            os.chown(tmp_path, orig_stat.st_uid, orig_stat.st_gid)
             os.replace(tmp_path, chart_path)
             self._qa_fsync_dir(charts_dir)
         finally:
