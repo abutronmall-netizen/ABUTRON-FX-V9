@@ -94,6 +94,7 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
         return result
 
     precisions = set()
+    source_identity = None
     with path.open("r", encoding="utf-8") as fh:
         for line_no, line in enumerate(fh, 1):
             line = line.strip()
@@ -136,6 +137,18 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
                     f"{expected_file}:{line_no} symbol mismatch: "
                     f"{rec_sym!r} != {symbol!r}")
 
+            # All rows from one file must agree on the same DEMO identity.
+            current_identity = (rec.get("broker_server"), rec.get("account_login"))
+            if (not isinstance(current_identity[0], str) or not current_identity[0]
+                    or type(current_identity[1]) is not int or current_identity[1] <= 0):
+                result["errors"].append(
+                    f"{expected_file}:{line_no} invalid broker identity")
+            if source_identity is None:
+                source_identity = current_identity
+            elif current_identity != source_identity:
+                result["errors"].append(
+                    f"{expected_file}:{line_no} account/server identity changed")
+
             # 4. Read-only: no forbidden fields
             for field in FORBIDDEN_FIELDS:
                 if field in rec:
@@ -148,9 +161,9 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
                     val = rec.get(pf)
                     if isinstance(val, (int, Decimal)) and not isinstance(val, bool):
                         precisions.add(decimals_of(str(val)))
-                    elif val is not None:
+                    else:
                         result["errors"].append(
-                            f"{expected_file}:{line_no} {pf} is not a JSON number")
+                            f"{expected_file}:{line_no} {pf} missing or not a JSON number")
             elif rtype == "DOM":
                 levels = rec.get("levels", [])
                 if not isinstance(levels, list) or not levels:
@@ -176,10 +189,9 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
 
             # 6. STATUS records
             if rtype == "STATUS":
-                if rec.get("dom_subscribed") is not True:
-                    result["warnings"].append(
-                        f"{expected_file}:{line_no} STATUS dom_subscribed "
-                        f"not true for subscribed symbol")
+                if type(rec.get("dom_subscribed")) is not bool:
+                    result["errors"].append(
+                        f"{expected_file}:{line_no} STATUS dom_subscribed not boolean")
 
     # 7. Required record types present
     # MT5 often has quote-only instruments, and many brokers offer no DOM.
