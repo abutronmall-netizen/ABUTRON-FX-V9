@@ -23,7 +23,7 @@
 //| InpActivationSecret input.                                        |
 //+------------------------------------------------------------------+
 #property copyright "ABUTRON FX V9"
-#property version   "1.10"
+#property version   "1.11"
 
 input string  InpConnectionId   = "";           // connection id
 input string  InpBrokerServer   = "";           // broker server
@@ -37,6 +37,54 @@ input int     InpManagedCharts  = 0;            // 0 = all charts with EA
 input double  InpRiskFraction   = 0.15;         // per-trade risk fraction (display)
 input int     InpRiskFractionPct = 15;          // percent (15 => 0.15)
 input ENUM_TIMEFRAMES InpExportPeriod = PERIOD_M5;  // native export timeframe
+
+// V3 market-microstructure indicator attachment. ApexMarketFeedV3 is a
+// custom indicator (OnCalculate) that runs alongside this EA. MT5 discards
+// indicator entries during chart initialization in this isolated profile,
+// so attach the ALREADY signed indicator after the DEMO/auth checks pass,
+// using the same iCustom()/ChartIndicatorAdd() mechanism as the FP V305 EA.
+// The V3 indicator is read-only and DEMO-only (refuses LIVE), so attaching
+// it alongside the order-capable writer is safe: it never places orders.
+input string  InpV3Indicator    = "ApexMarketFeedV3";
+input string  InpV3IndicatorDir = "ABUTRON";
+bool g_v3_installed = false;
+int  g_v3_handle    = INVALID_HANDLE;
+datetime g_v3_attempt_time = 0;
+void EnsureV3Indicator()
+{
+   if(g_v3_installed) return;
+   if(TimeLocal() - g_v3_attempt_time < 30) return;
+   g_v3_attempt_time = TimeLocal();
+   // Don't attach a duplicate when MT5 already restored the indicator.
+   for(int i = 0; i < ChartIndicatorsTotal(0, 0); i++)
+   {
+      string name = ChartIndicatorName(0, 0, i);
+      if(StringFind(name, InpV3Indicator) >= 0)
+      {
+         g_v3_installed = true;
+         Print("ABUTRON_DERIV_V3_INDICATOR_ALREADY_ATTACHED");
+         return;
+      }
+   }
+   ResetLastError();
+   string v3_path = InpV3IndicatorDir + "\\" + InpV3Indicator;
+   int handle = iCustom(_Symbol, _Period, v3_path);
+   if(handle == INVALID_HANDLE)
+   {
+      Print("ABUTRON_DERIV_V3_INDICATOR_CREATE_FAILED code=", GetLastError(), " path=", v3_path);
+      return;
+   }
+   ResetLastError();
+   if(!ChartIndicatorAdd(0, 0, handle))
+   {
+      Print("ABUTRON_DERIV_V3_INDICATOR_ATTACH_FAILED code=", GetLastError());
+      IndicatorRelease(handle);
+      return;
+   }
+   g_v3_handle = handle;
+   g_v3_installed = true;
+   Print("ABUTRON_DERIV_V3_INDICATOR_ATTACHED_AFTER_DEMO_AUTH: " + v3_path);
+}
 
 string g_activation_secret = "";                // resolved at OnInit
 ulong g_last_tick_ms = 0;                   // last CopyTicks collection time (ms since epoch)
@@ -85,6 +133,10 @@ void OnDeinit(const int reason)
 void OnTimer()
 {
    ExportNativeData();
+   // Attach the V3 market-microstructure indicator after the DEMO/auth
+   // checks pass in OnInit. The V3 indicator is read-only and DEMO-only,
+   // so it is safe to run alongside the order-capable writer.
+   EnsureV3Indicator();
    // DEMO exposure QA is strictly read-only unless explicitly reconfigured.
    if(!InpExposureOnly)
    {
