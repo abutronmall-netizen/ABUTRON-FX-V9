@@ -140,7 +140,9 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
             # All rows from one file must agree on the same DEMO identity.
             current_identity = (rec.get("broker_server"), rec.get("account_login"))
             if (not isinstance(current_identity[0], str) or not current_identity[0]
-                    or type(current_identity[1]) is not int or current_identity[1] <= 0):
+                    or not isinstance(current_identity[1], str)
+                    or not current_identity[1].isdigit()
+                    or int(current_identity[1]) <= 0):
                 result["errors"].append(
                     f"{expected_file}:{line_no} invalid broker identity")
             if source_identity is None:
