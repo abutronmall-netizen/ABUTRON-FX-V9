@@ -1,0 +1,88 @@
+name: ABUTRON full-suite regression (isolated CI)
+
+on:
+  pull_request:
+  push:
+    branches: [arena/a097f5f5-abutron-fx-v9]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-suite-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest-full-suite:
+    name: Full-suite regression in disposable environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create isolated venv from pinned requirements
+        run: |
+          set -euo pipefail
+          python -m venv .venv-ci
+          .venv-ci/bin/pip install --upgrade pip
+          .venv-ci/bin/pip install -r requirements.txt
+
+      - name: Dependency drift guard (Starlette must satisfy FastAPI)
+        run: |
+          set -euo pipefail
+          .venv-ci/bin/python - <<'PY'
+          import importlib.metadata as md
+          import pathlib
+
+          fastapi = md.version("fastapi")
+          starlette = md.version("starlette")
+          httpx = md.version("httpx")
+
+          # FastAPI 0.115.6 constrains Starlette to 0.40.x-0.41.x. A drifted
+          # Starlette (e.g. 1.x) changes the TestClient transport and breaks
+          # the portal test stack without any application defect. Fail the
+          # gate early instead of surfacing confusing errors later.
+          def major_minor(v):
+              parts = v.split(".")
+              return (int(parts[0]), int(parts[1]))
+
+          sm = major_minor(starlette)
+          if not ((0, 40) <= sm <= (0, 41)):
+              raise SystemExit(
+                  f"Starlette {starlette} is outside the FastAPI "
+                  f"0.115.x constraint range 0.40-0.41; dependency drift."
+              )
+          # httpx2 must never be a direct production requirement; the
+          # pinned httpx-based test client is the supported path. Scan the
+          # declared requirements file itself, since the project is not
+          # installed as a package in this disposable venv.
+          reqs = pathlib.Path("requirements.txt").read_text().splitlines()
+          direct = [r for r in reqs if r.strip() and not r.strip().startswith("#")
+                    and "httpx2" in r]
+          if direct:
+              raise SystemExit(
+                  "httpx2 is declared as a direct requirement; "
+                  "keep it transitive only: " + ", ".join(direct)
+              )
+          print(f"fastapi={fastapi} starlette={starlette} httpx={httpx} OK")
+          PY
+
+      - name: Run full test suite
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src .venv-ci/bin/python -m pytest tests/ -q \
+            --junitxml=test-results.xml
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-suite-pytest-report
+          path: test-results.xml
+          if-no-files-found: ignore
+          retention-days: 30
