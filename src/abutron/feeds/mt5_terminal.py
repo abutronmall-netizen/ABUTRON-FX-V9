@@ -9,18 +9,21 @@ the MQL5/Files drop zone, and health heartbeats. It does NOT place orders
 — the native EA inside the terminal is the only order authority.
 
 Startup configuration:
-The [StartUp] section of the MT5 /config file supports exactly one
-Expert. The existing production worker uses
-``ABUTRON\\AbutronFPMarketsNativeFeedEA`` as its startup expert for
-heartbeat authentication. Replacing that expert would break the feed
-initialization sequence that V305 depends on.
+MT5 supports exactly one Expert per chart. The [StartUp] section of the
+MT5 /config file opens a temporary startup chart with the auth expert
+(``ABUTRON\\AbutronFPMarketsNativeFeedEA``) for heartbeat authentication.
 
-To attach V305 without displacing the auth expert, this module supports
-a chart-template approach: the auth expert remains as ``[StartUp]
-Expert``, and a chart template (.tpl) with V305 pre-attached is applied
-to the startup chart via the ``Template`` parameter. Both EAs then run
-on the same temporary startup chart: the auth EA for heartbeat, V305
-for data export.
+V305 is deployed on a SEPARATE chart (chart03) via its existing .chr
+chart-state file. The .chr file references the EA by name; when MT5
+restarts, it loads the EA binary from MQL5/Experts/ by name. Deploying
+V305 therefore requires: (1) staging the V305 EX5 binary in the Experts
+directory, and (2) restarting the terminal. The /config file only
+controls the auth expert's startup chart — it does not attach V305.
+
+The correct production chart layout is:
+  - Startup chart:  auth EA (heartbeat)  — via [StartUp] Expert
+  - Chart01:        order bridge (unchanged)
+  - Chart03:        V305 feed EA (via existing .chr file + staged binary)
 """
 from __future__ import annotations
 
@@ -39,10 +42,11 @@ from typing import Dict, List, Optional
 from ..config import (MT5_EXE, MT5_EXPORT_DIR, MT5_ROOT, WINE_PREFIX)
 from ..crypto import make_nonce
 
-# MT5 supports exactly these 21 timeframes (PERIOD_ enum values).
+# MT5 supports exactly 21 timeframes (ENUM_TIMEFRAMES). M45 is NOT
+# a standard MT5 timeframe and must not be in the allowlist.
 VALID_MT5_PERIODS = frozenset({
     "M1", "M2", "M3", "M4", "M5", "M6", "M10", "M12", "M15", "M20",
-    "M30", "M45", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D1",
+    "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D1",
     "W1", "MN1",
 })
 
@@ -114,9 +118,8 @@ class Mt5TerminalManager:
     def launch(self, connection_id: str, broker: str, login: int,
                server: str, *, headless: bool = True,
                auth_expert: Optional[str] = None,
-               feed_expert: Optional[str] = None,
-               feed_symbol: Optional[str] = None,
-               feed_period: Optional[str] = None) -> Terminal:
+               startup_symbol: Optional[str] = None,
+               startup_period: Optional[str] = None) -> Terminal:
         if connection_id in self._terminals and self._terminals[connection_id].is_running:
             raise Mt5Error("terminal already running")
         prefix = self.ensure_prefix(connection_id)
@@ -135,24 +138,24 @@ class Mt5TerminalManager:
         cmd = ["wine", MT5_EXE]
         if headless:
             cmd += ["/headless", "/nosplash"]
-        # The /config file preserves the auth expert as [StartUp] Expert
-        # (heartbeat authentication) and attaches the feed expert via a
-        # chart template. MT5's [StartUp] supports exactly one Expert,
-        # so replacing the auth expert with the feed expert would break
-        # the heartbeat dependency. The Template parameter applies a
-        # .tpl file that has the feed expert pre-attached, so both EAs
-        # run on the same temporary startup chart.
+        # The /config file opens a temporary startup chart with the auth
+        # expert for heartbeat authentication. MT5 supports exactly one
+        # Expert per chart — V305 is NOT attached here. V305 runs on a
+        # separate chart (chart03) via its existing .chr file and the
+        # staged EX5 binary in MQL5/Experts/.
+        #
+        # When auth_expert is set, startup_symbol and startup_period are
+        # REQUIRED: they define which chart the auth expert runs on.
+        # Without them, MT5 attaches the EA to the first chart of the
+        # current profile, which could be an order-bridge chart.
         #
         # Command-line syntax is /config:<path> (colon, no space).
-        # The path is converted to a Windows-compatible Z:\... path
-        # via winepath, since MT5 runs inside Wine and expects Windows
-        # path conventions.
+        # The path is converted to a Windows-compatible path via winepath.
         config_path = None
-        if auth_expert or feed_expert:
+        if auth_expert:
             config_path = self._write_startup_config(
                 connection_id, prefix, auth_expert,
-                feed_expert, feed_symbol, feed_period)
-            # Convert the Linux config path to a Windows Z:\ path for Wine
+                startup_symbol, startup_period)
             wine_config_path = self._convert_to_wine_path(config_path, prefix)
             cmd.append(f"/config:{wine_config_path}")
         term.proc = subprocess.Popen(cmd, env=env,
@@ -161,6 +164,54 @@ class Mt5TerminalManager:
         term.started_at = time.time()
         term.health_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         return term
+
+    def stage_feed_expert_binary(self, connection_id: str,
+                                 expert_name: str,
+                                 ex5_path: str,
+                                 expected_sha: str) -> str:
+        """Stage a feed EA binary in the terminal's MQL5/Experts directory.
+
+        This is the mechanism for deploying V305 on chart03. The existing
+        chart03 .chr file references the EA by name; when MT5 restarts, it
+        loads the EA binary from MQL5/Experts/ by name. Staging the corrected
+        EX5 binary here ensures the next terminal initialization loads V305
+        instead of the older V307.
+
+        The binary is staged under MQL5/Experts/<expert_name>/.ex5 using
+        the existing atomic-install pattern (hash-check, fsync, atomic
+        replace).
+
+        Args:
+            connection_id: The terminal connection ID.
+            expert_name: Backslash-relative expert path (e.g.
+                "ABUTRON\\AbutronFPMarketsNativeFeedParallelV305").
+            ex5_path: Linux path to the verified EX5 binary.
+            expected_sha: Expected SHA-256 of the binary.
+
+        Returns the destination path of the staged binary.
+        """
+        if "/" in expert_name or expert_name.startswith("\\"):
+            raise Mt5Error("expert_name must be a backslash-relative path")
+        if ".." in expert_name:
+            raise Mt5Error("expert_name must not contain path traversal (..)")
+        if re.match(r"^[A-Za-z]:[\\/]", expert_name):
+            raise Mt5Error("expert_name must not be an absolute drive-letter path")
+
+        term = self._terminals.get(connection_id)
+        if term is None:
+            raise Mt5Error(f"terminal not found: {connection_id}")
+
+        # Resolve the Experts directory inside the terminal prefix
+        experts_dir = os.path.join(
+            term.wine_prefix, "drive_c", "Program Files",
+            "MetaTrader 5", "MQL5", "Experts")
+        dest_dir = os.path.join(experts_dir, expert_name.replace("\\", os.sep))
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_path = os.path.join(dest_dir, expert_name.split("\\")[-1] + ".ex5")
+
+        self._atomic_install(ex5_path, dest_path, term.export_dir,
+                             expected_sha=expected_sha)
+        return dest_path
 
     @staticmethod
     def _convert_to_wine_path(linux_path: str, prefix: str) -> str:
@@ -175,7 +226,6 @@ class Mt5TerminalManager:
         For paths inside the Wine prefix (drive_c/...), the conversion
         maps to ``C:\\...``. For paths outside, ``Z:\\...`` is used.
         """
-        # If winepath is available, use it for the most accurate conversion
         try:
             cp = subprocess.run(
                 ["winepath", "-w", linux_path],
@@ -183,175 +233,90 @@ class Mt5TerminalManager:
                 env={**os.environ, "WINEPREFIX": prefix})
             if cp.returncode == 0 and cp.stdout.strip():
                 wine_path = cp.stdout.strip()
-                # winepath may produce mixed-case or forward-slash output;
-                # normalize to backslashes and uppercase drive letter
                 wine_path = wine_path.replace("/", "\\")
                 return wine_path
         except (OSError, subprocess.SubprocessError):
             pass
         # Fallback: manual conversion.
-        # The Wine prefix's drive_c maps to C:\
         drive_c = os.path.join(prefix, "drive_c")
         real_drive_c = os.path.realpath(drive_c)
         real_path = os.path.realpath(linux_path)
         if real_path.startswith(real_drive_c + os.sep):
             rel = real_path[len(real_drive_c) + 1:]
             return "C:\\" + rel.replace("/", "\\")
-        # Outside the prefix: map Linux root to Z:\
         rel = real_path.lstrip("/")
         return "Z:\\" + rel.replace("/", "\\")
 
     def _write_startup_config(self, connection_id: str, prefix: str,
-                              auth_expert: Optional[str],
-                              feed_expert: Optional[str],
-                              feed_symbol: Optional[str],
-                              feed_period: Optional[str]) -> str:
-        """Write a MT5 /config file preserving the auth expert and
-        attaching the feed expert via a chart template.
+                              auth_expert: str,
+                              startup_symbol: Optional[str],
+                              startup_period: Optional[str]) -> str:
+        """Write a MT5 /config file with the auth expert's startup chart.
 
         The config file is placed under the terminal prefix so it is
         accessible to the Wine-launched MT5 process. The [StartUp] section
-        (capital U, per MT5 documentation) has two roles:
+        (capital U, per MT5 documentation) opens a temporary chart with
+        the auth expert for heartbeat authentication.
 
-        1. **Auth expert**: Set as ``Expert`` to preserve the existing
-           heartbeat authentication EA (``AbutronFPMarketsNativeFeedEA``).
-           Replacing this expert would break the feed initialization
-           sequence that V305 depends on.
+        MT5 supports exactly one Expert per chart. This config only
+        controls the auth expert's startup chart. V305 is deployed on a
+        separate chart (chart03) via binary staging, not via this config.
 
-        2. **Feed expert**: Attached via a chart template (.tpl file).
-           MT5's [StartUp] supports exactly one Expert, so the feed
-           expert is attached through the ``Template`` parameter. The
-           .tpl file has the feed expert pre-attached. When MT5 applies
-           the template to the startup chart, both EAs run on the same
-           temporary chart: the auth EA for heartbeat, the feed EA for
-           data export.
-
-        The auth expert is OPTIONAL: if not provided, no Expert is set
-        in [StartUp] and the terminal starts without a startup expert.
-
-        The feed expert requires feed_symbol, feed_period, and a
-        corresponding .tpl template file. If the template file does not
-        exist, a minimal one is generated.
+        startup_symbol and startup_period are REQUIRED when auth_expert
+        is set: they define which chart the auth expert runs on. Without
+        them, MT5 attaches the EA to the first chart of the current
+        profile, which could be an order-bridge chart.
 
         Returns the absolute path to the config file (Linux filesystem).
         """
-        # Validate auth expert (optional, but if present must be safe)
-        if auth_expert:
-            if any(c in auth_expert for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in auth_expert):
-                raise Mt5Error("auth_expert must not contain control characters")
-            if "/" in auth_expert or auth_expert.startswith("\\"):
-                raise Mt5Error("auth_expert must be a backslash-relative path (e.g. ABUTRON\\EAName)")
-            if ".." in auth_expert:
-                raise Mt5Error("auth_expert must not contain path traversal (..)")
-            if re.match(r"^[A-Za-z]:[\\/]", auth_expert):
-                raise Mt5Error("auth_expert must not be an absolute drive-letter path")
+        # Validate auth expert
+        if not auth_expert:
+            raise Mt5Error("auth_expert is required")
+        if any(c in auth_expert for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in auth_expert):
+            raise Mt5Error("auth_expert must not contain control characters")
+        if "/" in auth_expert or auth_expert.startswith("\\"):
+            raise Mt5Error("auth_expert must be a backslash-relative path (e.g. ABUTRON\\EAName)")
+        if ".." in auth_expert:
+            raise Mt5Error("auth_expert must not contain path traversal (..)")
+        if re.match(r"^[A-Za-z]:[\\/]", auth_expert):
+            raise Mt5Error("auth_expert must not be an absolute drive-letter path")
 
-        # Validate feed expert (optional, but if present requires symbol/period)
-        if feed_expert:
-            if any(c in feed_expert for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in feed_expert):
-                raise Mt5Error("feed_expert must not contain control characters")
-            if "/" in feed_expert or feed_expert.startswith("\\"):
-                raise Mt5Error("feed_expert must be a backslash-relative path (e.g. ABUTRON\\EAName)")
-            if ".." in feed_expert:
-                raise Mt5Error("feed_expert must not contain path traversal (..)")
-            if re.match(r"^[A-Za-z]:[\\/]", feed_expert):
-                raise Mt5Error("feed_expert must not be an absolute drive-letter path")
-
-            if not feed_symbol:
-                raise Mt5Error("feed_symbol is required when feed_expert is set")
-            if any(c in feed_symbol for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in feed_symbol):
-                raise Mt5Error("feed_symbol must not contain control characters")
-            if not feed_period:
-                raise Mt5Error("feed_period is required when feed_expert is set")
-            if any(c in feed_period for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in feed_period):
-                raise Mt5Error("feed_period must not contain control characters")
-            if feed_period not in VALID_MT5_PERIODS:
-                raise Mt5Error(
-                    f"feed_period '{feed_period}' is not a valid MT5 timeframe. "
-                    f"Valid periods: {sorted(VALID_MT5_PERIODS)}")
-
-        # Generate the chart template for the feed expert if needed
-        template_name = ""
-        if feed_expert:
-            template_name = self._write_feed_chart_template(
-                connection_id, prefix, feed_expert, feed_symbol, feed_period)
+        # Validate startup symbol and period (both required)
+        if not startup_symbol:
+            raise Mt5Error("startup_symbol is required to define the auth expert's chart")
+        if any(c in startup_symbol for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in startup_symbol):
+            raise Mt5Error("startup_symbol must not contain control characters")
+        if not startup_period:
+            raise Mt5Error("startup_period is required to define the auth expert's chart")
+        if any(c in startup_period for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in startup_period):
+            raise Mt5Error("startup_period must not contain control characters")
+        if startup_period not in VALID_MT5_PERIODS:
+            raise Mt5Error(
+                f"startup_period '{startup_period}' is not a valid MT5 timeframe. "
+                f"Valid periods: {sorted(VALID_MT5_PERIODS)}")
 
         config_dir = os.path.join(prefix, "drive_c", "Program Files",
                                    "MetaTrader 5", "MQL5", "Config")
         os.makedirs(config_dir, exist_ok=True)
         config_path = os.path.join(config_dir, "abutron_startup.cfg")
 
-        # Build the [StartUp] section.
-        # The auth expert is preserved as Expert (heartbeat authentication).
-        # The feed expert is attached via the Template parameter.
-        # Both run on the same temporary startup chart.
-        lines = ["[StartUp]\r\n"]
-        if auth_expert:
-            lines.append(f"Expert={auth_expert}\r\n")
-        if feed_expert:
-            lines.append(f"Symbol={feed_symbol}\r\n")
-            lines.append(f"Period={feed_period}\r\n")
-            if template_name:
-                lines.append(f"Template={template_name}\r\n")
-        content = "".join(lines)
+        # MT5 [StartUp] section: opens a temporary chart with the auth
+        # expert. This chart is not saved when MT5 closes. V305 is NOT
+        # attached here — it runs on a separate chart via binary staging.
+        content = (
+            "[StartUp]\r\n"
+            f"Expert={auth_expert}\r\n"
+            f"Symbol={startup_symbol}\r\n"
+            f"Period={startup_period}\r\n"
+        )
         with open(config_path, "w", encoding="utf-8") as fh:
             fh.write(content)
         return config_path
 
-    def _write_feed_chart_template(self, connection_id: str, prefix: str,
-                                   feed_expert: str, feed_symbol: str,
-                                   feed_period: str) -> str:
-        """Write a minimal MT5 chart template (.tpl) with the feed expert.
-
-        MT5 chart templates are binary files that store chart objects,
-        including attached EAs. This function creates a minimal .tpl file
-        that has the feed expert pre-attached.
-
-        The template is stored in ``MQL5/Profiles/Templates/`` so MT5
-        can find it by name. The template name is derived from the feed
-        expert name (e.g. ``ABUTRON\\AbutronFPMarketsNativeFeedParallelV305``
-        becomes ``ABUTRON_AbutronFPMarketsNativeFeedParallelV305``).
-
-        NOTE: MT5 .tpl files are binary. This creates a minimal template
-        structure. If MT5 rejects the generated template, create one
-        via a one-time MT5 session: open a chart, attach the feed expert,
-        and save as a template with the same name.
-
-        Returns the template name (not path) for use in the config file.
-        """
-        # Derive a template name from the expert name
-        # Replace backslashes with underscores for a valid filename
-        template_name = feed_expert.replace("\\", "_")
-        template_dir = os.path.join(
-            prefix, "drive_c", "Program Files",
-            "MetaTrader 5", "MQL5", "Profiles", "Templates")
-        os.makedirs(template_dir, exist_ok=True)
-        template_path = os.path.join(template_dir, template_name + ".tpl")
-
-        # Write a minimal MT5 .tpl file.
-        # MT5 .tpl format: 4-byte version, 4-byte object count, then
-        # per-object data. For a minimal template with one EA:
-        # - version: 1 (uint32 LE)
-        # - object count: 1 (uint32 LE)
-        # - object type: 0x0000000B (chart expert, uint32 LE)
-        # - expert name: null-terminated string
-        import struct
-        expert_name_bytes = feed_expert.encode("utf-16-le") + b"\x00\x00"
-        template_data = (
-            struct.pack("<I", 1) +          # template version
-            struct.pack("<I", 1) +          # object count
-            struct.pack("<I", 0x0B) +       # object type: chart expert
-            expert_name_bytes               # expert name (UTF-16LE, null-terminated)
-        )
-        with open(template_path, "wb") as fh:
-            fh.write(template_data)
-        return template_name
-
     def validate_before_restart(self, connection_id: str,
                                 auth_expert: Optional[str] = None,
-                                feed_expert: Optional[str] = None,
-                                feed_symbol: Optional[str] = None,
-                                feed_period: Optional[str] = None) -> None:
+                                startup_symbol: Optional[str] = None,
+                                startup_period: Optional[str] = None) -> None:
         """Validate startup configuration before stopping a running terminal.
 
         Call this before restart() to ensure the config is valid without
@@ -360,34 +325,24 @@ class Mt5TerminalManager:
 
         Raises Mt5Error if the configuration is invalid.
         """
-        # Validate auth expert
-        if auth_expert:
-            if any(c in auth_expert for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in auth_expert):
-                raise Mt5Error("auth_expert must not contain control characters")
-            if "/" in auth_expert or auth_expert.startswith("\\"):
-                raise Mt5Error("auth_expert must be a backslash-relative path")
-            if ".." in auth_expert:
-                raise Mt5Error("auth_expert must not contain path traversal (..)")
-            if re.match(r"^[A-Za-z]:[\\/]", auth_expert):
-                raise Mt5Error("auth_expert must not be an absolute drive-letter path")
+        if not auth_expert:
+            return  # No startup expert configured — nothing to validate
 
-        # Validate feed expert
-        if feed_expert:
-            if any(c in feed_expert for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in feed_expert):
-                raise Mt5Error("feed_expert must not contain control characters")
-            if "/" in feed_expert or feed_expert.startswith("\\"):
-                raise Mt5Error("feed_expert must be a backslash-relative path")
-            if ".." in feed_expert:
-                raise Mt5Error("feed_expert must not contain path traversal (..)")
-            if re.match(r"^[A-Za-z]:[\\/]", feed_expert):
-                raise Mt5Error("feed_expert must not be an absolute drive-letter path")
-            if not feed_symbol:
-                raise Mt5Error("feed_symbol is required when feed_expert is set")
-            if not feed_period:
-                raise Mt5Error("feed_period is required when feed_expert is set")
-            if feed_period not in VALID_MT5_PERIODS:
-                raise Mt5Error(
-                    f"feed_period '{feed_period}' is not a valid MT5 timeframe")
+        if any(c in auth_expert for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in auth_expert):
+            raise Mt5Error("auth_expert must not contain control characters")
+        if "/" in auth_expert or auth_expert.startswith("\\"):
+            raise Mt5Error("auth_expert must be a backslash-relative path")
+        if ".." in auth_expert:
+            raise Mt5Error("auth_expert must not contain path traversal (..)")
+        if re.match(r"^[A-Za-z]:[\\/]", auth_expert):
+            raise Mt5Error("auth_expert must not be an absolute drive-letter path")
+        if not startup_symbol:
+            raise Mt5Error("startup_symbol is required")
+        if not startup_period:
+            raise Mt5Error("startup_period is required")
+        if startup_period not in VALID_MT5_PERIODS:
+            raise Mt5Error(
+                f"startup_period '{startup_period}' is not a valid MT5 timeframe")
 
     def _stage_worker_files(self, connection_id: str, export_dir: str) -> None:
         """Legacy setup, without a false claim that an MQ5 is installed.
@@ -748,16 +703,18 @@ class Mt5TerminalManager:
 
     def restart(self, connection_id: str,
                 auth_expert: Optional[str] = None,
-                feed_expert: Optional[str] = None,
-                feed_symbol: Optional[str] = None,
-                feed_period: Optional[str] = None) -> Terminal:
+                startup_symbol: Optional[str] = None,
+                startup_period: Optional[str] = None) -> Terminal:
+        # Validate configuration before stopping the running terminal.
+        # If validation fails, the terminal remains running.
+        self.validate_before_restart(connection_id, auth_expert,
+                                     startup_symbol, startup_period)
         self.stop(connection_id)
         term = self._terminals[connection_id]
         return self.launch(connection_id, term.broker, term.login,
                            term.server, auth_expert=auth_expert,
-                           feed_expert=feed_expert,
-                           feed_symbol=feed_symbol,
-                           feed_period=feed_period)
+                           startup_symbol=startup_symbol,
+                           startup_period=startup_period)
 
     # ------------------------------------------------------------------
     # Native export read-back

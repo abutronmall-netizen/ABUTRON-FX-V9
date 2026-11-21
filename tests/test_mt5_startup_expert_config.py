@@ -1,14 +1,16 @@
 """Tests for Mt5TerminalManager /config StartUp configuration.
 
-Verifies that the config file preserves the auth expert and attaches
-the feed expert via a chart template, uses /config:<path> syntax with
-Wine-compatible Z:\\ paths, validates periods, and supports
-validate_before_restart.
+Verifies that the config file opens a dedicated startup chart for the
+auth expert (with Symbol and Period required), uses /config:<path>
+syntax with Wine-compatible paths, validates periods against the 21
+standard MT5 timeframes, and that restart() validates before stopping.
+
+Also tests stage_feed_expert_binary() for V305 deployment on chart03.
 """
 from __future__ import annotations
 
+import hashlib
 import os
-import struct
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -21,9 +23,9 @@ from abutron.feeds.mt5_terminal import (
 
 
 class TestStartupConfigWriting:
-    """The _write_startup_config method must preserve auth + attach feed."""
+    """The _write_startup_config method must write auth-only config."""
 
-    def test_preserves_auth_expert_and_attaches_feed_via_template(self, tmp_path):
+    def test_writes_ini_with_auth_expert_and_symbol_period(self, tmp_path):
         mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
         prefix = str(tmp_path / "prefix-test")
         os.makedirs(prefix, exist_ok=True)
@@ -31,20 +33,16 @@ class TestStartupConfigWriting:
         path = mgr._write_startup_config(
             "cid123", prefix,
             auth_expert="ABUTRON\\AbutronFPMarketsNativeFeedEA",
-            feed_expert="ABUTRON\\AbutronFPMarketsNativeFeedParallelV305",
-            feed_symbol="EURUSD.r",
-            feed_period="H1")
+            startup_symbol="EURUSD.r",
+            startup_period="H1")
 
         content = Path(path).read_text(encoding="utf-8")
         assert "[StartUp]" in content
-        # Auth expert preserved as Expert
         assert "Expert=ABUTRON\\AbutronFPMarketsNativeFeedEA" in content
-        # Feed expert attached via template
         assert "Symbol=EURUSD.r" in content
         assert "Period=H1" in content
-        assert "Template=" in content
-        # Feed expert name is NOT in the Expert= line
-        assert "Expert=ABUTRON\\AbutronFPMarketsNativeFeedParallelV305" not in content
+        # No template or feed expert in the config
+        assert "Template=" not in content
 
     def test_config_path_is_inside_wine_prefix(self, tmp_path):
         mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
@@ -54,53 +52,37 @@ class TestStartupConfigWriting:
         path = mgr._write_startup_config(
             "cid123", prefix,
             auth_expert="ABUTRON\\MyAuthEA",
-            feed_expert="ABUTRON\\MyFeedEA",
-            feed_symbol="EURUSD", feed_period="M5")
+            startup_symbol="EURUSD", startup_period="M5")
 
         assert path.startswith(prefix)
         assert "MQL5" in path
         assert "Config" in path
 
-    def test_auth_only_without_feed(self, tmp_path):
-        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
-        prefix = str(tmp_path / "prefix-test")
-        os.makedirs(prefix, exist_ok=True)
-
-        path = mgr._write_startup_config(
-            "cid123", prefix,
-            auth_expert="ABUTRON\\AbutronFPMarketsNativeFeedEA",
-            feed_expert=None, feed_symbol=None, feed_period=None)
-
-        content = Path(path).read_text(encoding="utf-8")
-        assert "Expert=ABUTRON\\AbutronFPMarketsNativeFeedEA" in content
-        assert "Template=" not in content
-        assert "Symbol=" not in content
-
-    def test_feed_requires_symbol(self, tmp_path):
+    def test_requires_symbol(self, tmp_path):
         mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
         prefix = str(tmp_path / "prefix-test")
         os.makedirs(prefix, exist_ok=True)
 
         try:
             mgr._write_startup_config("cid123", prefix,
-                                      auth_expert=None,
-                                      feed_expert="ABUTRON\\MyFeedEA",
-                                      feed_symbol=None, feed_period="H1")
-            assert False, "Should have rejected missing feed_symbol"
+                                      auth_expert="ABUTRON\\MyAuthEA",
+                                      startup_symbol=None,
+                                      startup_period="H1")
+            assert False, "Should have rejected missing symbol"
         except Mt5Error:
             pass
 
-    def test_feed_requires_period(self, tmp_path):
+    def test_requires_period(self, tmp_path):
         mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
         prefix = str(tmp_path / "prefix-test")
         os.makedirs(prefix, exist_ok=True)
 
         try:
             mgr._write_startup_config("cid123", prefix,
-                                      auth_expert=None,
-                                      feed_expert="ABUTRON\\MyFeedEA",
-                                      feed_symbol="EURUSD", feed_period=None)
-            assert False, "Should have rejected missing feed_period"
+                                      auth_expert="ABUTRON\\MyAuthEA",
+                                      startup_symbol="EURUSD",
+                                      startup_period=None)
+            assert False, "Should have rejected missing period"
         except Mt5Error:
             pass
 
@@ -111,30 +93,40 @@ class TestStartupConfigWriting:
 
         try:
             mgr._write_startup_config("cid123", prefix,
-                                      auth_expert=None,
-                                      feed_expert="ABUTRON\\MyFeedEA",
-                                      feed_symbol="EURUSD", feed_period="INVALID")
+                                      auth_expert="ABUTRON\\MyAuthEA",
+                                      startup_symbol="EURUSD",
+                                      startup_period="INVALID")
             assert False, "Should have rejected invalid period"
         except Mt5Error:
             pass
 
-    def test_rejects_newline_injection_in_expert(self, tmp_path):
+    def test_rejects_m45_period(self, tmp_path):
         mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
         prefix = str(tmp_path / "prefix-test")
         os.makedirs(prefix, exist_ok=True)
 
-        for field in ("auth_expert", "feed_expert"):
-            try:
-                kwargs = {"auth_expert": None, "feed_expert": None,
-                          "feed_symbol": None, "feed_period": None}
-                kwargs[field] = "ABUTRON\\EA\n[Common]\r\n"
-                if field == "feed_expert":
-                    kwargs["feed_symbol"] = "EURUSD"
-                    kwargs["feed_period"] = "H1"
-                mgr._write_startup_config("cid123", prefix, **kwargs)
-                assert False, f"Should have rejected newline in {field}"
-            except Mt5Error:
-                pass
+        try:
+            mgr._write_startup_config("cid123", prefix,
+                                      auth_expert="ABUTRON\\MyAuthEA",
+                                      startup_symbol="EURUSD",
+                                      startup_period="M45")
+            assert False, "Should have rejected M45 (not a standard MT5 timeframe)"
+        except Mt5Error:
+            pass
+
+    def test_rejects_newline_injection(self, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        prefix = str(tmp_path / "prefix-test")
+        os.makedirs(prefix, exist_ok=True)
+
+        try:
+            mgr._write_startup_config("cid123", prefix,
+                                      auth_expert="ABUTRON\\EA\n[Common]\r\n",
+                                      startup_symbol="EURUSD",
+                                      startup_period="H1")
+            assert False, "Should have rejected newline injection"
+        except Mt5Error:
+            pass
 
     def test_rejects_path_traversal(self, tmp_path):
         mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
@@ -144,8 +136,8 @@ class TestStartupConfigWriting:
         try:
             mgr._write_startup_config("cid123", prefix,
                                       auth_expert="..\\..\\evil",
-                                      feed_expert=None, feed_symbol=None,
-                                      feed_period=None)
+                                      startup_symbol="EURUSD",
+                                      startup_period="H1")
             assert False, "Should have rejected path traversal"
         except Mt5Error:
             pass
@@ -158,35 +150,11 @@ class TestStartupConfigWriting:
         try:
             mgr._write_startup_config("cid123", prefix,
                                       auth_expert="C:\\Windows\\evil.ex5",
-                                      feed_expert=None, feed_symbol=None,
-                                      feed_period=None)
+                                      startup_symbol="EURUSD",
+                                      startup_period="H1")
             assert False, "Should have rejected absolute drive path"
         except Mt5Error:
             pass
-
-
-class TestChartTemplateWriting:
-    """The _write_feed_chart_template method must create a .tpl file."""
-
-    def test_creates_template_file(self, tmp_path):
-        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
-        prefix = str(tmp_path / "prefix-test")
-        os.makedirs(prefix, exist_ok=True)
-
-        name = mgr._write_feed_chart_template(
-            "cid123", prefix,
-            "ABUTRON\\AbutronFPMarketsNativeFeedParallelV305",
-            "EURUSD.r", "H1")
-
-        assert name == "ABUTRON_AbutronFPMarketsNativeFeedParallelV305"
-        template_dir = os.path.join(
-            prefix, "drive_c", "Program Files",
-            "MetaTrader 5", "MQL5", "Profiles", "Templates")
-        template_path = os.path.join(template_dir, name + ".tpl")
-        assert os.path.isfile(template_path)
-        # Verify binary structure
-        data = Path(template_path).read_bytes()
-        assert len(data) >= 12  # version + count + type
 
 
 class TestWinePathConversion:
@@ -224,9 +192,7 @@ class TestLaunchCommandConstruction:
     @patch("abutron.feeds.mt5_terminal.subprocess.Popen")
     @patch("abutron.feeds.mt5_terminal.subprocess.run")
     @patch.object(Mt5TerminalManager, "_stage_worker_files")
-    def test_launch_with_auth_and_feed_uses_colon_syntax(self, mock_stage, mock_run, mock_popen, tmp_path):
-        # winepath is not available in the test environment; let the
-        # fallback path conversion handle it.
+    def test_launch_with_auth_expert_uses_colon_syntax(self, mock_stage, mock_run, mock_popen, tmp_path):
         mock_run.side_effect = OSError("winepath not available")
         mgr = self._make_manager(tmp_path)
         mgr.ensure_prefix = MagicMock(return_value=str(tmp_path / "prefix-test"))
@@ -235,22 +201,20 @@ class TestLaunchCommandConstruction:
 
         mgr.launch("cid123", "FP Markets", 1000, "FPMarketsSC-Demo",
                    auth_expert="ABUTRON\\AbutronFPMarketsNativeFeedEA",
-                   feed_expert="ABUTRON\\AbutronFPMarketsNativeFeedParallelV305",
-                   feed_symbol="EURUSD.r",
-                   feed_period="H1")
+                   startup_symbol="EURUSD.r",
+                   startup_period="H1")
 
         assert mock_popen.called
         cmd = mock_popen.call_args[0][0]
         config_args = [arg for arg in cmd if arg.startswith("/config")]
         assert len(config_args) == 1
         assert config_args[0].startswith("/config:")
-        # The path after /config: should be a Windows-style path (C:\ or Z:\)
         config_path = config_args[0][len("/config:"):]
         assert config_path.startswith(("C:\\", "Z:\\"))
 
     @patch("abutron.feeds.mt5_terminal.subprocess.Popen")
     @patch.object(Mt5TerminalManager, "_stage_worker_files")
-    def test_launch_without_experts_omits_config(self, mock_stage, mock_popen, tmp_path):
+    def test_launch_without_auth_expert_omits_config(self, mock_stage, mock_popen, tmp_path):
         mgr = self._make_manager(tmp_path)
         mgr.ensure_prefix = MagicMock(return_value=str(tmp_path / "prefix-test"))
         os.makedirs(str(tmp_path / "prefix-test" / "drive_c" / "Program Files" /
@@ -274,16 +238,14 @@ class TestLaunchCommandConstruction:
 
         mgr.restart("cid123",
                     auth_expert="ABUTRON\\AbutronFPMarketsNativeFeedEA",
-                    feed_expert="ABUTRON\\AbutronFPMarketsNativeFeedParallelV305",
-                    feed_symbol="EURUSD.r",
-                    feed_period="H1")
+                    startup_symbol="EURUSD.r",
+                    startup_period="H1")
 
         mock_launch.assert_called_once()
         _, kwargs = mock_launch.call_args
         assert kwargs.get("auth_expert") == "ABUTRON\\AbutronFPMarketsNativeFeedEA"
-        assert kwargs.get("feed_expert") == "ABUTRON\\AbutronFPMarketsNativeFeedParallelV305"
-        assert kwargs.get("feed_symbol") == "EURUSD.r"
-        assert kwargs.get("feed_period") == "H1"
+        assert kwargs.get("startup_symbol") == "EURUSD.r"
+        assert kwargs.get("startup_period") == "H1"
 
 
 class TestValidateBeforeRestart:
@@ -294,19 +256,17 @@ class TestValidateBeforeRestart:
         mgr.validate_before_restart(
             "cid123",
             auth_expert="ABUTRON\\AbutronFPMarketsNativeFeedEA",
-            feed_expert="ABUTRON\\AbutronFPMarketsNativeFeedParallelV305",
-            feed_symbol="EURUSD.r",
-            feed_period="H1")
-        # No exception raised
+            startup_symbol="EURUSD.r",
+            startup_period="H1")
 
     def test_invalid_period_raises(self, tmp_path):
         mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
         try:
             mgr.validate_before_restart(
                 "cid123",
-                feed_expert="ABUTRON\\MyFeedEA",
-                feed_symbol="EURUSD",
-                feed_period="BAD_PERIOD")
+                auth_expert="ABUTRON\\MyAuthEA",
+                startup_symbol="EURUSD",
+                startup_period="BAD_PERIOD")
             assert False, "Should have raised for invalid period"
         except Mt5Error:
             pass
@@ -316,9 +276,9 @@ class TestValidateBeforeRestart:
         try:
             mgr.validate_before_restart(
                 "cid123",
-                feed_expert="ABUTRON\\MyFeedEA",
-                feed_symbol=None,
-                feed_period="H1")
+                auth_expert="ABUTRON\\MyAuthEA",
+                startup_symbol=None,
+                startup_period="H1")
             assert False, "Should have raised for missing symbol"
         except Mt5Error:
             pass
@@ -333,13 +293,130 @@ class TestValidateBeforeRestart:
         except Mt5Error:
             pass
 
+    def test_no_auth_expert_passes(self, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        # No auth expert — nothing to validate, should pass
+        mgr.validate_before_restart("cid123")
+
+
+class TestRestartValidatesBeforeStop:
+    """restart() must call validate_before_restart before stop()."""
+
+    @patch.object(Mt5TerminalManager, "stop")
+    @patch.object(Mt5TerminalManager, "validate_before_restart")
+    @patch.object(Mt5TerminalManager, "launch")
+    def test_restart_validates_before_stop(self, mock_launch, mock_validate, mock_stop, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        from abutron.feeds.mt5_terminal import Terminal
+        term = Terminal("cid123", "FP Markets", 1000, "FPMarketsSC-Demo",
+                        str(tmp_path / "prefix-test"),
+                        str(tmp_path / "export"))
+        term.proc = None
+        mgr._terminals["cid123"] = term
+
+        mgr.restart("cid123",
+                    auth_expert="ABUTRON\\AbutronFPMarketsNativeFeedEA",
+                    startup_symbol="EURUSD.r",
+                    startup_period="H1")
+
+        # validate must be called before stop
+        mock_validate.assert_called_once()
+        mock_stop.assert_called_once()
+        # launch should also be called
+        mock_launch.assert_called_once()
+
+    @patch.object(Mt5TerminalManager, "stop")
+    @patch.object(Mt5TerminalManager, "validate_before_restart")
+    def test_restart_does_not_stop_when_validation_fails(self, mock_validate, mock_stop, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        from abutron.feeds.mt5_terminal import Terminal
+        term = Terminal("cid123", "FP Markets", 1000, "FPMarketsSC-Demo",
+                        str(tmp_path / "prefix-test"),
+                        str(tmp_path / "export"))
+        term.proc = None
+        mgr._terminals["cid123"] = term
+
+        # Validation raises
+        mock_validate.side_effect = Mt5Error("invalid config")
+
+        try:
+            mgr.restart("cid123",
+                        auth_expert="ABUTRON\\BadEA",
+                        startup_symbol="EURUSD",
+                        startup_period="INVALID")
+            assert False, "Should have raised"
+        except Mt5Error:
+            pass
+
+        # stop must NOT be called when validation fails
+        mock_stop.assert_not_called()
+
+
+class TestStageFeedExpertBinary:
+    """stage_feed_expert_binary() must stage the EX5 in MQL5/Experts/."""
+
+    def test_stages_binary_in_experts_dir(self, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        prefix = str(tmp_path / "prefix-test")
+        os.makedirs(prefix, exist_ok=True)
+        # Create a fake EX5 file
+        ex5_path = str(tmp_path / "test.ex5")
+        Path(ex5_path).write_bytes(b"fake ex5 binary content")
+        sha = hashlib.sha256(Path(ex5_path).read_bytes()).hexdigest()
+
+        # Create the export_dir that _atomic_install requires
+        export_dir = os.path.join(prefix, "drive_c", "Program Files",
+                                  "MetaTrader 5", "MQL5", "Files")
+        os.makedirs(export_dir, exist_ok=True)
+
+        # Create a terminal entry
+        from abutron.feeds.mt5_terminal import Terminal
+        term = Terminal("cid123", "FP Markets", 1000, "FPMarketsSC-Demo",
+                        prefix, export_dir)
+        mgr._terminals["cid123"] = term
+
+        dest = mgr.stage_feed_expert_binary(
+            "cid123",
+            "ABUTRON\\AbutronFPMarketsNativeFeedParallelV305",
+            ex5_path, sha)
+
+        assert os.path.isfile(dest)
+        assert dest.endswith(".ex5")
+        assert "AbutronFPMarketsNativeFeedParallelV305" in dest
+
+    def test_rejects_path_traversal(self, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        from abutron.feeds.mt5_terminal import Terminal
+        term = Terminal("cid123", "FP Markets", 1000, "FPMarketsSC-Demo",
+                        str(tmp_path / "prefix"),
+                        str(tmp_path / "export"))
+        mgr._terminals["cid123"] = term
+
+        try:
+            mgr.stage_feed_expert_binary("cid123", "..\\..\\evil",
+                                         "/tmp/test.ex5", "abc")
+            assert False, "Should have rejected path traversal"
+        except Mt5Error:
+            pass
+
+    def test_rejects_unknown_connection(self, tmp_path):
+        mgr = Mt5TerminalManager(root=str(tmp_path / "mt5root"))
+        try:
+            mgr.stage_feed_expert_binary("unknown", "ABUTRON\\EA",
+                                         "/tmp/test.ex5", "abc")
+            assert False, "Should have rejected unknown connection"
+        except Mt5Error:
+            pass
+
 
 class TestValidPeriods:
-    """VALID_MT5_PERIODS must contain exactly the 21 MT5 timeframes."""
+    """VALID_MT5_PERIODS must contain exactly the 21 standard MT5 timeframes."""
 
-    def test_contains_all_periods(self):
-        # MT5 supports 22 timeframes (PERIOD_ enum)
-        assert len(VALID_MT5_PERIODS) == 22
+    def test_contains_all_21_periods(self):
+        assert len(VALID_MT5_PERIODS) == 21
         expected = {"M1","M2","M3","M4","M5","M6","M10","M12","M15","M20",
-                    "M30","M45","H1","H2","H3","H4","H6","H8","H12","D1","W1","MN1"}
+                    "M30","H1","H2","H3","H4","H6","H8","H12","D1","W1","MN1"}
         assert VALID_MT5_PERIODS == expected
+
+    def test_does_not_contain_m45(self):
+        assert "M45" not in VALID_MT5_PERIODS
