@@ -3,8 +3,9 @@
 **Scope:** FP DEMO accounts 0512 and 1636 only. DEMO persistence-only pattern.
 LIVE 9392 and all trading switches/risk settings remain untouched.
 
-**Goal:** Prove the V3.01 multi-symbol refactor produces correct per-symbol
-tick + DOM export for all 13 FP instruments against a real broker terminal.
+**Goal:** Verify each of the 13 FP symbols against broker-native quote output,
+with optional genuine trade prints and DOM where FP Markets supplies them.
+Absence of market prints or broker depth is reported, not fabricated.
 
 ## 1. Prerequisites (verified in repo)
 
@@ -17,12 +18,18 @@ tick + DOM export for all 13 FP instruments against a real broker terminal.
 
 ## 2. Deployment steps (host-side, per account)
 
-Performed on the Ubuntu worker for each DEMO account (0512, then 1636):
+Deployment is a **separate operation requiring explicit owner authorization**.
+These steps have NOT been executed as part of this source-only package.
+Only FP DEMO 0512 and 1636 are in scope, individually:
 
-1. **Stop** the existing V305 feed chart process for the account.
+1. Preserve the existing account configuration, original order-bridge chart,
+   V101 history, trade controls, source binary hashes and rollback copy.
+   Restart only the specifically authorized DEMO worker if deployment is approved.
 2. **Stage** the V3.01 binaries:
-   - `dist/mql5/ApexMarketFeedV3.ex5` → `MQL5/Indicators/ABUTRON/`
-   - V305 EA → `MQL5/Experts/ABUTRON/`
+   - verified offline QA package `MQL5/Indicators/ABUTRON/ApexMarketFeedV3.ex5`
+     → terminal `MQL5/Indicators/ABUTRON/`
+   - verified offline QA package `MQL5/Experts/ABUTRON/AbutronFPMarketsNativeFeedParallelV305.ex5`
+     → terminal `MQL5/Experts/ABUTRON/`
 3. **Verify** each staged binary hash matches the pin above (`sha256sum`).
 4. **Start** the V305 feed chart (auth startup expert preserved; V3
    attaches programmatically via `EnsureV3Indicator()` after broker auth).
@@ -38,7 +45,7 @@ Run on the host against the produced files:
 
 ```bash
 python3 scripts/verify_fp_v301_runtime.py \
-    --data-dir <worker_root>/ABUTRON_V9_NATIVE \
+    --data-dir <worker_root>/terminal/MQL5/Files/ABUTRON_V9_NATIVE \
     --day <YYYYMMDD>
 ```
 
@@ -46,7 +53,7 @@ Or JSON output for evidence collection:
 
 ```bash
 python3 scripts/verify_fp_v301_runtime.py \
-    --data-dir <worker_root>/ABUTRON_V9_NATIVE \
+    --data-dir <worker_root>/terminal/MQL5/Files/ABUTRON_V9_NATIVE \
     --day <YYYYMMDD> --json
 ```
 
@@ -59,13 +66,13 @@ For each of the 13 FP symbols, the verifier asserts:
 | 1 | File layout | One JSONL per symbol per day: `ABUTRON_NATIVE_MARKET_V3_<sanitized_symbol>_<YYYYMMDD>.jsonl` |
 | 2 | Schema | Every record has `schema`, `symbol`, `broker_server`, `account_login`, `environment="DEMO"`, `record_type` |
 | 3 | Identity | Record `symbol` matches filename's sanitized symbol |
-| 4 | Record types | `QUOTE`, `MARKET_PRINT`, `DOM`, `STATUS` all present |
-| 5 | Price precision | All prices in a symbol's records use consistent decimals matching that symbol's `SYMBOL_DIGITS` |
+| 4 | Record types | `QUOTE` and `STATUS` required; `MARKET_PRINT` and `DOM` optional and reported separately |
+| 5 | Price precision | Checks lexical precision of numeric JSON using Decimal, warns against reference digit hints; independent native `SYMBOL_DIGITS` confirmation remains required |
 | 6 | DOM structure | `levels[]` with `book_type`, `price`, `volume_real`, `volume` per level |
-| 7 | STATUS | `dom_subscribed=true` for subscribed symbols |
+| 7 | STATUS | Records DOM subscription state; false is valid when broker does not support depth |
 | 8 | Read-only | No `order_ticket`, `position_ticket`, `trade_action`, `deal_id`, `order_send`, `position_modify` fields |
 
-Expected per-symbol digit counts (FP Markets contract):
+Reference digit hints (NOT independently verified FP broker `SYMBOL_DIGITS`):
 
 | Symbol | Digits | | Symbol | Digits |
 |---|---|---|---|---|
@@ -83,21 +90,36 @@ Expected per-symbol digit counts (FP Markets contract):
 - Terminal log excerpt showing the V3 attach attestation lines.
 - `sha256sum` output of both staged binaries.
 - Record counts per symbol per file (from verifier output).
-- Any warnings (precision mismatches) with the actual vs expected value.
+- Any warnings (precision mismatches against hints, missing optional DOM or
+  genuine prints), plus independently observed broker `SYMBOL_DIGITS`.
 
 ## 6. Pass / fail criteria
 
-**PASS:** All 13 symbols pass all 8 assertions. Zero errors.
-**FAIL:** Any symbol fails any assertion. Record the error, inspect the
-terminal log for that symbol, and do not proceed to Deriv verification
-until resolved.
+**File-contract PASS:** All 13 symbols have valid DEMO JSONL, broker quote
+records and STATUS, consistent numeric precision, correct schema and identity,
+and zero forbidden order fields. Genuine trade prints and DOM are optional;
+report their observed availability per symbol without creating fake records.
+
+**Runtime proof still required:** cross-check `SYMBOL_DIGITS` from the actual
+broker terminal and validate 5-minute streaming/freshness, the account-bound
+identity and native indicator log. The JSONL file-contract verifier **alone**
+cannot certify a genuine broker session or a 13/13 runtime result.
+
+**FAIL/INCOMPLETE:** Missing QUOTE or STATUS, malformed rows, identity mismatch,
+inconsistent numeric decimal precision or forbidden fields. Investigate the
+actual broker session; do not substitute candle-derived prints for native data.
 
 ## 7. Explicit exclusions
 
 - LIVE 9392 — not touched, not verified here.
 - Trading switches, risk settings, order bridges — unchanged.
 - V9 writer / order-capable charts — unchanged.
-- No market prints required; quote-only symbols are valid.
+- No market prints required; quote-only symbols are valid. DOM can also
+  be absent where the broker does not subscribe/provide depth.
+- This source-only package does NOT authorize deployment or terminal restarts.
+- Changing the source SHA in the repository does not update the installed
+  production collector. Verify and deploy that script only under separate
+  explicit scope.
 
 ## 8. Related tooling
 
