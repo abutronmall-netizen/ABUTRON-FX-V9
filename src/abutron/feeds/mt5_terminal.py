@@ -92,7 +92,9 @@ class Mt5TerminalManager:
     # ------------------------------------------------------------------
     def launch(self, connection_id: str, broker: str, login: int,
                server: str, *, headless: bool = True,
-               startup_expert: Optional[str] = None) -> Terminal:
+               startup_expert: Optional[str] = None,
+               startup_symbol: Optional[str] = None,
+               startup_period: Optional[str] = None) -> Terminal:
         if connection_id in self._terminals and self._terminals[connection_id].is_running:
             raise Mt5Error("terminal already running")
         prefix = self.ensure_prefix(connection_id)
@@ -112,16 +114,19 @@ class Mt5TerminalManager:
         if headless:
             cmd += ["/headless", "/nosplash"]
         # When startup_expert is provided, write a /config file with a
-        # [Startup] Expert=<name> section so MT5 auto-attaches the EA to
-        # every new chart opened after launch. This bypasses the Wine GUI
-        # for EA replacement, which is unreliable under headless Wine
-        # rendering. Existing chart state (.chr files) is preserved across
-        # restarts, so other EAs on other charts are unaffected.
+        # [StartUp] section (capital U per MT5 docs). The Expert path is
+        # relative to MQL5\Experts\. Symbol and Period are REQUIRED: if
+        # Symbol is omitted, MT5 attaches the EA to the first chart of
+        # the current profile, which could be an order-bridge chart.
+        # Specifying Symbol+Period opens a dedicated feed chart so the
+        # EA never touches existing chart state (.chr files).
+        # Command-line syntax is /config:<path> (colon, no space).
         config_path = None
         if startup_expert:
-            config_path = self._write_startup_config(connection_id, prefix,
-                                                     startup_expert)
-            cmd += ["/config", config_path]
+            config_path = self._write_startup_config(
+                connection_id, prefix, startup_expert,
+                startup_symbol, startup_period)
+            cmd.append(f"/config:{config_path}")
         term.proc = subprocess.Popen(cmd, env=env,
                                      stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
@@ -130,26 +135,68 @@ class Mt5TerminalManager:
         return term
 
     def _write_startup_config(self, connection_id: str, prefix: str,
-                               startup_expert: str) -> str:
-        """Write a MT5 /config file with a Startup Expert entry.
+                              startup_expert: str,
+                              startup_symbol: Optional[str],
+                              startup_period: Optional[str]) -> str:
+        """Write a MT5 /config file with a [StartUp] Expert entry.
 
         The config file is placed under the terminal prefix so it is
-        accessible to the Wine-launched MT5 process. The [Startup] section's
-        Expert key tells MT5 to attach the named EA to each new chart.
+        accessible to the Wine-launched MT5 process. The [StartUp] section
+        (capital U, per MT5 documentation) tells MT5 to open a chart
+        with the specified Symbol and Period and attach the EA to it.
+
+        Symbol is REQUIRED: without it, MT5 attaches the EA to the
+        first chart of the current profile, which may be an order-bridge
+        chart. Specifying Symbol+Period opens a dedicated feed chart.
+
+        The Expert path is relative to MQL5\\Experts\\ (e.g.
+        ``ABUTRON\\AbutronFPMarketsNativeFeedParallelV305``).
 
         Returns the absolute path to the config file (Wine-accessible).
         """
-        if not startup_expert or "/" in startup_expert or "\\" in startup_expert:
-            raise Mt5Error("startup_expert must be a plain EA name without path separators")
+        # Validate Expert name: must be a relative path under MQL5\Experts,
+        # reject path separators that would escape the Experts directory,
+        # and reject newline/control characters that could inject config
+        # keys or corrupt the INI structure.
+        if not startup_expert:
+            raise Mt5Error("startup_expert is required")
+        if any(c in startup_expert for c in ("\r", "\n")):
+            raise Mt5Error("startup_expert must not contain newlines or control characters")
+        if "\x00" in startup_expert or any(ord(c) < 32 for c in startup_expert):
+            raise Mt5Error("startup_expert must not contain control characters")
+        # Allow backslash-relative paths (ABUTRON\EAName) but reject
+        # forward slashes, absolute paths, drive-letter paths, and
+        # path traversal.
+        if "/" in startup_expert or startup_expert.startswith("\\"):
+            raise Mt5Error("startup_expert must be a backslash-relative path (e.g. ABUTRON\\EAName)")
+        if ".." in startup_expert:
+            raise Mt5Error("startup_expert must not contain path traversal (..)")
+        import re
+        if re.match(r"^[A-Za-z]:[\\/]", startup_expert):
+            raise Mt5Error("startup_expert must not be an absolute drive-letter path")
+
+        # Validate Symbol and Period (both required for safe attachment)
+        if not startup_symbol:
+            raise Mt5Error("startup_symbol is required to prevent EA attachment to an existing chart")
+        if any(c in startup_symbol for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in startup_symbol):
+            raise Mt5Error("startup_symbol must not contain control characters")
+        if not startup_period:
+            raise Mt5Error("startup_period is required to prevent default chart behavior")
+        if any(c in startup_period for c in ("\r", "\n", "\x00")) or any(ord(c) < 32 for c in startup_period):
+            raise Mt5Error("startup_period must not contain control characters")
+
         config_dir = os.path.join(prefix, "drive_c", "Program Files",
                                    "MetaTrader 5", "MQL5", "Config")
         os.makedirs(config_dir, exist_ok=True)
         config_path = os.path.join(config_dir, "abutron_startup.cfg")
-        # MT5 config files use INI format. The [Startup] section with an
-        # Expert key triggers auto-attachment on new charts.
+        # MT5 config files use INI format. The [StartUp] section (capital U)
+        # with Expert, Symbol, and Period keys opens a dedicated chart and
+        # attaches the EA to it. No existing chart state is modified.
         content = (
-            "[Startup]\r\n"
+            "[StartUp]\r\n"
             f"Expert={startup_expert}\r\n"
+            f"Symbol={startup_symbol}\r\n"
+            f"Period={startup_period}\r\n"
         )
         with open(config_path, "w", encoding="utf-8") as fh:
             fh.write(content)
@@ -513,11 +560,15 @@ class Mt5TerminalManager:
             term.proc = None
 
     def restart(self, connection_id: str,
-                startup_expert: Optional[str] = None) -> Terminal:
+                startup_expert: Optional[str] = None,
+                startup_symbol: Optional[str] = None,
+                startup_period: Optional[str] = None) -> Terminal:
         self.stop(connection_id)
         term = self._terminals[connection_id]
         return self.launch(connection_id, term.broker, term.login,
-                           term.server, startup_expert=startup_expert)
+                           term.server, startup_expert=startup_expert,
+                           startup_symbol=startup_symbol,
+                           startup_period=startup_period)
 
     # ------------------------------------------------------------------
     # Native export read-back
