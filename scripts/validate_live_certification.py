@@ -294,7 +294,7 @@ def main() -> int:
         account = {
             "connection_id": connection_id,
             "broker": "fp_markets",
-            "mt5_login": 60123456,
+            "mt5_login": 123456,
             "owner_id": "owner_cert",
             "display_name": "Cert DEMO",
             "environment": "demo",
@@ -484,7 +484,7 @@ def main() -> int:
         uncert_cid = "cert_uncert_" + "e" * 20
         engine_db.upsert_account({
             "connection_id": uncert_cid, "broker": "fp_markets",
-            "mt5_login": 70123456, "owner_id": "owner_uncert",
+            "mt5_login": 234567, "owner_id": "owner_uncert",
             "display_name": "Uncertified DEMO", "environment": "demo",
             "server": "synthetic-demo-server",
             "per_trade_risk_pct": DEFAULT_PER_TRADE_RISK_PCT,
