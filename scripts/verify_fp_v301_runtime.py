@@ -12,11 +12,11 @@ Contract assertions (per symbol):
   2. Schema: every record carries schema, symbol, broker_server,
      account_login, environment="DEMO", record_type
   3. Identity: record "symbol" matches the filename's sanitized symbol
-  4. Record types: QUOTE / MARKET_PRINT / DOM / STATUS all present
-  5. Per-symbol price precision: all prices in a symbol's records use a
-     consistent number of decimals (matches that symbol's SYMBOL_DIGITS)
+  4. Record types: QUOTE and STATUS required; genuine MARKET_PRINT and DOM optional
+  5. Per-symbol price precision: check JSON numeric lexical decimal places
+     against the reference table (a hint, NOT independently verified broker digits)
   6. DOM: levels array with book_type/price/volume_real/volume per level
-  7. STATUS: dom_subscribed=true for subscribed symbols
+  7. STATUS: report dom_subscribed accurately; false is valid if unsupported
   8. Read-only: no order/position/trade fields in any record
 
 Exit codes: 0 = all symbols verified, 1 = any assertion failed.
@@ -24,6 +24,7 @@ Exit codes: 0 = all symbols verified, 1 = any assertion failed.
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import json
 import re
 import sys
@@ -35,9 +36,8 @@ FP_SYMBOLS = [
     "XTIUSD", "USDCHF.r", "NZDUSD.r",
 ]
 
-# Expected decimal precision per symbol (FP Markets contract digits).
-# The script also derives the actual precision from the records and
-# cross-checks consistency; this table is the expected reference.
+# Reference digit hints only; broker-native SYMBOL_DIGITS must be
+# independently checked at runtime. Never claim the hint is broker proof.
 EXPECTED_DIGITS = {
     "XAUUSD.r": 2, "BTCUSD": 2, "EURUSD.r": 5, "GBPUSD.r": 5,
     "USDJPY.r": 3, "AUDUSD.r": 5, "US100": 2, "US30": 2,
@@ -100,10 +100,15 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
             if not line:
                 continue
             try:
-                rec = json.loads(line)
+                # Decimal preserves trailing-zero precision in JSON numbers;
+                # ordinary json.loads(float) would silently erase it.
+                rec = json.loads(line, parse_float=Decimal)
             except json.JSONDecodeError as exc:
                 result["errors"].append(
                     f"{expected_file}:{line_no} invalid JSON: {exc}")
+                continue
+            if not isinstance(rec, dict):
+                result["errors"].append(f"{expected_file}:{line_no} record not object")
                 continue
             result["records"] += 1
             rtype = rec.get("record_type", "?")
@@ -115,6 +120,9 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
                     result["errors"].append(
                         f"{expected_file}:{line_no} missing field: {field}")
 
+            if rec.get("schema") != "abutron.v9.mt5.market_microstructure.readonly.v3":
+                result["errors"].append(f"{expected_file}:{line_no} unexpected schema")
+
             # 2. Environment must be DEMO
             if rec.get("environment") != "DEMO":
                 result["errors"].append(
@@ -123,7 +131,7 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
 
             # 3. Identity: record symbol matches filename symbol
             rec_sym = rec.get("symbol", "")
-            if sanitize_file_symbol(rec_sym) != sanitize_file_symbol(symbol):
+            if rec_sym != symbol:
                 result["errors"].append(
                     f"{expected_file}:{line_no} symbol mismatch: "
                     f"{rec_sym!r} != {symbol!r}")
@@ -138,12 +146,11 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
             if rtype in ("QUOTE", "MARKET_PRINT"):
                 for pf in PRICE_FIELDS:
                     val = rec.get(pf)
-                    if isinstance(val, (int, float)):
-                        # JSON numbers may lose trailing zeros; check the
-                        # string form only when present as string.
-                        pass
-                    elif isinstance(val, str):
-                        precisions.add(decimals_of(val))
+                    if isinstance(val, (int, Decimal)) and not isinstance(val, bool):
+                        precisions.add(decimals_of(str(val)))
+                    elif val is not None:
+                        result["errors"].append(
+                            f"{expected_file}:{line_no} {pf} is not a JSON number")
             elif rtype == "DOM":
                 levels = rec.get("levels", [])
                 if not isinstance(levels, list) or not levels:
@@ -155,14 +162,17 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
                             f"{expected_file}:{line_no} DOM level {i} "
                             f"not an object")
                         continue
-                    for key in ("book_type", "price", "volume_real"):
+                    for key in ("book_type", "price", "volume_real", "volume"):
                         if key not in level:
                             result["errors"].append(
                                 f"{expected_file}:{line_no} DOM level {i} "
                                 f"missing {key}")
                     lp = level.get("price")
-                    if isinstance(lp, str):
-                        precisions.add(decimals_of(lp))
+                    if isinstance(lp, (int, Decimal)) and not isinstance(lp, bool):
+                        precisions.add(decimals_of(str(lp)))
+                    elif lp is not None:
+                        result["errors"].append(
+                            f"{expected_file}:{line_no} DOM price is not a JSON number")
 
             # 6. STATUS records
             if rtype == "STATUS":
@@ -172,12 +182,14 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
                         f"not true for subscribed symbol")
 
     # 7. Required record types present
-    for required_type in ("QUOTE", "MARKET_PRINT", "DOM", "STATUS"):
+    # MT5 often has quote-only instruments, and many brokers offer no DOM.
+    # Absent genuine prints/depth must be reported, not treated as fake errors.
+    for required_type in ("QUOTE", "STATUS"):
         if required_type not in result["by_type"]:
             result["errors"].append(
                 f"missing record type: {required_type}")
 
-    # 8. Per-symbol precision consistency
+    # 8. Per-symbol precision consistency; numeric JSON parsed as Decimal.
     if precisions:
         if len(precisions) > 1:
             result["errors"].append(
@@ -187,9 +199,15 @@ def verify_symbol(data_dir: Path, symbol: str, day: str) -> dict:
             actual = next(iter(precisions))
             if actual != expected:
                 result["warnings"].append(
-                    f"price precision {actual} != expected {expected} "
-                    f"for {symbol}")
+                    f"price precision {actual} != reference hint {expected} "
+                    f"for {symbol}; independently check broker SYMBOL_DIGITS")
 
+    if "MARKET_PRINT" not in result["by_type"]:
+        result["warnings"].append("genuine MARKET_PRINT unavailable; quote-only data")
+    if "DOM" not in result["by_type"]:
+        result["warnings"].append("DOM unavailable or not supplied by broker")
+    result["observed_decimal_places"] = sorted(precisions)
+    result["broker_symbol_digits_verified"] = False  # No native digits proof in JSONL
     result["ok"] = not result["errors"]
     return result
 
