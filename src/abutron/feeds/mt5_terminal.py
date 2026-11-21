@@ -91,7 +91,8 @@ class Mt5TerminalManager:
     # Terminal lifecycle
     # ------------------------------------------------------------------
     def launch(self, connection_id: str, broker: str, login: int,
-               server: str, *, headless: bool = True) -> Terminal:
+               server: str, *, headless: bool = True,
+               startup_expert: Optional[str] = None) -> Terminal:
         if connection_id in self._terminals and self._terminals[connection_id].is_running:
             raise Mt5Error("terminal already running")
         prefix = self.ensure_prefix(connection_id)
@@ -110,12 +111,49 @@ class Mt5TerminalManager:
         cmd = ["wine", MT5_EXE]
         if headless:
             cmd += ["/headless", "/nosplash"]
+        # When startup_expert is provided, write a /config file with a
+        # [Startup] Expert=<name> section so MT5 auto-attaches the EA to
+        # every new chart opened after launch. This bypasses the Wine GUI
+        # for EA replacement, which is unreliable under headless Wine
+        # rendering. Existing chart state (.chr files) is preserved across
+        # restarts, so other EAs on other charts are unaffected.
+        config_path = None
+        if startup_expert:
+            config_path = self._write_startup_config(connection_id, prefix,
+                                                     startup_expert)
+            cmd += ["/config", config_path]
         term.proc = subprocess.Popen(cmd, env=env,
                                      stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
         term.started_at = time.time()
         term.health_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         return term
+
+    def _write_startup_config(self, connection_id: str, prefix: str,
+                               startup_expert: str) -> str:
+        """Write a MT5 /config file with a Startup Expert entry.
+
+        The config file is placed under the terminal prefix so it is
+        accessible to the Wine-launched MT5 process. The [Startup] section's
+        Expert key tells MT5 to attach the named EA to each new chart.
+
+        Returns the absolute path to the config file (Wine-accessible).
+        """
+        if not startup_expert or "/" in startup_expert or "\\" in startup_expert:
+            raise Mt5Error("startup_expert must be a plain EA name without path separators")
+        config_dir = os.path.join(prefix, "drive_c", "Program Files",
+                                   "MetaTrader 5", "MQL5", "Config")
+        os.makedirs(config_dir, exist_ok=True)
+        config_path = os.path.join(config_dir, "abutron_startup.cfg")
+        # MT5 config files use INI format. The [Startup] section with an
+        # Expert key triggers auto-attachment on new charts.
+        content = (
+            "[Startup]\r\n"
+            f"Expert={startup_expert}\r\n"
+        )
+        with open(config_path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return config_path
 
     def _stage_worker_files(self, connection_id: str, export_dir: str) -> None:
         """Legacy setup, without a false claim that an MQ5 is installed.
@@ -474,11 +512,12 @@ class Mt5TerminalManager:
         if term:
             term.proc = None
 
-    def restart(self, connection_id: str) -> Terminal:
+    def restart(self, connection_id: str,
+                startup_expert: Optional[str] = None) -> Terminal:
         self.stop(connection_id)
         term = self._terminals[connection_id]
         return self.launch(connection_id, term.broker, term.login,
-                           term.server)
+                           term.server, startup_expert=startup_expert)
 
     # ------------------------------------------------------------------
     # Native export read-back
