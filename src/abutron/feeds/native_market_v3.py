@@ -36,6 +36,45 @@ def _sanitize_file_symbol(symbol: str) -> str:
     use the sanitized symbol while JSON content preserves the original.
     """
     return symbol.replace(" ", "_")
+
+def broker_symbol_from_v3_file(path: Path) -> str:
+    """Discover the exact broker symbol from a V3 JSONL header.
+
+    V3 filenames replace spaces with underscores, so the filename alone
+    cannot distinguish e.g. "Volatility 50 Index.0" from a literal
+    "Volatility_50_Index.0". The V3 reader subsequently authenticates the
+    full record stream against this exact symbol, account and session.
+    This discovery helper never certifies broker provenance by itself.
+    """
+    path = Path(path)
+    if not NAME.fullmatch(path.name):
+        raise ValueError("NATIVE_V3_FILENAME_INVALID")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (
+            st.st_size < 2 or st.st_size > 26 * 1024 * 1024 or st.st_mode & 0o022
+        ):
+            raise ValueError("NATIVE_V3_DISCOVERY_SOURCE_INVALID")
+        prefix = os.read(fd, 65536)
+    finally:
+        os.close(fd)
+    if b"\n" not in prefix:
+        raise ValueError("NATIVE_V3_DISCOVERY_HEADER_INCOMPLETE")
+    try:
+        first = json.loads(prefix.split(b"\n", 1)[0].decode("utf-8-sig"))
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("NATIVE_V3_DISCOVERY_HEADER_INVALID") from exc
+    if not isinstance(first, dict) or first.get("schema") != SCHEMA:
+        raise ValueError("NATIVE_V3_DISCOVERY_SCHEMA_INVALID")
+    symbol = first.get("symbol")
+    if not isinstance(symbol, str) or not re.fullmatch(r"[A-Za-z0-9._ -]{1,64}", symbol):
+        raise ValueError("NATIVE_V3_DISCOVERY_SYMBOL_INVALID")
+    stem = path.name[len("ABUTRON_NATIVE_MARKET_V3_"):-15]
+    if _sanitize_file_symbol(symbol) != stem:
+        raise ValueError("NATIVE_V3_DISCOVERY_SYMBOL_FILENAME_MISMATCH")
+    return symbol
+
 HEX32=re.compile(r"[0-9a-f]{32}\Z")
 HEX64=re.compile(r"[0-9a-f]{64}\Z")
 # MQL5 MqlTick.flags: LAST=8, BUY=32, SELL=64.
