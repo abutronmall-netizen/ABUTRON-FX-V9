@@ -16,7 +16,7 @@ import sys
 import tempfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
-from abutron.feeds.native_market_v3 import read_v3, trusted_fp_demo_clock_offset
+from abutron.feeds.native_market_v3 import read_v3, trusted_fp_demo_clock_offset, broker_symbol_from_v3_file
 
 SHA="a4a5bdbec180f8b4f7d0945b1611a945ca36d1ed49e4e23137133b9e4d592f67"
 # Account profiles are resolved from explicit JSON, otherwise authorized
@@ -122,9 +122,12 @@ def scan():
         symbols=[]
         if base.is_dir() and not base.is_symlink():
             for p in base.glob("ABUTRON_NATIVE_MARKET_V3_*_????????.jsonl"):
-                sym=p.name.removeprefix("ABUTRON_NATIVE_MARKET_V3_")[:-15]
-                if sym and re.fullmatch(r"[A-Za-z0-9._-]{1,64}",sym):
-                    symbols.append(sym)
+                try:
+                    symbols.append(broker_symbol_from_v3_file(p))
+                except (OSError, ValueError):
+                    # An unreadable, malformed or foreign file cannot provide
+                    # an account-symbol discovery record.
+                    continue
 
         # --- P0-1: Per-account cost-report path resolution ---
         # Each DEMO account gets its own ABUTRON_FP_COST_REPORT_{suffix}
