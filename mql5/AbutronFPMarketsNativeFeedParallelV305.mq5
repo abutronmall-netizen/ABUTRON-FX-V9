@@ -279,11 +279,16 @@ bool FP_ANNOUNCED_OFFLINE=false;
 // Read-only broker-history indicator attachment. In this isolated terminal
 // profile, MT5 discards indicator entries during chart initialization.
 // Attach the ALREADY signed indicator only after authenticated MT5 proof.
-// P1 fix: the history indicator name is configurable via InpHistoryIndicator
-// (default V101) so replacing V307 with V305 preserves the existing
-// account-specific V101 history functionality instead of auto-attaching
-// the older V100 indicator.
+// P1 fix: the history indicator is configurable so replacing V307 with V305
+// preserves the existing account-specific V101 history functionality instead
+// of auto-attaching the older V100 indicator.
+//
+// Path correction (974fc55 review): the V101 binary on Ubuntu is installed at
+//   ABUTRON/ABUTRON-FP-HISTORY-V101-READONLY/AbutronFPAccountHistoryV101.ex5
+// so the iCustom() path must include the subdirectory. The full relative
+// path is configurable via InpHistoryIndicatorDir + InpHistoryIndicator.
 input string InpHistoryIndicator = "AbutronFPAccountHistoryV101";
+input string InpHistoryIndicatorDir = "ABUTRON\\ABUTRON-FP-HISTORY-V101-READONLY";
 bool FP_HISTORY_INSTALLED=false;
 int FP_HISTORY_HANDLE=INVALID_HANDLE;
 datetime FP_HISTORY_ATTEMPT_TIME=0;
@@ -304,10 +309,11 @@ void EnsureFPHistoryIndicator()
   }
  }
  ResetLastError();
- int handle=iCustom(_Symbol,_Period,"ABUTRON\\"+InpHistoryIndicator);
+ string hist_path=InpHistoryIndicatorDir+"\\"+InpHistoryIndicator;
+ int handle=iCustom(_Symbol,_Period,hist_path);
  if(handle==INVALID_HANDLE)
  {
-  Print("ABUTRON_FP_HISTORY_INDICATOR_CREATE_FAILED code=",GetLastError());
+  Print("ABUTRON_FP_HISTORY_INDICATOR_CREATE_FAILED code=",GetLastError()," path=",hist_path);
   return;
  }
  ResetLastError();
@@ -319,7 +325,7 @@ void EnsureFPHistoryIndicator()
  }
  FP_HISTORY_HANDLE=handle;
  FP_HISTORY_INSTALLED=true;
- Print("ABUTRON_FP_HISTORY_INDICATOR_ATTACHED_AFTER_BROKER_AUTH: "+InpHistoryIndicator);
+ Print("ABUTRON_FP_HISTORY_INDICATOR_ATTACHED_AFTER_BROKER_AUTH: "+hist_path);
 }
 
 
