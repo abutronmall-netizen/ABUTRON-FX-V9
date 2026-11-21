@@ -85,3 +85,27 @@ def test_mql_multi_symbol_precision_is_broker_specific():
     assert "SymbolInfoInteger(sym,SYMBOL_DIGITS)" in source
     assert "SymbolInfoInteger(symbol,SYMBOL_DIGITS)" in source
     assert "_Digits" not in source
+
+
+def test_multisymbol_host_chart_attestation_uses_independent_mt5_log(tmp_path):
+    """One real chart host can produce 13 differently named V3 files."""
+    from datetime import datetime, timezone
+    from abutron.feeds.native_market_v3 import native_mt5_chart_attached
+
+    terminal = tmp_path / "terminal"
+    logs = terminal / "logs"
+    logs.mkdir(parents=True)
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    log = logs / f"{day}.log"
+    event = (
+        "AA\t0\t10:00:00.000\tIndicators\t"
+        "custom indicator ApexMarketFeedV3 (Volatility 50 Index.0,M5)"
+        " loaded succesfully\n"
+    )
+    log.write_text(event, encoding="utf-16")
+    log.chmod(0o600)
+    assert native_mt5_chart_attached(tmp_path, "Volatility 50 Index.0")
+    assert not native_mt5_chart_attached(tmp_path, "Boom 150 Index.0")
+    assert native_mt5_chart_attached(
+        tmp_path, "Boom 150 Index.0", allow_multisymbol_host=True
+    )
