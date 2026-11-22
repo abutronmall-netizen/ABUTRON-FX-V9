@@ -151,3 +151,58 @@ def test_only_realized_broker_net_used_in_report():
     assert result["predicted_positive"]["trades"] == 1
     assert result["predicted_positive"]["broker_net_usd"] == -11.0
     assert result["predicted_nonpositive"]["broker_net_usd"] == 19.0
+
+
+def test_isolated_checkpoint_survives_restart_and_rejects_duplicate_revisions():
+    base_trades = sample(60, BASE)
+    model = NetReward49(identity_slot=47)
+    model.fit(base_trades, sample(20, BASE + timedelta(days=1)))
+    new_trade = ClosedTrade.from_native_row(native_row(
+        9999, x=0.9, entry=BASE + timedelta(days=4)
+    ))
+    assert model.online_update(new_trade, learned_at=new_trade.closed + timedelta(minutes=1))
+    snapshot = json.loads(json.dumps(model.artifact()))
+    restored = NetReward49.from_artifact(snapshot)
+    assert restored.account_scope == "DEMO_A"
+    assert restored.online_updates == 1
+    assert restored.predict(new_trade.features, "BUY")["status"] == "RESEARCH_PREDICTION"
+    assert not restored.online_update(new_trade, learned_at=new_trade.closed + timedelta(minutes=2))
+
+    revised_row = native_row(9999, x=0.9, entry=BASE + timedelta(days=4))
+    revised_row["gross_usd"] += 10
+    revised_row["net_usd"] += 10
+    revised = ClosedTrade.from_native_row(revised_row)
+    with pytest.raises(ValueError, match="previously learned broker evidence changed"):
+        restored.online_update(revised, learned_at=revised.closed + timedelta(minutes=5))
+
+
+def test_reward_checkpoint_digest_tampering_rejected():
+    model = NetReward49(identity_slot=47)
+    model.fit(sample(60, BASE), sample(20, BASE + timedelta(days=1)))
+    obj = model.artifact()
+    obj["online_updates"] = 9000
+    with pytest.raises(ValueError, match="digest"):
+        NetReward49.from_artifact(obj)
+
+
+def test_owner_isolation_during_fit_and_online_learning():
+    model = NetReward49(identity_slot=47)
+    train_a = sample(60, BASE)
+    validation_a = sample(20, BASE + timedelta(days=1))
+    wrong_owner = ClosedTrade.from_native_row(native_row(
+        77, account="DEMO_B", entry=BASE + timedelta(days=4)
+    ))
+    with pytest.raises(ValueError, match="one isolated DEMO account"):
+        model.fit(train_a + [wrong_owner], validation_a)
+    model.fit(train_a, validation_a)
+    with pytest.raises(ValueError, match="cross-account"):
+        model.online_update(wrong_owner, learned_at=wrong_owner.closed + timedelta(minutes=1))
+
+
+def test_reloaded_model_still_cannot_invent_profitable_sells():
+    model = NetReward49(identity_slot=47)
+    model.fit(sample(60, BASE), sample(20, BASE + timedelta(days=1)))
+    restored = NetReward49.from_artifact(model.artifact())
+    assert restored.predict(sample(1, BASE)[0].features, "SELL")["status"] == \
+        "UNTRAINED_EXECUTED_SIDE"
+    assert restored.choose(sample(1, BASE)[0].features)["direction"] in ("BUY", "HOLD")
