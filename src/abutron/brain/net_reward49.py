@@ -150,6 +150,11 @@ class NetReward49:
         if x.ndim != 2 or x.shape[1] != N_FEATURES or not np.isfinite(x).all():
             raise ValueError("expected finite 49-feature matrix")
         if self.identity_slot is not None:
+            if (
+                not np.allclose(x[:, self.identity_slot], 1.0, rtol=0, atol=1e-8)
+                or not np.allclose(x[:, 23:].sum(axis=1), 1.0, rtol=0, atol=1e-8)
+            ):
+                raise ValueError("incorrect native 49-feature symbol identity mapping")
             x = x.copy()
             x[:, self.identity_slot] = 0.0
         return x
@@ -272,6 +277,11 @@ class NetReward49:
         if x.shape != (N_FEATURES,) or not np.isfinite(x).all():
             raise ValueError("expected finite 49-feature signal")
         if self.identity_slot is not None:
+            if (
+                not np.isclose(x[self.identity_slot], 1.0, rtol=0, atol=1e-8)
+                or not np.isclose(x[23:].sum(), 1.0, rtol=0, atol=1e-8)
+            ):
+                raise ValueError("incorrect native 49-feature symbol identity mapping")
             x = x.copy()
             x[self.identity_slot] = 0.0
         z = np.r_[1.0, np.clip(
