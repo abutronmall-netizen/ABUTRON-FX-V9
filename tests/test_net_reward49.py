@@ -114,7 +114,9 @@ def test_canonical_identity_is_neutralized_without_changing_49_features():
     p = model.predict(tr[0].features, "BUY")
     mutated = list(tr[0].features)
     mutated[47] = 9999.0
-    p2 = model.predict(mutated, "BUY")
+    with pytest.raises(ValueError, match="symbol identity mapping"):
+        model.predict(mutated, "BUY")
+    p2 = model.predict(tr[0].features, "BUY")
     assert p["broker_net_usd_per_lot"] == pytest.approx(p2["broker_net_usd_per_lot"])
     assert len(mutated) == 49
 
@@ -206,3 +208,15 @@ def test_reloaded_model_still_cannot_invent_profitable_sells():
     assert restored.predict(sample(1, BASE)[0].features, "SELL")["status"] == \
         "UNTRAINED_EXECUTED_SIDE"
     assert restored.choose(sample(1, BASE)[0].features)["direction"] in ("BUY", "HOLD")
+
+
+def test_wrong_symbol_onehot_rejected_on_fit():
+    row = native_row()
+    features = json.loads(row["features_json"])
+    features[47] = 0
+    features[48] = 1.0
+    row["features_json"] = json.dumps(features)
+    wrong = ClosedTrade.from_native_row(row)
+    model = NetReward49(identity_slot=47)
+    with pytest.raises(ValueError, match="symbol identity mapping"):
+        model.fit([wrong] + sample(60, BASE), sample(20, BASE + timedelta(days=1)))
