@@ -141,6 +141,8 @@ class NetReward49:
         self.min_side_trades = min_side_trades
         self.heads: dict[str, dict] = {}
         self.observed_ids: set[tuple[str, str]] = set()
+        self.observed_fingerprints: dict[tuple[str, str], str] = {}
+        self.account_scope: str | None = None
         self.online_updates = 0
 
     def _matrix(self, rows: Sequence[ClosedTrade]) -> np.ndarray:
@@ -151,6 +153,22 @@ class NetReward49:
             x = x.copy()
             x[:, self.identity_slot] = 0.0
         return x
+
+    @staticmethod
+    def _fingerprint(trade: ClosedTrade) -> str:
+        """Immutable native settlement fingerprint, including all learning inputs."""
+        evidence = {
+            "account": trade.account, "trade_key": trade.trade_key,
+            "symbol": trade.symbol, "side": trade.side,
+            "entered": trade.entered.isoformat(), "closed": trade.closed.isoformat(),
+            "features": list(trade.features), "lots": trade.lots,
+            "gross_usd": trade.gross_usd, "commission_usd": trade.commission_usd,
+            "fee_usd": trade.fee_usd, "swap_usd": trade.swap_usd, "net_usd": trade.net_usd,
+            "stop_loss_exit": trade.stop_loss_exit, "take_profit_exit": trade.take_profit_exit,
+        }
+        return hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
     @staticmethod
     def _targets(rows: Sequence[ClosedTrade]) -> np.ndarray:
@@ -178,8 +196,19 @@ class NetReward49:
     ) -> dict:
         if not penalties or any(p <= 0 for p in penalties):
             raise ValueError("invalid ridge candidates")
+        accounts = {r.account for r in (*training, *validation)}
+        if len(accounts) != 1:
+            raise ValueError("reward heads require one isolated DEMO account")
+        self.account_scope = accounts.pop()
+        new_fingerprints = {
+            (r.account, r.trade_key): self._fingerprint(r) for r in training
+        }
+        if len(new_fingerprints) != len(training):
+            raise ValueError("duplicate native training trade")
         self.heads.clear()
-        self.observed_ids = {(t.account, t.trade_key) for t in training}
+        self.observed_fingerprints = new_fingerprints
+        self.observed_ids = set(new_fingerprints)
+        self.online_updates = 0
         summary = {}
         for side in SIDES:
             tr = [r for r in training if r.side == side]
@@ -288,7 +317,12 @@ class NetReward49:
         if learned_at.tzinfo is None or trade.closed > learned_at:
             raise ValueError("closed trade must precede the learning event")
         key = (trade.account, trade.trade_key)
+        if self.account_scope is None or trade.account != self.account_scope:
+            raise ValueError("cross-account economic learning rejected")
+        fingerprint = self._fingerprint(trade)
         if key in self.observed_ids:
+            if self.observed_fingerprints[key] != fingerprint:
+                raise ValueError("previously learned broker evidence changed")
             return False
         if trade.side not in self.heads:
             return False
@@ -301,14 +335,84 @@ class NetReward49:
         coef += (step / (1.0 + float(z @ z))) * np.outer(z, err)
         head["coefficients"] = coef.tolist()
         self.observed_ids.add(key)
+        self.observed_fingerprints[key] = fingerprint
         self.online_updates += 1
         return True
+
+    @classmethod
+    def from_artifact(cls, source: Mapping) -> "NetReward49":
+        """Restore a SHA-pinned research checkpoint without repeating past trades."""
+        payload = dict(source)
+        digest = payload.pop("sha256", None)
+        expected = hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()
+        if not isinstance(digest, str) or digest != expected:
+            raise ValueError("research checkpoint digest mismatch")
+        if (
+            payload.get("schema") != "abutron.v9.broker_net_49.research.v1"
+            or payload.get("market_feature_width") != N_FEATURES
+            or payload.get("production_model_promoted") is not False
+            or payload.get("orders_sent") != 0
+            or not isinstance(payload.get("account_scope"), str)
+            or not payload["account_scope"]
+        ):
+            raise ValueError("unsafe or incompatible reward checkpoint")
+        model = cls(identity_slot=payload["identity_slot"],
+                    min_side_trades=int(payload["min_side_trades"]))
+        model.account_scope = payload["account_scope"]
+        head_data = payload["heads"]
+        if not isinstance(head_data, dict) or any(k not in SIDES for k in head_data):
+            raise ValueError("invalid broker reward side heads")
+        for head in head_data.values():
+            coef = np.asarray(head["coefficients"], dtype=float)
+            mean = np.asarray(head["mean"], dtype=float)
+            scale = np.asarray(head["scale"], dtype=float)
+            if (
+                coef.shape != (N_FEATURES + 1, 3)
+                or mean.shape != (N_FEATURES,)
+                or scale.shape != (N_FEATURES,)
+                or not np.isfinite(coef).all()
+                or not np.isfinite(mean).all()
+                or not np.isfinite(scale).all()
+                or np.any(scale <= 0)
+            ):
+                raise ValueError("invalid neural reward checkpoint dimensions")
+        model.heads = head_data
+        learned = payload.get("observed_trade_fingerprints")
+        if not isinstance(learned, list):
+            raise ValueError("missing persistent broker evidence history")
+        for item in learned:
+            if not isinstance(item, list) or len(item) != 3:
+                raise ValueError("invalid broker evidence history entry")
+            account, trade_key, fingerprint = item
+            if (
+                account != model.account_scope
+                or not isinstance(trade_key, str) or not trade_key
+                or not isinstance(fingerprint, str) or len(fingerprint) != 64
+            ):
+                raise ValueError("invalid recorded broker evidence")
+            key = (account, trade_key)
+            if key in model.observed_fingerprints:
+                raise ValueError("duplicate persisted evidence identity")
+            model.observed_fingerprints[key] = fingerprint
+        model.observed_ids = set(model.observed_fingerprints)
+        model.online_updates = int(payload.get("online_updates", -1))
+        if model.online_updates < 0 or model.online_updates > len(model.observed_ids):
+            raise ValueError("invalid online learning update counter")
+        return model
 
     def artifact(self) -> dict:
         payload = {
             "schema": "abutron.v9.broker_net_49.research.v1",
             "market_feature_width": N_FEATURES, "identity_slot": self.identity_slot,
             "min_side_trades": self.min_side_trades, "heads": self.heads,
+            "account_scope": self.account_scope,
+            "observed_trade_fingerprints": [
+                [account, trade_key, fingerprint]
+                for (account, trade_key), fingerprint
+                in sorted(self.observed_fingerprints.items())
+            ],
             "online_updates": self.online_updates,
             "status": "RESEARCH_ONLY_NOT_VALIDATED_FOR_BROKER_EXECUTION",
             "orders_sent": 0, "production_model_promoted": False,
