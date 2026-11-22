@@ -220,3 +220,64 @@ def test_wrong_symbol_onehot_rejected_on_fit():
     model = NetReward49(identity_slot=47)
     with pytest.raises(ValueError, match="symbol identity mapping"):
         model.fit([wrong] + sample(60, BASE), sample(20, BASE + timedelta(days=1)))
+
+
+def test_end_to_end_sqlite_training_is_account_isolated(tmp_path):
+    import sqlite3
+    from pathlib import Path
+    from scripts.train_broker_net_reward49 import run
+
+    ledger = tmp_path / "closed_native.sqlite3"
+    fields = [
+        "account", "trade_key", "symbol", "direction", "entry_time", "exit_time",
+        "features_json", "lots", "gross_usd", "commission_usd", "fee_usd",
+        "swap_usd", "net_usd", "stop_loss_exit", "take_profit_exit",
+        "native_deal_verified", "cost_breakdown_verified"
+    ]
+    with sqlite3.connect(str(ledger)) as c:
+        c.execute("CREATE TABLE observations (" + ", ".join(
+            name + (" TEXT" if name in {
+                "account", "trade_key", "symbol", "direction", "entry_time",
+                "exit_time", "features_json"
+            } else " REAL") for name in fields
+        ) + ")")
+        for account in ("6207", "7593"):
+            for day, n in ((0, 32), (1, 18), (2, 18)):
+                for i in range(n):
+                    idx = day * 100 + i + 1
+                    row = native_row(
+                        idx, account=account,
+                        entry=BASE + timedelta(days=day, minutes=5 * i),
+                        x=(i % 5) / 5,
+                        gross=10.0 if (i % 4) >= 2 else -9.0,
+                    )
+                    # Actual 49-feature registry: V50 symbol identity is slot 46.
+                    vector = json.loads(row["features_json"])
+                    vector[47] = 0.0
+                    vector[46] = 1.0
+                    row["features_json"] = json.dumps(vector)
+                    c.execute(
+                        "INSERT INTO observations (" + ",".join(fields) +
+                        ") VALUES (" + ",".join("?" for _ in fields) + ")",
+                        tuple(row[name] for name in fields)
+                    )
+        c.commit()
+
+    folder = tmp_path / "research_output"
+    result = run(
+        ledger, folder, BASE + timedelta(days=1),
+        BASE + timedelta(days=2), {"6207", "7593"}
+    )
+    assert result["account_isolation"]
+    assert set(result["accounts"]) == {"6207", "7593"}
+    for account in ("6207", "7593"):
+        assert result["accounts"][account]["status"] == "ISOLATED_RESEARCH_CANDIDATE"
+        path = folder / account / "net_reward49_candidate.json"
+        assert path.exists()
+        restored = NetReward49.from_artifact(json.loads(path.read_text()))
+        assert restored.account_scope == account
+        assert len(restored.observed_ids) == 32
+        assert all(key[0] == account for key in restored.observed_ids)
+    assert not (folder / "net_reward49_candidate.json").exists()
+    assert result["model_automatically_promoted"] is False
+    assert result["broker_orders_submitted"] == 0
