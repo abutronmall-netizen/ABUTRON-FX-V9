@@ -449,11 +449,19 @@ void ProcessOrderRequests()
    // Run the broker's real margin/filling/stop validation before OrderSend.
    MqlTradeCheckResult nativeCheck;
    ZeroMemory(nativeCheck);
-   if(!OrderCheck(req, nativeCheck) ||
+   ResetLastError();
+   bool nativeCheckOK=OrderCheck(req, nativeCheck);
+   int nativeCheckError=GetLastError();
+   if(!nativeCheckOK ||
       (nativeCheck.retcode != TRADE_RETCODE_DONE &&
        nativeCheck.retcode != TRADE_RETCODE_PLACED &&
        nativeCheck.retcode != 0))
    {
+      if(AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO)
+         Print("ABUTRON_NATIVE_ORDERCHECK_DIAGNOSTIC symbol=",symbol,
+               " retcode=",nativeCheck.retcode," last_error=",nativeCheckError,
+               " filling=",(int)req.type_filling,
+               " symbol_filling_flags=",SymbolInfoInteger(symbol,SYMBOL_FILLING_MODE));
       WriteReceipt(reqId, 0, "REJECTED", "BROKER_NATIVE_ORDERCHECK_FAILED",
                    0.0, 0.0, sl, tp, "");
       FileDelete(pending);
