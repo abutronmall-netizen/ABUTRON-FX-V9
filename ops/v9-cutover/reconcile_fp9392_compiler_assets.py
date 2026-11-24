@@ -11,37 +11,38 @@ ROOT CAUSE (from the 24 Nov 2026 diagnostic inventory):
     Stock ExpertMACD.ex5 missing.
   - Warm cache /opt/abutron/fpmarkets-mql-bootstrap-v1: 99 MQ5, 102 EX5,
     no MQ5 lacking counterpart — complete.
-  - The worker's warm-cache copy loop copies only 4 subdirectories
-    (Include, Indicators, Experts/Examples, Scripts/Examples), omitting
-    Experts/Advisors and Experts/Free Robots.
-  - stage_fp6364_stock_compiler_assets() (hash-verified pinned stock
-    compiler assets: 32 MQ5 + 32 EX5) is FP6364-only. The 9392 LIVE
-    read-only account receives no stock compiler assets at all.
+  - The pinned stock compiler cache
+    /usr/local/lib/abutron-fp6364-stock-mt5-90000002-v1 contains 64
+    verified files (32 MQ5 + 32 EX5), all checksum-verified, covering
+    ExpertMACD.ex5 and 32 of the 47 missing compiled files. The
+    remaining 15 are unit-test scripts (also present in working DEMO
+    installations).
+  - stage_fp6364_stock_compiler_assets() (the verified stock compiler
+    asset staging function) is FP6364-only. The 9392 LIVE read-only
+    account receives no stock compiler assets at all, so MT5 starts
+    with incomplete compiled EX5 coverage, triggers a full recompilation,
+    and the recompilation is interrupted by the exit-0/10053 handoff
+    before EX5 files are written. Every retry repeats the cycle.
 
-  Result: MT5 starts with MQ5 sources lacking EX5 counterparts, triggers
-  a full recompilation, and the recompilation is interrupted by the
-  exit-0 / 10053 handoff before EX5 files are written. Every retry
-  repeats the same cycle.
+CORRECTION:
 
-CORRECTIONS:
+1. EXTEND PINNED STOCK COMPILER ASSETS TO 9392 READ-ONLY:
+   Extend the account gate in stage_fp6364_stock_compiler_assets() to
+   also accept the 9392 LIVE read-only account. The pinned manifest
+   cache contains only verified stock MT5 Expert examples (Advisors,
+   Free Robots) — no customer charts, EAs, or broker state. Staging
+   these verified stock compiler assets for 9392 prevents the repeated
+   first-run full recompilation that interrupts startup before compiled
+   EX5 files exist.
 
-1. COMPLETE WARM-CACHE STOCK BOOTSTRAP COPY:
-   Add Experts/Advisors and Experts/Free Robots to the warm-cache copy
-   loop in main(). The warm cache is complete (no MQ5 lacking EX5
-   counterpart); the worker's subdirectory selection was incomplete.
-   This ensures the terminal receives the full stock MQL5 library set
-   for every account.
+   This correction does NOT hardcode any account identifiers. The
+   FP6364 identity is extracted from the existing gate in the file being
+   patched, and the 9392 identity is extracted from the existing gate in
+   stage_fp_live_9392_verified_readonly_history() in the same file. The
+   patch is therefore identifier-agnostic and matches any production
+   variant regardless of anonymization.
 
-2. EXTEND PINNED STOCK COMPILER ASSETS TO 9392 READ-ONLY:
-   Extend the gate in stage_fp6364_stock_compiler_assets() to also
-   accept the 9392 LIVE read-only account. The pinned manifest cache
-   (/usr/local/lib/abutron-fp6364-stock-mt5-90000002-v1) contains only
-   verified stock MT5 Expert examples (Advisors, Free Robots) — no
-   customer charts, EAs, or broker state. Staging these verified stock
-   compiler assets for 9392 prevents the repeated first-run full
-   recompilation that interrupts startup before compiled EX5 files exist.
-
-3. PRESERVE ACCOUNT ISOLATION, AUTHENTICATION AND LIVE OFF:
+2. PRESERVE ACCOUNT ISOLATION, AUTHENTICATION AND LIVE OFF:
    No correction changes broker credentials, account permissions, risk
    settings, or LIVE state. The stock compiler assets are read-only
    MT5 Expert examples. The 9392 named read-only chart profile
@@ -49,7 +50,7 @@ CORRECTIONS:
    unchanged. No retry-count increase is applied — the observed results
    do not justify one.
 
-4. ATOMIC FILE REPLACEMENT WITH OWNERSHIP PRESERVATION:
+3. ATOMIC FILE REPLACEMENT WITH OWNERSHIP PRESERVATION:
    The patched file is written to a temp file and moved into place via
    os.replace(). File ownership (UID/GID via os.chown), permissions,
    and timestamps (shutil.copystat) are preserved. A backup is created
@@ -68,29 +69,40 @@ from pathlib import Path
 
 PATCH_MARKER = "# ABUTRON-FP9392-COMPILER-ASSETS-20261124"
 
-# --------------------------------------------------------------------------- #
-# Correction 1: Complete warm-cache stock bootstrap copy.
-# The deployed worker copies only 4 subdirectories; the warm cache is
-# complete. Add the two omitted stock Expert subdirectories.
-# --------------------------------------------------------------------------- #
-WARM_LOOP_OLD = 'for name in ("Include","Indicators","Experts/Examples","Scripts/Examples"):'
-WARM_LOOP_NEW = ('for name in ("Include","Indicators","Experts/Examples",'
-                 '"Experts/Advisors","Experts/Free Robots","Scripts/Examples"):')
 
-# --------------------------------------------------------------------------- #
-# Correction 2: Extend pinned stock compiler assets to the 9392 LIVE
-# read-only account. The gate currently accepts only FP6364 LIVE.
-# --------------------------------------------------------------------------- #
-# Old gate (FP6364-only):
-GATE_OLD = ('if (cid,login,server,mode)!=("f0000000000000000000000000000005",\n'
-            '                              "90000010","FPMarketsSC-Live","LIVE"):\n'
-            '  return "SKIP_UNRELATED_ACCOUNT"')
-# New gate (FP6364 LIVE + FP 9392 LIVE read-only):
-GATE_NEW = ('if (cid,login,server,mode) not in (("f0000000000000000000000000000005",\n'
-            '                                        "90000010","FPMarketsSC-Live","LIVE"),\n'
-            '                                       ("f0000000000000000000000000000007",\n'
-            '                                        "90000008","FPMarketsSC-Live","LIVE")):\n'
-            '  return "SKIP_UNRELATED_ACCOUNT"')
+def find_function(text, func_name):
+    """Find a function definition and return (start, end) char offsets."""
+    pattern = re.compile(r'^def ' + re.escape(func_name) + r'\(', re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return None, None
+    start = match.start()
+    after = text[match.end():]
+    next_def = re.compile(r'^def ', re.MULTILINE)
+    next_match = next_def.search(after)
+    if next_match:
+        end = match.end() + next_match.start()
+    else:
+        end = len(text)
+    return start, end
+
+
+def _extract_gate_tuple(func_text):
+    """Extract the (cid,login,server,mode) tuple from an account gate.
+
+    Matches the pattern:
+        if (cid,login,server,mode)!=(<tuple>):
+          return "SKIP_..."
+    Returns the tuple string (including quotes and commas) or None.
+    """
+    pattern = re.compile(
+        r'if \(cid,login,server,mode\)!=\((.*?)\):\s*\n\s*return "SKIP_',
+        re.DOTALL
+    )
+    match = pattern.search(func_text)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def is_already_patched(text):
@@ -104,25 +116,62 @@ def patch_worker(text):
     if is_already_patched(text):
         return text, ["Already patched (idempotent — no changes needed)"]
 
-    # --- Correction 1: Complete warm-cache stock bootstrap copy ---
-    if WARM_LOOP_OLD in text:
-        text = text.replace(WARM_LOOP_OLD, WARM_LOOP_NEW, 1)
-        changes.append("Completed warm-cache stock bootstrap copy (added Experts/Advisors, Experts/Free Robots)")
-    else:
-        changes.append("WARNING: warm-cache copy loop not found — correction 1 skipped")
+    # --- Correction 1: Extend pinned stock compiler assets to 9392 ---
+    # Find the FP6364 stock compiler assets function and extract its
+    # existing gate tuple (the FP6364 identity — no hardcoded values).
+    fn_start, fn_end = find_function(text, "stage_fp6364_stock_compiler_assets")
+    if fn_start is None:
+        return text, ["ERROR: could not find stage_fp6364_stock_compiler_assets()"]
 
-    # --- Correction 2: Extend pinned stock compiler assets to 9392 ---
-    if GATE_OLD in text:
-        text = text.replace(GATE_OLD, GATE_NEW, 1)
-        changes.append("Extended pinned stock compiler assets to FP 9392 LIVE read-only account")
-    else:
-        changes.append("WARNING: stock compiler assets gate not found — correction 2 skipped")
+    fn_text = text[fn_start:fn_end]
+    fp6364_tuple = _extract_gate_tuple(fn_text)
+    if fp6364_tuple is None:
+        return text, ["ERROR: could not extract FP6364 account gate from stage_fp6364_stock_compiler_assets()"]
+
+    # Find the 9392 read-only staging function and extract its gate tuple
+    # (the 9392 identity — no hardcoded values).
+    fn9392_start, fn9392_end = find_function(text, "stage_fp_live_9392_verified_readonly_history")
+    if fn9392_start is None:
+        return text, ["ERROR: could not find stage_fp_live_9392_verified_readonly_history()"]
+
+    fn9392_text = text[fn9392_start:fn9392_end]
+    fp9392_tuple = _extract_gate_tuple(fn9392_text)
+    if fp9392_tuple is None:
+        return text, ["ERROR: could not extract 9392 account gate from stage_fp_live_9392_verified_readonly_history()"]
+
+    # Build the new gate: accept both identities via `not in (...)`.
+    # Format the tuples with consistent indentation.
+    fp6364_lines = fp6364_tuple.replace("\n", " ").split(",")
+    fp9392_lines = fp9392_tuple.replace("\n", " ").split(",")
+
+    # Reformat each tuple as a single line for the `not in` expression
+    fp6364_single = ", ".join(s.strip() for s in fp6364_lines)
+    fp9392_single = ", ".join(s.strip() for s in fp9392_lines)
+
+    gate_new = (
+        f'if (cid,login,server,mode) not in (({fp6364_single}),\n'
+        f'                                  ({fp9392_single})):\n'
+        f'  return "SKIP_UNRELATED_ACCOUNT"'
+    )
+
+    # Find and replace the old gate in the function text
+    gate_pattern = re.compile(
+        r'if \(cid,login,server,mode\)!=\(.*?\):\s*\n\s*return "SKIP_UNRELATED_ACCOUNT"',
+        re.DOTALL
+    )
+    gate_match = gate_pattern.search(fn_text)
+    if gate_match is None:
+        return text, ["ERROR: could not locate FP6364 account gate to replace"]
+
+    old_gate = gate_match.group(0)
+    new_fn_text = fn_text.replace(old_gate, gate_new, 1)
+    text = text[:fn_start] + new_fn_text + text[fn_end:]
+    changes.append("Extended pinned stock compiler assets to FP 9392 LIVE read-only account")
 
     # Insert the patch marker at the top of the file (after the module
     # header comment block, before the first import or code line).
     marker_line = f"\n{PATCH_MARKER}\n"
     if PATCH_MARKER not in text:
-        # Insert after the last leading comment/shebang block
         lines = text.splitlines(keepends=True)
         insert_at = 0
         for i, line in enumerate(lines):
@@ -144,34 +193,58 @@ def verify_patch(text, original_text):
     if PATCH_MARKER not in text:
         errors.append("PATCH_MARKER not found after patch")
 
-    # Check 2: Warm-cache copy loop completed
-    if WARM_LOOP_NEW not in text:
-        errors.append("Warm-cache copy loop not completed (Experts/Advisors, Experts/Free Robots missing)")
-    if WARM_LOOP_OLD in text:
-        errors.append("Old warm-cache copy loop still present (correction 1 not applied)")
+    # Check 2: Stock compiler assets gate extended to 9392
+    # The gate must now use `not in ((...),(...))` with two identities.
+    fn_start, fn_end = find_function(text, "stage_fp6364_stock_compiler_assets")
+    if fn_start is None:
+        errors.append("stage_fp6364_stock_compiler_assets() not found after patch")
+    else:
+        fn_text = text[fn_start:fn_end]
+        if "not in ((" not in fn_text:
+            errors.append("Stock compiler assets gate not extended (missing 'not in ((')")
+        # Count identity tuples in the gate (should be 2)
+        gate_matches = re.findall(r'\("[^"]*",\s*"[^"]*",\s*"[^"]*",\s*"[^"]*"\)', fn_text)
+        if len(gate_matches) < 2:
+            errors.append("Stock compiler assets gate does not accept two account identities")
+        # Verify the old `!=` gate is gone
+        if re.search(r'if \(cid,login,server,mode\)!=\(', fn_text):
+            errors.append("Old FP6364-only `!=` gate still present in stock compiler assets function")
 
-    # Check 3: Stock compiler assets gate extended to 9392
-    if GATE_NEW not in text:
-        errors.append("Stock compiler assets gate not extended to 9392 LIVE read-only")
-    if GATE_OLD in text:
-        errors.append("Old FP6364-only gate still present (correction 2 not applied)")
+    # Check 3: FP6364 identity preserved (extracted from original, not hardcoded)
+    # The original file's FP6364 identity must appear in the patched gate.
+    orig_fn_start, orig_fn_end = find_function(original_text, "stage_fp6364_stock_compiler_assets")
+    if orig_fn_start is not None:
+        orig_fn_text = original_text[orig_fn_start:orig_fn_end]
+        orig_tuple = _extract_gate_tuple(orig_fn_text)
+        if orig_tuple:
+            # The first identity in the new gate must match the original FP6364 tuple
+            new_fn_text = text[fn_start:fn_end]
+            gate_matches = re.findall(r'\("[^"]*",\s*"[^"]*",\s*"[^"]*",\s*"[^"]*"\)', new_fn_text)
+            if gate_matches:
+                orig_cid = re.search(r'"([^"]+)"', orig_tuple)
+                new_cid = re.search(r'"([^"]+)"', gate_matches[0])
+                if orig_cid and new_cid and orig_cid.group(1) != new_cid.group(1):
+                    errors.append("FP6364 identity changed in stock compiler assets gate — regression")
 
-    # Check 4: FP6364 gate still accepted (no regression)
-    if '"f0000000000000000000000000000005"' not in text or '"90000010"' not in text:
-        errors.append("FP6364 stock compiler assets gate lost — regression")
+    # Check 4: 9392 identity present in the extended gate
+    orig_9392_start, orig_9392_end = find_function(original_text, "stage_fp_live_9392_verified_readonly_history")
+    if orig_9392_start is not None:
+        orig_9392_text = original_text[orig_9392_start:orig_9392_end]
+        orig_9392_tuple = _extract_gate_tuple(orig_9392_text)
+        if orig_9392_tuple:
+            orig_9392_cid = re.search(r'"([^"]+)"', orig_9392_tuple)
+            if orig_9392_cid:
+                new_fn_text = text[fn_start:fn_end]
+                if orig_9392_cid.group(1) not in new_fn_text:
+                    errors.append("9392 read-only identity not present in stock compiler assets gate")
 
-    # Check 5: 9392 identity present in the extended gate
-    if '"f0000000000000000000000000000007"' not in text or '"90000008"' not in text:
-        errors.append("9392 read-only identity not present in stock compiler assets gate")
-
-    # Check 6: No retry-count increase
-    # The launch loop bound remains attempt < 3; exit-69 checks remain attempt<2.
+    # Check 5: No retry-count increase
     if "while attempt < 3:" not in text:
         errors.append("Launch loop retry bound changed — must remain attempt < 3")
     if "attempt<2 and time.monotonic()-started<90" not in text:
         errors.append("Exit-69 retry bound changed — must remain attempt<2 and <90s")
 
-    # Check 7: LIVE OFF and authentication guards preserved
+    # Check 6: LIVE OFF and authentication guards preserved
     if "def hold_zero_exit_for_native_proof" not in text:
         errors.append("hold_zero_exit_for_native_proof removed — LIVE OFF guard lost")
     if "def fp6364_invalid_account_journal" not in text:
@@ -183,15 +256,29 @@ def verify_patch(text, original_text):
     if "fp6364_compiler_exit69" not in text:
         errors.append("fp6364_compiler_exit69 removed — LIVE OFF guard lost")
 
-    # Check 8: 9392 named read-only profile preparation preserved
+    # Check 7: 9392 named read-only profile preparation preserved
     if "ABUTRON9392_READONLY" not in text:
         errors.append("ABUTRON9392_READONLY named profile preparation lost")
 
-    # Check 9: Stock compiler assets manifest verification preserved
+    # Check 8: Stock compiler assets manifest verification preserved
     if "FP6364_STOCK_ASSET_MANIFEST_UNTRUSTED" not in text:
         errors.append("Stock compiler assets manifest verification lost")
     if "FP6364_STOCK_SHA256_REJECTED" not in text:
         errors.append("Stock compiler assets SHA-256 verification lost")
+
+    # Check 9: Warm-cache copy loop unchanged (no no-op directory additions)
+    # The warm cache does not contain Experts/Advisors or Experts/Free
+    # Robots; adding them would be a no-op. The pinned stock compiler
+    # cache is the correct asset source.
+    if '"Experts/Advisors"' in text and 'for name in ("Include"' in text:
+        # Check if the warm-cache loop was modified to include nonexistent dirs
+        warm_loop_line = None
+        for line in text.splitlines():
+            if 'for name in ("Include"' in line:
+                warm_loop_line = line
+                break
+        if warm_loop_line and "Experts/Advisors" in warm_loop_line:
+            errors.append("Warm-cache copy loop modified with nonexistent directories — pinned stock compiler cache is the correct asset source")
 
     # Check 10: compile
     try:
@@ -278,8 +365,8 @@ def main():
         sys.exit(1)
 
     print("Verification passed:")
-    print(f"  - Warm-cache stock bootstrap copy completed (Experts/Advisors, Experts/Free Robots)")
     print(f"  - Pinned stock compiler assets extended to FP 9392 LIVE read-only account")
+    print(f"  - Account identities extracted from file (no hardcoded identifiers)")
     print(f"  - FP6364 stock compiler assets gate preserved (no regression)")
     print(f"  - 9392 read-only identity present in extended gate")
     print(f"  - Retry bounds unchanged (attempt < 3, exit-69 attempt<2 and <90s)")
@@ -287,6 +374,7 @@ def main():
     print(f"    stage_fp_live_6364_preserved_profile, fp6364_compiler_exit69)")
     print(f"  - 9392 read-only history staging and named profile preserved")
     print(f"  - Stock compiler assets manifest and SHA-256 verification preserved")
+    print(f"  - Warm-cache copy loop unchanged (pinned stock compiler cache is the asset source)")
     print(f"  - File compiles without syntax errors")
     print()
 

@@ -2,14 +2,13 @@
 """Tests for reconcile_fp9392_compiler_assets.py.
 
 Verifies the surgical corrections for FP 9392 compiler asset preparation:
-  1. Warm-cache stock bootstrap copy completed (Experts/Advisors,
-     Experts/Free Robots added).
-  2. Pinned stock compiler assets extended to the 9392 LIVE read-only
-     account (gate accepts both FP6364 and 9392).
-  3. Preservation of LIVE OFF guards, retry bounds, 9392 profile
+  1. Pinned stock compiler assets extended to the 9392 LIVE read-only
+     account (gate accepts both FP6364 and 9392, with identities
+     extracted from the file — no hardcoded identifiers).
+  2. Preservation of LIVE OFF guards, retry bounds, 9392 profile
      preparation, and manifest verification.
-  4. Atomic write with ownership preservation.
-  5. Runtime regression: the patched staging function executes and
+  3. Atomic write with ownership preservation.
+  4. Runtime regression: the patched staging function executes and
      stages verified stock compiler assets for 9392 (isolated fixtures,
      no broker data).
 """
@@ -25,11 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ops" / "v9-cuto
 
 from reconcile_fp9392_compiler_assets import (
     PATCH_MARKER,
-    GATE_NEW,
-    GATE_OLD,
-    WARM_LOOP_NEW,
-    WARM_LOOP_OLD,
+    _extract_gate_tuple,
     atomic_write,
+    find_function,
     is_already_patched,
     patch_worker,
     verify_patch,
@@ -155,31 +152,31 @@ def main():
 class TestPatchContent:
     """Verify the patched source contains the required corrections."""
 
-    def test_warm_loop_completed(self):
+    def test_gate_extended_to_two_identities(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        assert WARM_LOOP_NEW in patched
-
-    def test_warm_loop_old_removed(self):
-        patched, _ = patch_worker(WORKER_SOURCE)
-        assert WARM_LOOP_OLD not in patched
-
-    def test_gate_extended_to_9392(self):
-        patched, _ = patch_worker(WORKER_SOURCE)
-        assert GATE_NEW in patched
+        fn_start, fn_end = find_function(patched, "stage_fp6364_stock_compiler_assets")
+        fn_text = patched[fn_start:fn_end]
+        assert "not in ((" in fn_text
 
     def test_gate_old_removed(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        assert GATE_OLD not in patched
+        fn_start, fn_end = find_function(patched, "stage_fp6364_stock_compiler_assets")
+        fn_text = patched[fn_start:fn_end]
+        assert "!=(\"f0000000000000000000000000000005\"" not in fn_text
 
     def test_fp6364_identity_preserved_in_gate(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        assert '"f0000000000000000000000000000005"' in patched
-        assert '"90000010"' in patched
+        fn_start, fn_end = find_function(patched, "stage_fp6364_stock_compiler_assets")
+        fn_text = patched[fn_start:fn_end]
+        assert "f0000000000000000000000000000005" in fn_text
+        assert "90000010" in fn_text
 
     def test_9392_identity_in_gate(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        assert '"f0000000000000000000000000000007"' in patched
-        assert '"90000008"' in patched
+        fn_start, fn_end = find_function(patched, "stage_fp6364_stock_compiler_assets")
+        fn_text = patched[fn_start:fn_end]
+        assert "f0000000000000000000000000000007" in fn_text
+        assert "90000008" in fn_text
 
     def test_patch_marker_inserted(self):
         patched, _ = patch_worker(WORKER_SOURCE)
@@ -189,14 +186,64 @@ class TestPatchContent:
         patched, _ = patch_worker(WORKER_SOURCE)
         compile(patched, "<test>", "exec")
 
-    def test_no_hardcoded_cid_in_warm_loop(self):
-        """The warm-cache copy loop must not reference account identifiers."""
+    def test_warm_cache_loop_unchanged(self):
+        """The warm-cache copy loop must remain unchanged — the pinned
+        stock compiler cache is the correct asset source, and the warm
+        cache does not contain the additional directories."""
         patched, _ = patch_worker(WORKER_SOURCE)
         for line in patched.splitlines():
-            if "for name in (\"Include\"" in line:
-                assert "cid" not in line
-                assert "login" not in line
+            if 'for name in ("Include"' in line:
+                assert "Experts/Advisors" not in line
+                assert "Experts/Free Robots" not in line
                 break
+
+    def test_no_hardcoded_identifiers_in_patch_constants(self):
+        """The patch script must not contain hardcoded account identifiers
+        in its gate constants — identities are extracted from the file."""
+        import reconcile_fp9392_compiler_assets as mod
+        # The module should not have GATE_OLD / GATE_NEW constants with
+        # hardcoded identifiers
+        assert not hasattr(mod, "GATE_OLD") or "f0000000000000000000000000000005" not in str(getattr(mod, "GATE_OLD", ""))
+        assert not hasattr(mod, "GATE_NEW") or "f0000000000000000000000000000007" not in str(getattr(mod, "GATE_NEW", ""))
+
+
+# --------------------------------------------------------------------------- #
+# TestIdentifierAgnostic
+# --------------------------------------------------------------------------- #
+class TestIdentifierAgnostic:
+    """Verify the patch works with any account identifiers, not just the
+    anonymized placeholders in the review copy."""
+
+    @staticmethod
+    def _make_variant(cid_6364, cid_9392):
+        text = WORKER_SOURCE
+        text = text.replace("f0000000000000000000000000000005", cid_6364)
+        text = text.replace("f0000000000000000000000000000007", cid_9392)
+        return text
+
+    def test_patch_with_real_identifiers(self):
+        text = self._make_variant("a1b2c3d4e5f60718293a4b5c6d7e8f90",
+                                   "b2c3d4e5f60718293a4b5c6d7e8f9a01")
+        patched, changes = patch_worker(text)
+        errors = verify_patch(patched, text)
+        assert errors == []
+        assert "a1b2c3d4e5f60718293a4b5c6d7e8f90" in patched
+        assert "b2c3d4e5f60718293a4b5c6d7e8f9a01" in patched
+
+    def test_patch_with_short_identifiers(self):
+        text = self._make_variant("cid6364", "cid9392")
+        patched, changes = patch_worker(text)
+        errors = verify_patch(patched, text)
+        assert errors == []
+        assert "cid6364" in patched
+        assert "cid9392" in patched
+
+    def test_patch_with_hex_identifiers(self):
+        text = self._make_variant("deadbeefdeadbeefdeadbeefdeadbeef",
+                                   "cafebabe cafebabe cafebabe cafebabe".replace(" ", ""))
+        patched, changes = patch_worker(text)
+        errors = verify_patch(patched, text)
+        assert errors == []
 
 
 # --------------------------------------------------------------------------- #
@@ -210,19 +257,20 @@ class TestVerifyPatch:
         errors = verify_patch(patched, WORKER_SOURCE)
         assert errors == []
 
-    def test_verify_detects_missing_warm_loop_correction(self):
-        patched, _ = patch_worker(WORKER_SOURCE)
-        # Revert the warm-cache correction
-        patched = patched.replace(WARM_LOOP_NEW, WARM_LOOP_OLD, 1)
-        errors = verify_patch(patched, WORKER_SOURCE)
-        assert any("warm-cache copy loop" in e for e in errors)
-
     def test_verify_detects_missing_gate_correction(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        # Revert the gate correction
-        patched = patched.replace(GATE_NEW, GATE_OLD, 1)
+        # Revert the gate correction: replace the extended gate with the
+        # original FP6364-only gate inside the function
+        fn_start, fn_end = find_function(patched, "stage_fp6364_stock_compiler_assets")
+        fn_text = patched[fn_start:fn_end]
+        gate_idx = fn_text.find("if (cid,login,server,mode)")
+        gate_end = fn_text.find('return "SKIP_UNRELATED_ACCOUNT"', gate_idx) + len('return "SKIP_UNRELATED_ACCOUNT"')
+        old_gate = ('if (cid,login,server,mode)!=("f0000000000000000000000000000005",\n'
+                    '                              "90000010","FPMarketsSC-Live","LIVE"):\n'
+                    '  return "SKIP_UNRELATED_ACCOUNT"')
+        patched = patched[:fn_start] + fn_text[:gate_idx] + old_gate + fn_text[gate_end:] + patched[fn_end:]
         errors = verify_patch(patched, WORKER_SOURCE)
-        assert any("gate not extended" in e for e in errors)
+        assert any("gate not extended" in e or "two account identities" in e for e in errors)
 
     def test_verify_detects_missing_marker(self):
         patched, _ = patch_worker(WORKER_SOURCE)
@@ -255,6 +303,16 @@ class TestVerifyPatch:
                                   "REMOVED_MANIFEST_CHECK", 1)
         errors = verify_patch(patched, WORKER_SOURCE)
         assert any("manifest verification" in e for e in errors)
+
+    def test_verify_detects_fp6364_identity_change(self):
+        """If the FP6364 identity in the patched gate differs from the
+        original, verify_patch must flag it."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        # Tamper with the FP6364 identity in the patched gate
+        patched = patched.replace("f0000000000000000000000000000005",
+                                   "tampered_cid", 1)
+        errors = verify_patch(patched, WORKER_SOURCE)
+        assert any("FP6364 identity changed" in e for e in errors)
 
 
 # --------------------------------------------------------------------------- #
@@ -507,6 +565,33 @@ class TestRuntimeRegression:
             terminal,
             "f0000000000000000000000000000005",
             "90000010",
+            "FPMarketsSC-Live",
+            "LIVE",
+        )
+        assert result == "FP6364_VERIFIED_STOCK_EXPERT_COMPILER_CACHE_ONLY"
+        staged = list((terminal / "MQL5").rglob("*.ex5"))
+        assert len(staged) == 32
+
+    def test_9392_staging_with_real_identifiers(self, tmp_path):
+        """The patched staging function must work with real (non-anonymized)
+        identifiers extracted from the file."""
+        # Use real-looking identifiers
+        text = WORKER_SOURCE.replace("f0000000000000000000000000000005",
+                                     "a1b2c3d4e5f60718293a4b5c6d7e8f90")
+        text = text.replace("f0000000000000000000000000000007",
+                            "b2c3d4e5f60718293a4b5c6d7e8f9a01")
+        patched, _ = patch_worker(text)
+        cache, trusted_index = self._make_stock_cache(tmp_path)
+        patched = self._patch_fixture_paths(patched, cache, trusted_index)
+
+        mod = self._make_patched_module(patched)
+        terminal = tmp_path / "terminal"
+        terminal.mkdir()
+
+        result = mod.stage_fp6364_stock_compiler_assets(
+            terminal,
+            "b2c3d4e5f60718293a4b5c6d7e8f9a01",
+            "90000008",
             "FPMarketsSC-Live",
             "LIVE",
         )
