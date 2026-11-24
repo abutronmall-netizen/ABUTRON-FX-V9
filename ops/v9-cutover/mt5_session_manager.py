@@ -15,6 +15,10 @@ WORKER="/opt/abutron-v9-native-runtime/workers/worker_feed_v4.py"
 FP_WORKER="/opt/abutron-v9-native-runtime/workers/worker_feed_v8_fp_handoff.py"
 DERIV_50_100_WORKER="/opt/abutron-v9-native-runtime/workers/worker_feed_v4_usd50_canary.py"
 DERIV_LIVE_READONLY_WORKER="/opt/abutron-v9-native-runtime/workers/worker_feed_v4_deriv_live_readonly.py"
+WORKER_DIR="/opt/abutron-v9-native-runtime/workers"
+# How recently a host boot must have occurred for reboot-triggered recovery
+# to fire. Covers normal reboots and restarts well within this window.
+REBOOT_RECOVERY_WINDOW_S=900
 TEMPLATE=Path("/opt/abutron/client-mt5-template-v3")
 FP_MODES={"FPMarketsSC-Demo":"DEMO","FPMarketsSC-Demo Server":"DEMO",
  "FPMarketsLtd-Demo2":"DEMO","FPMarketsSC-Live":"LIVE","FPMarketsLtd-Live2":"LIVE"}
@@ -92,6 +96,7 @@ def launch_worker(cid,broker,mode,encrypted):
      "--property=ProtectSystem=strict","--property=ProtectHome=yes",
      "--property=PrivateTmp=yes","--property=PrivateDevices=yes",
      "--property=NoNewPrivileges=yes",
+     "--property=ReadOnlyPaths="+WORKER_DIR,
      "--property=MemoryMax=1800M","--property=TasksMax=170",
      "--property=UMask=0077",
      *(["--property=SupplementaryGroups=abutron-fp-boot-assets"]
@@ -107,6 +112,30 @@ def maintenance_reexec_seen():
         timeout=6,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
   return eventlog.returncode==0 and b"apt-daily-upgrade.service" in eventlog.stdout[-12000:]
  except (OSError,subprocess.SubprocessError):return False
+def reboot_recently_detected():
+ # Detect a recent host reboot so DEMO sessions stuck in ERROR after a
+ # reboot are recovered. Uses the kernel boot_id: a change since the last
+ # recorded boot_id means the host rebooted. Falls back to uptime check.
+ # This complements (does not replace) the maintenance_reexec_seen path.
+ try:
+  boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+  marker=ROOT/"last_boot_id"
+  if marker.is_file():
+   previous=marker.read_text().strip()
+   if previous and previous!=boot_id:
+    marker.write_text(boot_id)
+    return True
+   return False
+  else:
+   marker.write_text(boot_id)
+   # First observation: use uptime as a secondary signal.
+   uptime_s=float(Path("/proc/uptime").read_text().split()[0])
+   return uptime_s<=REBOOT_RECOVERY_WINDOW_S
+ except (OSError,ValueError,subprocess.SubprocessError):
+  return False
+def recovery_trigger_active():
+ # Recovery may fire on a maintenance reexec OR a recent host reboot.
+ return maintenance_reexec_seen() or reboot_recently_detected()
 def recover_offline_demo(cid,owner,broker,server):
  # Only user-authorized DEMO accounts with an existing host-encrypted
  # credential and a confirmed worker-loss error may reconnect. Never restore
@@ -115,7 +144,7 @@ def recover_offline_demo(cid,owner,broker,server):
  if service_active(cid):return
  now=time.time()
  if now-RECOVERY_LAST_ATTEMPT.get(cid,0)<300:return
- if not maintenance_reexec_seen():
+ if not recovery_trigger_active():
   RECOVERY_LAST_ATTEMPT[cid]=now
   return
  with g_lock:
