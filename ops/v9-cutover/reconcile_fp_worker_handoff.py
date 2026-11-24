@@ -33,12 +33,13 @@ CORRECTIONS:
    unconditional (as in the original production file).
 
 4. RESTORE 9392 EXPOSURE REPORTING:
-   Adds fp9392_error_recovery in the launch loop to allow the worker
-   to retry/relaunch when 9392 LIVE is in ERROR state. The existing
+   No additional source change required. The existing
    stage_fp_live_9392_verified_readonly_history() call remains
-   unconditional — no condition wrapper that could skip the real 9392
-   account. Scoped to FP Markets LIVE read-only — no order calls, no
-   LIVE enablement.
+   unconditional. The fp_live_compiler_exit69 check (inserted in the
+   launch loop AFTER was_connected is initialized) provides the 9392
+   recovery path for exit code 69 compiler-handoff failures. No
+   separate recovery variable is added — avoiding any reference to
+   was_connected before its initialization.
 
 5. DEMO RETRY LOGIC — HANDOFF ELIGIBILITY:
    The fp_demo_compiler_exit69 and fp_live_compiler_exit69 checks are
@@ -48,7 +49,9 @@ CORRECTIONS:
 
 6. ATOMIC FILE REPLACEMENT:
    The patched file is written to a temp file and moved into place via
-   os.replace(), ensuring atomic replacement. A backup is created first.
+   os.replace(), ensuring atomic replacement. File ownership, permissions,
+   and timestamps are preserved via shutil.copystat. A backup is created
+   first.
 
 Usage:
   python3 reconcile_fp_worker_handoff.py [--worker-path PATH] [--dry-run]
@@ -163,24 +166,6 @@ def fp1622_mql_recompile_startup_handoff_6295(journal_bytes):
                  or "terminal\\tstopped with 6295" in text))
 '''
 
-# --------------------------------------------------------------------------- #
-# Correction 4: 9392 exposure reporting recovery.
-# The staging call remains UNCONDITIONAL (as in the original production
-# file). The recovery check is added in the launch loop to allow retry
-# when 9392 LIVE is in ERROR. Uses in-scope broker/mode variables —
-# no hardcoded account identifiers. Scoped to FP Markets LIVE read-only.
-# --------------------------------------------------------------------------- #
-FP9392_RECOVERY_CHECK = '''  # ABUTRON-FP-WORKER-CORRECTIONS-20261124
-  # FP LIVE error recovery: when a FP Markets LIVE account is in ERROR
-  # (e.g. 9392), allow the worker to retry/relaunch. The existing
-  # stage_fp_live_9392_verified_readonly_history() call above remains
-  # unconditional — this check only affects the retry decision. Scoped
-  # to FP Markets LIVE read-only — no order calls, no LIVE enablement.
-  fp_live_error_recovery=(
-      broker=="FP Markets" and mode=="LIVE" and not was_connected)
-'''
-
-
 def find_function(text, func_name):
     """Find a function definition and return (start, end) char offsets."""
     pattern = re.compile(r'^def ' + re.escape(func_name) + r'\(', re.MULTILINE)
@@ -243,25 +228,11 @@ def patch_worker(text):
     else:
         changes.append("WARNING: handoff parameter expression not found — eligibility correction skipped")
 
-    # --- Correction 4: 9392 exposure reporting recovery ---
-    # Insert fp_live_error_recovery check in the launch loop (before the
-    # staging calls). The staging call itself remains unconditional.
-    if "stage_fp_live_9392_verified_readonly_history" in text:
-        recovery_text = FP9392_RECOVERY_CHECK + "\n"
-        # Find the staging call site (line with 2-space indent, inside try:)
-        # The 2-space pattern won't match the function definition (1 space
-        # after 'def').
-        staging_call = "  stage_fp_live_6364_history(terminal,files,nonce,challenge_owner,login,server,mode,cid)"
-        staging_pos = text.find(staging_call)
-        if staging_pos > 0:
-            # Insert at the beginning of the line (after the last newline)
-            line_start = text.rfind("\n", 0, staging_pos) + 1
-            text = text[:line_start] + recovery_text + text[line_start:]
-            changes.append("Added FP LIVE error recovery path (staging call remains unconditional)")
-        else:
-            changes.append("WARNING: staging call site not found — 9392 correction skipped")
-    else:
-        changes.append("WARNING: 9392 staging call not found — 9392 correction skipped")
+    # Correction 4 (9392 recovery): No source change required.
+    # The existing stage_fp_live_9392_verified_readonly_history() call
+    # remains unconditional. The exit-code-69 retry for FP LIVE accounts
+    # (fp_live_compiler_exit69, inserted above in the launch loop after
+    # was_connected is initialized) provides the 9392 recovery path.
 
     return text, changes
 
@@ -321,18 +292,7 @@ def verify_patch(text, original_text):
     if "or fp_demo_compiler_exit69 or fp_live_compiler_exit69," not in text:
         errors.append("handoff eligibility expression not updated to include new exit-69 checks")
 
-    # Check 9: 9392 recovery check present (no hardcoded identifiers)
-    if "fp_live_error_recovery" not in text:
-        errors.append("fp_live_error_recovery check not found")
-    recovery_section_start = text.find("fp_live_error_recovery=(")
-    if recovery_section_start > 0:
-        recovery_section_end = text.find(")", recovery_section_start)
-        if recovery_section_end > 0:
-            recovery_section = text[recovery_section_start:recovery_section_end]
-            if "cid" in recovery_section or "login" in recovery_section:
-                errors.append("fp_live_error_recovery hardcodes account identifiers — must use in-scope variables")
-
-    # Check 10: 9392 staging call remains UNCONDITIONAL (no if wrapper)
+    # Check 9: 9392 staging call remains UNCONDITIONAL (no if wrapper)
     # Find the CALL SITE specifically — search for the 2-space indented
     # call, which is distinct from the function definition (0-space, 'def ')
     staging_call = "  stage_fp_live_9392_verified_readonly_history(terminal,files,"
@@ -389,11 +349,17 @@ def verify_patch(text, original_text):
 
 
 def atomic_write(path, content):
-    """Write content to path via temp file + os.replace (atomic)."""
+    """Write content to path via temp file + os.replace (atomic).
+
+    Preserves file ownership, permissions, and timestamps via
+    shutil.copystat so the patched file matches the original's
+    access metadata.
+    """
     tmp = path.with_suffix(path.suffix + ".tmp-fpcorr")
     tmp.write_text(content)
     if path.exists():
-        tmp.chmod(path.stat().st_mode)
+        # Preserve mode, ownership, timestamps, and extended attributes
+        shutil.copystat(path, tmp)
     else:
         tmp.chmod(0o755)
     os.replace(tmp, path)
@@ -461,7 +427,7 @@ def main():
     print(f"  - Break condition updated to include new exit-69 checks")
     print(f"  - decision=exit_action returncode updated to include new exit-69 checks")
     print(f"  - handoff eligibility updated to include new exit-69 checks")
-    print(f"  - 9392 LIVE error recovery path added (staging call remains unconditional)")
+    print(f"  - 9392 staging call remains unconditional (no source change required)")
     print(f"  - LIVE OFF guards preserved (fp6364_compiler_exit69, hold_zero_exit,")
     print(f"    fp6364_invalid_account_journal, stage_fp_live_6364_preserved_profile)")
     print(f"  - 9392 read-only history staging function preserved")

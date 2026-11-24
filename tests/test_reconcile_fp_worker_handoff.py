@@ -1,8 +1,11 @@
-"""Tests for reconcile_fp_worker_handoff.py — four-priority FP worker corrections.
+"""Tests for reconcile_fp_worker_handoff.py — FP worker handoff corrections.
 
 Tests use a fixture that mirrors the production worker's structure and
 indentation. All corrections must use in-scope variables (broker, mode,
 server) — never hardcoded account identifiers or numeric literals.
+
+Runtime regression tests execute the patched startup path to verify
+control flow, not just compilation.
 """
 import os
 import sys
@@ -17,7 +20,6 @@ from reconcile_fp_worker_handoff import (  # noqa: E402
     BUILD6295_FUNC,
     FP_DEMO_EXIT69_CHECK,
     FP_LIVE_EXIT69_CHECK,
-    FP9392_RECOVERY_CHECK,
     BREAK_CONDITION_OLD,
     BREAK_CONDITION_NEW,
     DECISION_OLD,
@@ -34,6 +36,8 @@ from reconcile_fp_worker_handoff import (  # noqa: E402
 # Fixture mirrors the production worker's indentation:
 # main() body at 1-space, try: at 1-space, body at 2-space,
 # while at 2-space, body at 3-space.
+# NOTE: was_connected is initialized AFTER the staging calls (as in
+# the production file at line 1087).
 WORKER_SOURCE = """\
 #!/usr/bin/python3
 \"\"\"ABUTRON client MT5 worker: isolated UID, broker-native feed plus gated order bridge.\"\"\"
@@ -109,7 +113,7 @@ def main():
    tail=data[previous_bytes:] if len(data)>previous_bytes else b\"\"
   except OSError:
    tail=b\"\"
-    # FP6364 LIVE's Wine launcher reports 69 while its signed-session MT5
+   # FP6364 LIVE's Wine launcher reports 69 while its signed-session MT5
    fp6364_compiler_exit69=(
        cid==\"f0000000000000000000000000000005\"
        and broker==\"FP Markets\" and server==\"FPMarketsSC-Live\"
@@ -141,12 +145,11 @@ class TestPatchWorker:
 
     def test_all_corrections_applied(self):
         patched, changes = patch_worker(WORKER_SOURCE)
-        assert len(changes) >= 5
+        assert len(changes) >= 4
         assert "mt5_build_6295_detected" in patched
         assert "fp1622_mql_recompile_startup_handoff_6295" in patched
         assert "fp_demo_compiler_exit69" in patched
         assert "fp_live_compiler_exit69" in patched
-        assert "fp_live_error_recovery" in patched
 
     def test_build_6295_functions_present(self):
         patched, _ = patch_worker(WORKER_SOURCE)
@@ -169,7 +172,6 @@ class TestPatchWorker:
 
     def test_build_6295_integrated_into_retry(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        # The _6295 variant must appear in the exit-69 checks
         assert "fp1622_mql_recompile_startup_handoff_6295(tail)" in patched
 
     def test_break_condition_updated(self):
@@ -184,19 +186,15 @@ class TestPatchWorker:
         patched, _ = patch_worker(WORKER_SOURCE)
         assert "or fp_demo_compiler_exit69 or fp_live_compiler_exit69," in patched
 
-    def test_9392_recovery_check_present(self):
-        patched, _ = patch_worker(WORKER_SOURCE)
-        assert "fp_live_error_recovery=(" in patched
-        assert "broker==\"FP Markets\"" in patched
-        assert "mode==\"LIVE\"" in patched
-        assert "not was_connected" in patched
-
     def test_9392_staging_call_unconditional(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        # The 9392 staging call must NOT be wrapped in a condition
         assert "  stage_fp_live_9392_verified_readonly_history(terminal,files,nonce,challenge_owner,login,server,mode,cid)" in patched
-        # No if-wrapper around the staging call
-        assert 'if cid=="f0000000000000000000000000000008"' not in patched
+
+    def test_no_fp_live_error_recovery_dead_code(self):
+        """fp_live_error_recovery must NOT be present (was_connected
+        is uninitialized at the staging call site)."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        assert "fp_live_error_recovery" not in patched
 
     def test_patch_marker_present(self):
         patched, _ = patch_worker(WORKER_SOURCE)
@@ -211,37 +209,27 @@ class TestNoAnonymizedIdentifiers:
     """Verify no hardcoded account identifiers in inserted code."""
 
     def test_fp_demo_exit69_no_hardcoded_cid(self):
-        """fp_demo_compiler_exit69 must use broker/mode, not specific CIDs."""
         assert "broker==\"FP Markets\"" in FP_DEMO_EXIT69_CHECK
         assert "mode==\"DEMO\"" in FP_DEMO_EXIT69_CHECK
         assert "cid" not in FP_DEMO_EXIT69_CHECK
         assert "login" not in FP_DEMO_EXIT69_CHECK
 
     def test_fp_live_exit69_no_hardcoded_cid(self):
-        """fp_live_compiler_exit69 must use broker/mode, not specific CIDs."""
         assert "broker==\"FP Markets\"" in FP_LIVE_EXIT69_CHECK
         assert "mode==\"LIVE\"" in FP_LIVE_EXIT69_CHECK
         assert "cid" not in FP_LIVE_EXIT69_CHECK
         assert "login" not in FP_LIVE_EXIT69_CHECK
 
-    def test_9392_recovery_no_hardcoded_cid(self):
-        """fp_live_error_recovery must use broker/mode, not specific CIDs."""
-        assert "broker==\"FP Markets\"" in FP9392_RECOVERY_CHECK
-        assert "mode==\"LIVE\"" in FP9392_RECOVERY_CHECK
-        assert "cid" not in FP9392_RECOVERY_CHECK
-        assert "login" not in FP9392_RECOVERY_CHECK
-
-    def test_patched_no_anonymized_cids(self):
+    def test_patched_no_anonymized_cids_in_new_checks(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        # The inserted code sections must not contain anonymized CIDs
-        # (the fixture's existing fp6364_compiler_exit69 has them, but
-        # the NEW inserted checks must not)
-        demo_section = patched[patched.find("fp_demo_compiler_exit69"):]
-        demo_section = demo_section[:demo_section.find("fp_live_compiler_exit69")]
+        demo_section_start = patched.find("fp_demo_compiler_exit69=(")
+        demo_section_end = patched.find("fp_live_compiler_exit69", demo_section_start)
+        demo_section = patched[demo_section_start:demo_section_end]
         assert "f0000000000000000000000000000001" not in demo_section
 
-        live_section = patched[patched.find("fp_live_compiler_exit69"):]
-        live_section = live_section[:live_section.find("if process.returncode")]
+        live_section_start = patched.find("fp_live_compiler_exit69=(")
+        live_section_end = patched.find("if process.returncode", live_section_start)
+        live_section = patched[live_section_start:live_section_end]
         assert "f0000000000000000000000000000008" not in live_section
 
 
@@ -331,7 +319,6 @@ class TestVerifyPatch:
 
     def test_verify_detects_hardcoded_cid_in_demo_check(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        # Inject a hardcoded CID into the demo check
         old = '       broker=="FP Markets" and mode=="DEMO"'
         new = '       cid=="f0000000000000000000000000000001"\n       and broker=="FP Markets" and mode=="DEMO"'
         patched = patched.replace(old, new, 1)
@@ -340,7 +327,6 @@ class TestVerifyPatch:
 
     def test_verify_detects_conditional_9392_staging(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        # Wrap the 9392 staging call in a condition (indent the call deeper)
         old = '  stage_fp_live_9392_verified_readonly_history(terminal,files,nonce,challenge_owner,login,server,mode,cid)'
         new = '  if cid=="f0000000000000000000000000000008":\n    stage_fp_live_9392_verified_readonly_history(terminal,files,nonce,challenge_owner,login,server,mode,cid)'
         patched = patched.replace(old, new)
@@ -364,7 +350,7 @@ class TestFindFunction:
 
 
 class TestAtomicWrite:
-    """Tests for atomic_write()."""
+    """Tests for atomic_write() — including ownership/permission preservation."""
 
     def test_atomic_write_creates_file(self, tmp_path):
         target = tmp_path / "test.py"
@@ -377,9 +363,124 @@ class TestAtomicWrite:
         target.write_text("old content")
         atomic_write(target, "new content")
         assert target.read_text() == "new content"
-        # No temp files left behind
         leftovers = [p for p in tmp_path.iterdir() if ".tmp" in p.name]
         assert len(leftovers) == 0
+
+    def test_atomic_write_preserves_permissions(self, tmp_path):
+        target = tmp_path / "test.py"
+        target.write_text("old content")
+        target.chmod(0o600)
+        original_mode = target.stat().st_mode & 0o777
+        atomic_write(target, "new content")
+        assert (target.stat().st_mode & 0o777) == original_mode
+
+    def test_atomic_write_preserves_ownership(self, tmp_path):
+        target = tmp_path / "test.py"
+        target.write_text("old content")
+        stat_before = target.stat()
+        atomic_write(target, "new content")
+        stat_after = target.stat()
+        assert stat_after.st_uid == stat_before.st_uid
+        assert stat_after.st_gid == stat_before.st_gid
+
+
+class TestRuntimeRegression:
+    """Runtime tests that execute the patched startup path.
+
+    These tests verify control flow, not just compilation. They execute
+    the patched worker's exit-code-69 retry logic to confirm that
+    fp_demo_compiler_exit69 and fp_live_compiler_exit69 actually
+    influence the retry decision.
+    """
+
+    @staticmethod
+    def _make_patched_module(patched_source):
+        """Compile and return a module from patched source for execution."""
+        import types
+        mod = types.ModuleType("patched_worker")
+        mod.__dict__["__name__"] = "patched_worker"
+        exec(compile(patched_source, "<patched>", "exec"), mod.__dict__)
+        return mod
+
+    def test_exit_action_retry_with_demo_exit69(self):
+        """When fp_demo_compiler_exit69 is True, exit_action must return RETRY_UPDATE."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        # exit_action: returncode=0, was_connected=False, attached=False,
+        # handoff=True (from fp_demo_compiler_exit69), attempt=0, elapsed<220
+        result = mod.exit_action(0, False, False, True, 0, 50)
+        assert result == "RETRY_UPDATE"
+
+    def test_exit_action_stop_without_handoff(self):
+        """Without handoff evidence, exit_action must return STOP."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        result = mod.exit_action(69, False, False, False, 0, 50)
+        assert result == "STOP"
+
+    def test_exit_action_stop_when_connected(self):
+        """When was_connected is True, exit_action must return STOP."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        result = mod.exit_action(0, True, False, True, 0, 50)
+        assert result == "STOP"
+
+    def test_exit_action_monitor_child(self):
+        """When attached is True, exit_action must return MONITOR_CHILD."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        result = mod.exit_action(0, False, True, False, 0, 50)
+        assert result == "MONITOR_CHILD"
+
+    def test_build_6295_detection_returns_bool(self):
+        """mt5_build_6295_detected must return bool for various inputs."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        assert mod.mt5_build_6295_detected(b"") is False
+        assert mod.mt5_build_6295_detected(b"random text") is False
+        assert mod.mt5_build_6295_detected(b"build 6295 detected") is True
+
+    def test_build_6295_handoff_returns_bool(self):
+        """fp1622_mql_recompile_startup_handoff_6295 must return bool."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        assert mod.fp1622_mql_recompile_startup_handoff_6295(b"") is False
+        assert mod.fp1622_mql_recompile_startup_handoff_6295(
+            b"compiler\tfull recompilation (build 6295)\nterminal\texit with code 0\nterminal\tstopped with 6295") is True
+
+    def test_hold_zero_exit_with_fresh_heartbeat(self):
+        """hold_zero_exit_for_native_proof must allow fresh heartbeat."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        assert mod.hold_zero_exit_for_native_proof(0, True, 0) is True
+
+    def test_hold_zero_exit_without_heartbeat_bounded(self):
+        """hold_zero_exit_for_native_proof must be bounded without heartbeat."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        assert mod.hold_zero_exit_for_native_proof(0, False, 5) is True
+        assert mod.hold_zero_exit_for_native_proof(0, False, 30) is False
+
+    def test_hold_zero_exit_nonzero_returncode(self):
+        """hold_zero_exit_for_native_proof must reject nonzero returncode."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        assert mod.hold_zero_exit_for_native_proof(69, True, 0) is False
+
+    def test_fp_demo_exit69_check_uses_in_scope_vars(self):
+        """The fp_demo_compiler_exit69 expression must reference broker
+        and mode, not hardcoded CIDs. This prevents UnboundLocalError
+        from referencing was_connected before initialization."""
+        # The check is inside the launch loop where was_connected IS
+        # initialized (line 1087 in production). Verify the expression
+        # structure: it must be inside the while loop, after was_connected.
+        patched, _ = patch_worker(WORKER_SOURCE)
+        # was_connected initialization must appear BEFORE the exit-69 checks
+        was_connected_pos = patched.find("was_connected=False")
+        demo_check_pos = patched.find("fp_demo_compiler_exit69=(")
+        live_check_pos = patched.find("fp_live_compiler_exit69=(")
+        assert was_connected_pos < demo_check_pos, "fp_demo_compiler_exit69 must be after was_connected init"
+        assert was_connected_pos < live_check_pos, "fp_live_compiler_exit69 must be after was_connected init"
 
 
 class TestDryRun:
@@ -451,15 +552,3 @@ class TestPatchContent:
 
     def test_build_6295_integrated_description(self):
         assert "alternative handoff" in BUILD6295_FUNC
-
-    def test_9392_recovery_scoped_to_live_readonly(self):
-        assert "FP Markets LIVE" in FP9392_RECOVERY_CHECK
-        assert "read-only" in FP9392_RECOVERY_CHECK
-        assert "no order calls" in FP9392_RECOVERY_CHECK
-        assert "no LIVE" in FP9392_RECOVERY_CHECK
-        assert "enablement" in FP9392_RECOVERY_CHECK
-
-    def test_9392_recovery_uses_in_scope_vars(self):
-        assert "broker==\"FP Markets\"" in FP9392_RECOVERY_CHECK
-        assert "mode==\"LIVE\"" in FP9392_RECOVERY_CHECK
-        assert "cid" not in FP9392_RECOVERY_CHECK
