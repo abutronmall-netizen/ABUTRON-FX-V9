@@ -1,23 +1,30 @@
 """Tests for Deriv DEMO session-manager reboot recovery repair (Issue #65).
 
-Verifies:
-- reboot_recently_detected() detects a boot_id change (reboot) and caches
-  the result so ALL accounts in the same boot receive True (multi-account fix).
+Verifies a bounded, restart-consistent recovery mechanism:
+- reboot_recently_detected() detects a boot_id change (reboot), caches the
+  result with a timestamp so ALL accounts in the same boot receive True,
+  and the trigger expires after REBOOT_RECOVERY_WINDOW_S.
+- The detection timestamp is persisted to disk so a manager restart within
+  the recovery window retains eligibility.
+- After expiry, a new reboot can be detected again.
 - recovery_trigger_active() is True on reboot OR maintenance reexec.
-- recover_offline_demo() recovers DEMO sessions after a reboot trigger, not
-  only after apt-daily-upgrade reexec, and recovers ALL offline DEMO accounts.
-- ensure_worker_accessible() sets o+rx on the worker directory and script
-  so the unprivileged DynamicUser service identity can open/exec the script.
-- launch_worker() calls ensure_worker_accessible() and does NOT use the
-  ineffective ReadOnlyPaths= property.
+- recover_offline_demo() recovers DEMO sessions after a reboot trigger and
+  recovers ALL offline DEMO accounts.
+- ensure_worker_accessible() sets o+rx on the worker directory and script,
+  and is scoped to DEMO workers only (not LIVE).
+- launch_worker() calls ensure_worker_accessible() for DEMO and does NOT
+  use the ineffective ReadOnlyPaths= property.
 - LIVE accounts are never auto-recovered.
 - Active services are not re-launched.
 """
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
+import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -38,17 +45,17 @@ mgr = _load_manager()
 
 @pytest.fixture(autouse=True)
 def _reset_reboot_cache():
-    """Reset the reboot trigger cache before every test.
+    """Reset the reboot detection cache before every test.
 
     The cache is module-level and persists across tests; without this reset
-    a test that sets the cache to True would leak into subsequent tests.
+    a test that sets the cache would leak into subsequent tests.
     """
-    mgr._reboot_trigger_cache = None
+    mgr._reboot_detected_at = None
     yield
 
 
 # --------------------------------------------------------------------------- #
-# reboot_recently_detected
+# reboot_recently_detected — bounded + restart-consistent
 # --------------------------------------------------------------------------- #
 class TestRebootDetection:
     def _patch_boot_id(self, monkeypatch, boot_id_text, uptime_text=None):
@@ -64,22 +71,31 @@ class TestRebootDetection:
 
         monkeypatch.setattr(Path, "read_text", fake_read_text)
 
+    def _write_marker(self, tmp_path, boot_id, detected_at):
+        """Write a reboot_recovery.json marker file."""
+        marker = tmp_path / "reboot_recovery.json"
+        marker.write_text(json.dumps({
+            "boot_id": boot_id,
+            "reboot_detected_at": detected_at,
+        }))
+        return marker
+
     def test_boot_id_change_triggers_reboot(self, tmp_path, monkeypatch):
         """A boot_id change since the last recorded one = reboot detected."""
         monkeypatch.setattr(mgr, "ROOT", tmp_path)
-        marker = tmp_path / "last_boot_id"
-        marker.write_text("boot-old")
+        self._write_marker(tmp_path, "boot-old", time.time())
         self._patch_boot_id(monkeypatch, "boot-new\n")
 
         assert mgr.reboot_recently_detected() is True
-        assert marker.read_text().strip() == "boot-new"
+        marker = json.loads((tmp_path / "reboot_recovery.json").read_text())
+        assert marker["boot_id"] == "boot-new"
+        assert marker["reboot_detected_at"] is not None
 
     def test_same_boot_id_does_not_trigger(self, tmp_path, monkeypatch):
-        """Same boot_id as last recorded = no reboot."""
+        """Same boot_id as last recorded with expired window = no reboot."""
         monkeypatch.setattr(mgr, "ROOT", tmp_path)
-        monkeypatch.setattr(mgr, "_reboot_trigger_cache", None)
-        marker = tmp_path / "last_boot_id"
-        marker.write_text("boot-same")
+        # Marker with old detection timestamp (well past the window)
+        self._write_marker(tmp_path, "boot-same", time.time() - 99999)
         self._patch_boot_id(monkeypatch, "boot-same\n")
 
         assert mgr.reboot_recently_detected() is False
@@ -92,9 +108,7 @@ class TestRebootDetection:
         saw an unchanged boot_id and incorrectly got False.
         """
         monkeypatch.setattr(mgr, "ROOT", tmp_path)
-        monkeypatch.setattr(mgr, "_reboot_trigger_cache", None)
-        marker = tmp_path / "last_boot_id"
-        marker.write_text("boot-old")
+        self._write_marker(tmp_path, "boot-old", time.time())
         self._patch_boot_id(monkeypatch, "boot-new\n")
 
         # First account detects the reboot
@@ -102,40 +116,81 @@ class TestRebootDetection:
         # Second and third accounts get the cached True
         assert mgr.reboot_recently_detected() is True
         assert mgr.reboot_recently_detected() is True
-        # Marker was updated only once
-        assert marker.read_text().strip() == "boot-new"
 
-    def test_reboot_trigger_cache_survives_marker_already_updated(
-            self, tmp_path, monkeypatch):
-        """Even if the marker is already updated, cache returns True.
+    def test_reboot_trigger_expires_after_window(self, tmp_path, monkeypatch):
+        """Regression test: the trigger must expire after REBOOT_RECOVERY_WINDOW_S.
 
-        Simulates the case where the marker was written by the first call
-        but a subsequent account checks — the cache must still return True.
+        Previously the cache latched True for the entire process lifetime,
+        even after 24 hours. Now the detection timestamp is checked against
+        the window and the trigger returns False once expired.
         """
         monkeypatch.setattr(mgr, "ROOT", tmp_path)
-        marker = tmp_path / "last_boot_id"
-        marker.write_text("boot-new")  # marker already updated by first call
-        monkeypatch.setattr(mgr, "_reboot_trigger_cache", True)
-        self._patch_boot_id(monkeypatch, "boot-new\n")
+        # Marker with detection timestamp far in the past (24 hours ago)
+        old_ts = time.time() - 86400
+        self._write_marker(tmp_path, "boot-old", old_ts)
+        self._patch_boot_id(monkeypatch, "boot-old\n")  # same boot
 
-        # Cache short-circuits before reading boot_id
+        # In-memory cache is also set to the old timestamp (simulating a
+        # long-running process that detected the reboot 24h ago)
+        mgr._reboot_detected_at = old_ts
+
+        # After the window, the trigger must return False
+        assert mgr.reboot_recently_detected() is False
+
+    def test_reboot_trigger_active_within_window(self, tmp_path, monkeypatch):
+        """The trigger is active when detection is within the window."""
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        recent_ts = time.time() - 300  # 5 minutes ago, within 900s window
+        self._write_marker(tmp_path, "boot-old", recent_ts)
+        self._patch_boot_id(monkeypatch, "boot-old\n")  # same boot
+
+        # No in-memory cache — evaluated from disk marker
         assert mgr.reboot_recently_detected() is True
 
-    def test_cache_none_when_no_reboot(self, tmp_path, monkeypatch):
-        """When no reboot is detected, cache stays None (not False).
+    def test_manager_restart_within_window_retains_eligibility(
+            self, tmp_path, monkeypatch):
+        """Regression test: manager restart within window keeps recovery active.
 
-        The cache only latches True; False is returned fresh each call so
-        a later reboot can still be detected.
+        Previously, restarting the manager reset the in-memory cache, and the
+        existing marker prevented recovery from triggering again because the
+        boot_id hadn't changed. Now the persisted detection timestamp ensures
+        a restart within the window still returns True.
         """
         monkeypatch.setattr(mgr, "ROOT", tmp_path)
-        monkeypatch.setattr(mgr, "_reboot_trigger_cache", None)
-        marker = tmp_path / "last_boot_id"
-        marker.write_text("boot-same")
-        self._patch_boot_id(monkeypatch, "boot-same\n")
+        recent_ts = time.time() - 120  # 2 minutes ago, within window
+        # Write marker as if a previous process instance detected the reboot
+        self._write_marker(tmp_path, "boot-current", recent_ts)
+        self._patch_boot_id(monkeypatch, "boot-current\n")
 
-        result = mgr.reboot_recently_detected()
-        assert result is False
-        assert mgr._reboot_trigger_cache is None
+        # Simulate manager restart: in-memory cache is None (fresh process)
+        mgr._reboot_detected_at = None
+
+        # Must still detect the reboot from the persisted marker
+        assert mgr.reboot_recently_detected() is True
+
+    def test_manager_restart_after_window_no_eligibility(
+            self, tmp_path, monkeypatch):
+        """Manager restart after the window expires = no recovery."""
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        old_ts = time.time() - 99999
+        self._write_marker(tmp_path, "boot-current", old_ts)
+        self._patch_boot_id(monkeypatch, "boot-current\n")
+        mgr._reboot_detected_at = None  # fresh process
+
+        assert mgr.reboot_recently_detected() is False
+
+    def test_new_reboot_detectable_after_expiry(self, tmp_path, monkeypatch):
+        """After the window expires, a new reboot can be detected."""
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        # First boot: old detection, expired window
+        old_ts = time.time() - 99999
+        self._write_marker(tmp_path, "boot-old", old_ts)
+        self._patch_boot_id(monkeypatch, "boot-old\n")
+        assert mgr.reboot_recently_detected() is False
+
+        # Now boot_id changes (new reboot after the window)
+        self._patch_boot_id(monkeypatch, "boot-new\n")
+        assert mgr.reboot_recently_detected() is True
 
     def test_first_observation_short_uptime_triggers(self, tmp_path, monkeypatch):
         """First observation: reboot if uptime within window."""
@@ -143,7 +198,9 @@ class TestRebootDetection:
         self._patch_boot_id(monkeypatch, "boot-first\n", uptime_text="30.0 100000.0")
 
         assert mgr.reboot_recently_detected() is True
-        assert (tmp_path / "last_boot_id").is_file()
+        marker = json.loads((tmp_path / "reboot_recovery.json").read_text())
+        assert marker["boot_id"] == "boot-first"
+        assert marker["reboot_detected_at"] is not None
 
     def test_first_observation_long_uptime_no_trigger(self, tmp_path, monkeypatch):
         """First observation with long uptime = no reboot (already running long)."""
@@ -153,7 +210,7 @@ class TestRebootDetection:
 
         assert mgr.reboot_recently_detected() is False
         # Marker still written for future comparisons
-        assert (tmp_path / "last_boot_id").is_file()
+        assert (tmp_path / "reboot_recovery.json").is_file()
 
     def test_os_error_returns_false(self, tmp_path, monkeypatch):
         """If boot_id cannot be read, return False (fail-safe)."""
@@ -164,6 +221,15 @@ class TestRebootDetection:
                 raise OSError("no boot_id")
             return real_read_text(self, *args, **kwargs)
         monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+        assert mgr.reboot_recently_detected() is False
+
+    def test_corrupt_marker_returns_false(self, tmp_path, monkeypatch):
+        """Corrupt marker JSON = fail-safe, treat as first observation."""
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        (tmp_path / "reboot_recovery.json").write_text("not valid json{{{")
+        self._patch_boot_id(monkeypatch, "boot-corrupt\n",
+                            uptime_text="99999.0 200000.0")
 
         assert mgr.reboot_recently_detected() is False
 
@@ -286,13 +352,13 @@ class TestRecoverOfflineDemoReboot:
         assert launched == [], "No recovery without sealed credential"
 
     def test_multi_account_all_recover_on_reboot(self, monkeypatch):
-        """All three DEMO accounts recover when reboot trigger is cached.
+        """All three DEMO accounts recover when reboot trigger is active.
 
         Regression test for the multi-account defect: [True, False, False]
-        was the observed failure. With the reboot trigger cache, all three
-        accounts receive True and all three workers are launched.
+        was the observed failure. All three accounts receive True and all
+        three workers are launched.
         """
-        # Patch the trigger to use the real reboot cache mechanism
+        # Patch the trigger to use the real reboot detection mechanism
         monkeypatch.setattr(mgr, "expected_mode", lambda b, s: "DEMO")
         monkeypatch.setattr(mgr, "sealed_available", lambda cid: True)
         monkeypatch.setattr(mgr, "sealed_path", lambda cid: "/sealed/"+cid)
@@ -303,14 +369,12 @@ class TestRecoverOfflineDemoReboot:
 
         # Use the real recovery_trigger_active which calls reboot_recently_detected
         # Patch reboot_recently_detected to simulate a cached reboot detection
-        call_count = [0]
+        # with a fresh timestamp (within window)
         def fake_reboot_detected():
-            call_count[0] += 1
-            # First call detects reboot and caches; subsequent calls hit cache
-            if call_count[0] == 1:
-                mgr._reboot_trigger_cache = True
-                return True
-            return mgr._reboot_trigger_cache
+            # Detection already cached with a recent timestamp
+            if mgr._reboot_detected_at is None:
+                mgr._reboot_detected_at = time.time()
+            return True
 
         monkeypatch.setattr(mgr, "reboot_recently_detected",
                             fake_reboot_detected)
@@ -367,9 +431,8 @@ class TestLaunchWorkerAccess:
         assert dir_stat.st_mode & 0o005, "Worker dir must have o+rx"
         assert script_stat.st_mode & 0o005, "Worker script must have o+rx"
 
-    def test_launch_worker_calls_ensure_worker_accessible(
-            self, monkeypatch, tmp_path):
-        """launch_worker invokes ensure_worker_accessible before systemd-run."""
+    def test_launch_worker_calls_ensure_for_demo(self, monkeypatch):
+        """launch_worker calls ensure_worker_accessible for DEMO workers."""
         called = []
 
         monkeypatch.setattr(mgr, "ensure_worker_accessible",
@@ -389,11 +452,40 @@ class TestLaunchWorkerAccess:
 
         mgr.launch_worker("cid123", "Deriv", "DEMO", "/sealed/path")
 
-        assert len(called) == 1, "ensure_worker_accessible must be called"
+        assert len(called) == 1, "ensure_worker_accessible must be called for DEMO"
         assert "worker_feed_v4_usd50_canary.py" in called[0]
 
-    def test_launch_worker_does_not_use_read_only_paths(
-            self, monkeypatch):
+    def test_launch_worker_skips_ensure_for_live(self, monkeypatch):
+        """launch_worker does NOT call ensure_worker_accessible for LIVE.
+
+        Regression test: the permission fix must be scoped to DEMO workers
+        only. LIVE workers are outside the recovery scope and must not have
+        their filesystem permissions modified.
+        """
+        called = []
+
+        monkeypatch.setattr(mgr, "ensure_worker_accessible",
+                            lambda p: called.append(p))
+        monkeypatch.setattr(mgr, "sealed_available", lambda cid: True)
+        monkeypatch.setattr(mgr, "sealed_path", lambda cid: "/sealed/path")
+
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            class R:
+                returncode = 0
+            return R()
+
+        monkeypatch.setattr(mgr.subprocess, "run", fake_run)
+
+        mgr.launch_worker("cid123", "Deriv", "LIVE", "/sealed/path")
+
+        assert called == [], (
+            "ensure_worker_accessible must NOT be called for LIVE workers. "
+            "The permission fix is scoped to DEMO recovery only.")
+
+    def test_launch_worker_does_not_use_read_only_paths(self, monkeypatch):
         """launch_worker must NOT include ReadOnlyPaths= (ineffective for access).
 
         ReadOnlyPaths= only marks a path read-only; it does not grant

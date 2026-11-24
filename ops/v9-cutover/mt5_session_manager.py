@@ -81,6 +81,9 @@ def ensure_worker_accessible(worker_path):
  # grant read/execute access to unprivileged users. The worker directory
  # and script must be world-readable+executable so the dynamic service
  # identity can open and exec the worker script after a reboot.
+ # Scoped to DEMO workers: the Issue #65 defect affects DEMO session
+ # recovery. LIVE workers are outside the recovery scope and must not have
+ # their filesystem permissions modified by this recovery path.
  wd=Path(WORKER_DIR)
  wd.chmod(0o755)
  wp=Path(worker_path)
@@ -94,7 +97,8 @@ def launch_worker(cid,broker,mode,encrypted):
  chosen=(FP_WORKER if broker=="FP Markets" else
          DERIV_LIVE_READONLY_WORKER if broker=="Deriv" and mode=="LIVE" else
          DERIV_50_100_WORKER if broker=="Deriv" else WORKER)
- ensure_worker_accessible(chosen)
+ if mode=="DEMO":
+  ensure_worker_accessible(chosen)
  # A previous transient failed unit is not reused, and new unit metadata is
  # retained rather than automatically garbage-collected.
  subprocess.run(["systemctl","reset-failed",unit(cid)+".service"],timeout=6,
@@ -122,40 +126,69 @@ def maintenance_reexec_seen():
         timeout=6,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
   return eventlog.returncode==0 and b"apt-daily-upgrade.service" in eventlog.stdout[-12000:]
  except (OSError,subprocess.SubprocessError):return False
-_reboot_trigger_cache=None
+_reboot_detected_at=None
+def _write_reboot_marker(boot_id,detected_at):
+ marker=ROOT/"reboot_recovery.json"
+ marker.write_text(json.dumps({"boot_id":boot_id,"reboot_detected_at":detected_at}))
+def _read_reboot_marker():
+ marker=ROOT/"reboot_recovery.json"
+ try:
+  if marker.is_file():
+   return json.loads(marker.read_text().strip())
+ except (OSError,ValueError,json.JSONDecodeError):
+  return None
+ return None
 def reboot_recently_detected():
  # Detect a recent host reboot so DEMO sessions stuck in ERROR after a
  # reboot are recovered. Uses the kernel boot_id: a change since the last
  # recorded boot_id means the host rebooted. Falls back to uptime check.
  # This complements (does not replace) the maintenance_reexec_seen path.
  #
- # The result is cached for the lifetime of the process: once a reboot is
- # detected, every account checked in the same monitoring cycle (and every
- # subsequent check until the process restarts) receives True. Without this
- # cache, the marker is updated on the first call and subsequent accounts
- # in the same cycle see an unchanged boot_id and incorrectly get False.
- global _reboot_trigger_cache
- if _reboot_trigger_cache is not None:
-  return _reboot_trigger_cache
+ # BOUNDED + RESTART-CONSISTENT:
+ #  - The trigger is only active for REBOOT_RECOVERY_WINDOW_S after the
+ #    reboot was detected. After the window, it returns False.
+ #  - The detection timestamp is persisted to disk so a manager restart
+ #    within the window retains recovery eligibility.
+ #  - The in-memory cache stores the detection timestamp; once the window
+ #    expires, the cache is cleared and re-evaluated from the disk marker.
+ #  - All accounts checked within the window receive True (multi-account fix).
+ global _reboot_detected_at
+ now=time.time()
+ # In-memory cache: still within the window?
+ if _reboot_detected_at is not None:
+  if now-_reboot_detected_at<=REBOOT_RECOVERY_WINDOW_S:
+   return True
+  # Window expired — clear so we re-evaluate from the disk marker
+  _reboot_detected_at=None
  try:
   boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-  marker=ROOT/"last_boot_id"
-  if marker.is_file():
-   previous=marker.read_text().strip()
-   if previous and previous!=boot_id:
-    marker.write_text(boot_id)
-    _reboot_trigger_cache=True
+  marker_data=_read_reboot_marker()
+  if marker_data and marker_data.get("boot_id"):
+   previous_boot=marker_data["boot_id"]
+   detected_at=marker_data.get("reboot_detected_at")
+   if previous_boot!=boot_id:
+    # boot_id changed: new reboot detected
+    _write_reboot_marker(boot_id,now)
+    _reboot_detected_at=now
     return True
+   # Same boot — check if a prior detection is still within the window
+   if detected_at and now-detected_at<=REBOOT_RECOVERY_WINDOW_S:
+    _reboot_detected_at=detected_at
+    return True
+   # Same boot, window expired — no active reboot recovery
    return False
   else:
-   marker.write_text(boot_id)
-   # First observation: use uptime as a secondary signal.
+   # No marker or no boot_id recorded — first observation.
    uptime_s=float(Path("/proc/uptime").read_text().split()[0])
-   result=uptime_s<=REBOOT_RECOVERY_WINDOW_S
-   if result:
-    _reboot_trigger_cache=True
-   return result
- except (OSError,ValueError,subprocess.SubprocessError):
+   if uptime_s<=REBOOT_RECOVERY_WINDOW_S:
+    # Fresh boot within the window: record and trigger
+    _write_reboot_marker(boot_id,now)
+    _reboot_detected_at=now
+    return True
+   # Not a fresh boot: record boot_id only, no detection
+  _write_reboot_marker(boot_id,None)
+  return False
+ except (OSError,ValueError,json.JSONDecodeError,subprocess.SubprocessError):
   return False
 def recovery_trigger_active():
  # Recovery may fire on a maintenance reexec OR a recent host reboot.
