@@ -1,13 +1,15 @@
 """Tests for Deriv DEMO session-manager reboot recovery repair (Issue #65).
 
 Verifies:
-- reboot_recently_detected() detects a boot_id change (reboot) and does not
-  fire repeatedly within the same boot.
+- reboot_recently_detected() detects a boot_id change (reboot) and caches
+  the result so ALL accounts in the same boot receive True (multi-account fix).
 - recovery_trigger_active() is True on reboot OR maintenance reexec.
 - recover_offline_demo() recovers DEMO sessions after a reboot trigger, not
-  only after apt-daily-upgrade reexec.
-- launch_worker() grants ReadOnlyPaths to the worker directory so the
-  DynamicUser service identity can open the worker script.
+  only after apt-daily-upgrade reexec, and recovers ALL offline DEMO accounts.
+- ensure_worker_accessible() sets o+rx on the worker directory and script
+  so the unprivileged DynamicUser service identity can open/exec the script.
+- launch_worker() calls ensure_worker_accessible() and does NOT use the
+  ineffective ReadOnlyPaths= property.
 - LIVE accounts are never auto-recovered.
 - Active services are not re-launched.
 """
@@ -16,6 +18,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MOD_PATH = ROOT / "ops" / "v9-cutover" / "mt5_session_manager.py"
@@ -30,6 +34,17 @@ def _load_manager():
 
 
 mgr = _load_manager()
+
+
+@pytest.fixture(autouse=True)
+def _reset_reboot_cache():
+    """Reset the reboot trigger cache before every test.
+
+    The cache is module-level and persists across tests; without this reset
+    a test that sets the cache to True would leak into subsequent tests.
+    """
+    mgr._reboot_trigger_cache = None
+    yield
 
 
 # --------------------------------------------------------------------------- #
@@ -62,11 +77,65 @@ class TestRebootDetection:
     def test_same_boot_id_does_not_trigger(self, tmp_path, monkeypatch):
         """Same boot_id as last recorded = no reboot."""
         monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        monkeypatch.setattr(mgr, "_reboot_trigger_cache", None)
         marker = tmp_path / "last_boot_id"
         marker.write_text("boot-same")
         self._patch_boot_id(monkeypatch, "boot-same\n")
 
         assert mgr.reboot_recently_detected() is False
+
+    def test_reboot_trigger_cached_for_multi_account(self, tmp_path, monkeypatch):
+        """After a reboot is detected, ALL subsequent calls return True.
+
+        Regression test for the multi-account defect: without caching, the
+        first account consumed the boot_id marker and subsequent accounts
+        saw an unchanged boot_id and incorrectly got False.
+        """
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        monkeypatch.setattr(mgr, "_reboot_trigger_cache", None)
+        marker = tmp_path / "last_boot_id"
+        marker.write_text("boot-old")
+        self._patch_boot_id(monkeypatch, "boot-new\n")
+
+        # First account detects the reboot
+        assert mgr.reboot_recently_detected() is True
+        # Second and third accounts get the cached True
+        assert mgr.reboot_recently_detected() is True
+        assert mgr.reboot_recently_detected() is True
+        # Marker was updated only once
+        assert marker.read_text().strip() == "boot-new"
+
+    def test_reboot_trigger_cache_survives_marker_already_updated(
+            self, tmp_path, monkeypatch):
+        """Even if the marker is already updated, cache returns True.
+
+        Simulates the case where the marker was written by the first call
+        but a subsequent account checks — the cache must still return True.
+        """
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        marker = tmp_path / "last_boot_id"
+        marker.write_text("boot-new")  # marker already updated by first call
+        monkeypatch.setattr(mgr, "_reboot_trigger_cache", True)
+        self._patch_boot_id(monkeypatch, "boot-new\n")
+
+        # Cache short-circuits before reading boot_id
+        assert mgr.reboot_recently_detected() is True
+
+    def test_cache_none_when_no_reboot(self, tmp_path, monkeypatch):
+        """When no reboot is detected, cache stays None (not False).
+
+        The cache only latches True; False is returned fresh each call so
+        a later reboot can still be detected.
+        """
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        monkeypatch.setattr(mgr, "_reboot_trigger_cache", None)
+        marker = tmp_path / "last_boot_id"
+        marker.write_text("boot-same")
+        self._patch_boot_id(monkeypatch, "boot-same\n")
+
+        result = mgr.reboot_recently_detected()
+        assert result is False
+        assert mgr._reboot_trigger_cache is None
 
     def test_first_observation_short_uptime_triggers(self, tmp_path, monkeypatch):
         """First observation: reboot if uptime within window."""
@@ -216,13 +285,98 @@ class TestRecoverOfflineDemoReboot:
 
         assert launched == [], "No recovery without sealed credential"
 
+    def test_multi_account_all_recover_on_reboot(self, monkeypatch):
+        """All three DEMO accounts recover when reboot trigger is cached.
+
+        Regression test for the multi-account defect: [True, False, False]
+        was the observed failure. With the reboot trigger cache, all three
+        accounts receive True and all three workers are launched.
+        """
+        # Patch the trigger to use the real reboot cache mechanism
+        monkeypatch.setattr(mgr, "expected_mode", lambda b, s: "DEMO")
+        monkeypatch.setattr(mgr, "sealed_available", lambda cid: True)
+        monkeypatch.setattr(mgr, "sealed_path", lambda cid: "/sealed/"+cid)
+        monkeypatch.setattr(mgr, "service_active", lambda cid: False)
+        monkeypatch.setattr(mgr, "RECOVERY_LAST_ATTEMPT", {})
+        monkeypatch.setattr(mgr, "subprocess", MagicMock())
+        mgr.subprocess.run = MagicMock(return_value=MagicMock(returncode=0))
+
+        # Use the real recovery_trigger_active which calls reboot_recently_detected
+        # Patch reboot_recently_detected to simulate a cached reboot detection
+        call_count = [0]
+        def fake_reboot_detected():
+            call_count[0] += 1
+            # First call detects reboot and caches; subsequent calls hit cache
+            if call_count[0] == 1:
+                mgr._reboot_trigger_cache = True
+                return True
+            return mgr._reboot_trigger_cache
+
+        monkeypatch.setattr(mgr, "reboot_recently_detected",
+                            fake_reboot_detected)
+        # maintenance_reexec_seen returns False so only reboot trigger fires
+        monkeypatch.setattr(mgr, "maintenance_reexec_seen", lambda: False)
+
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("ERROR", None, 0, "MT5_WORKER_NOT_RUNNING")
+        cursor.rowcount = 1
+        cursor.execute.return_value = cursor
+        fake_db = MagicMock()
+        fake_db.__enter__.return_value = cursor
+        fake_db.execute.return_value = cursor
+        monkeypatch.setattr(mgr, "db", lambda: fake_db)
+
+        launched = []
+        monkeypatch.setattr(mgr, "launch_worker",
+                            lambda cid, b, m, e: launched.append(cid))
+        monkeypatch.setattr(mgr, "active", set())
+
+        # Three Deriv DEMO accounts, all offline
+        accounts = [
+            ("cid001", "owner1", "Deriv", "Deriv-Demo"),
+            ("cid002", "owner2", "Deriv", "Deriv-Demo"),
+            ("cid003", "owner3", "Deriv", "Deriv-Demo"),
+        ]
+        for cid, owner, broker, server in accounts:
+            mgr.recover_offline_demo(cid, owner, broker, server)
+
+        results = [cid in launched for cid in ("cid001", "cid002", "cid003")]
+        assert results == [True, True, True], (
+            f"All three accounts must recover, got {results}. "
+            f"Launched: {launched}")
+
 
 # --------------------------------------------------------------------------- #
-# launch_worker ReadOnlyPaths
+# ensure_worker_accessible + launch_worker
 # --------------------------------------------------------------------------- #
 class TestLaunchWorkerAccess:
-    def test_read_only_paths_granted_to_worker_dir(self, monkeypatch):
-        """launch_worker includes ReadOnlyPaths for the worker directory."""
+    def test_ensure_worker_accessible_sets_o_rx(self, tmp_path, monkeypatch):
+        """ensure_worker_accessible sets 0o755 on worker dir and script."""
+        monkeypatch.setattr(mgr, "WORKER_DIR", str(tmp_path))
+        # Create a fake worker script inside the directory
+        worker_dir = tmp_path
+        worker_script = worker_dir / "worker_feed_v4_usd50_canary.py"
+        worker_script.write_text("#!/usr/bin/env python3\n")
+        worker_script.chmod(0o600)  # restrictive initially
+        worker_dir.chmod(0o700)
+
+        mgr.ensure_worker_accessible(str(worker_script))
+
+        dir_stat = worker_dir.stat()
+        script_stat = worker_script.stat()
+        assert dir_stat.st_mode & 0o005, "Worker dir must have o+rx"
+        assert script_stat.st_mode & 0o005, "Worker script must have o+rx"
+
+    def test_launch_worker_calls_ensure_worker_accessible(
+            self, monkeypatch, tmp_path):
+        """launch_worker invokes ensure_worker_accessible before systemd-run."""
+        called = []
+
+        monkeypatch.setattr(mgr, "ensure_worker_accessible",
+                            lambda p: called.append(p))
+        monkeypatch.setattr(mgr, "sealed_available", lambda cid: True)
+        monkeypatch.setattr(mgr, "sealed_path", lambda cid: "/sealed/path")
+
         captured = {}
 
         def fake_run(cmd, **kw):
@@ -232,14 +386,41 @@ class TestLaunchWorkerAccess:
             return R()
 
         monkeypatch.setattr(mgr.subprocess, "run", fake_run)
+
+        mgr.launch_worker("cid123", "Deriv", "DEMO", "/sealed/path")
+
+        assert len(called) == 1, "ensure_worker_accessible must be called"
+        assert "worker_feed_v4_usd50_canary.py" in called[0]
+
+    def test_launch_worker_does_not_use_read_only_paths(
+            self, monkeypatch):
+        """launch_worker must NOT include ReadOnlyPaths= (ineffective for access).
+
+        ReadOnlyPaths= only marks a path read-only; it does not grant
+        read/execute access to the unprivileged DynamicUser identity.
+        The correct fix is ensure_worker_accessible() with o+rx permissions.
+        """
+        monkeypatch.setattr(mgr, "ensure_worker_accessible", lambda p: None)
         monkeypatch.setattr(mgr, "sealed_available", lambda cid: True)
         monkeypatch.setattr(mgr, "sealed_path", lambda cid: "/sealed/path")
+
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            class R:
+                returncode = 0
+            return R()
+
+        monkeypatch.setattr(mgr.subprocess, "run", fake_run)
 
         mgr.launch_worker("cid123", "Deriv", "DEMO", "/sealed/path")
 
         cmd = captured["cmd"]
-        assert "--property=ReadOnlyPaths=" + mgr.WORKER_DIR in cmd, (
-            "launch_worker must grant ReadOnlyPaths to the worker directory")
+        rop = [arg for arg in cmd if "ReadOnlyPaths" in arg]
+        assert rop == [], (
+            "ReadOnlyPaths= must not be used; it does not grant "
+            "unprivileged access. Use ensure_worker_accessible() instead.")
 
     def test_worker_dir_constant_value(self):
         """WORKER_DIR points to the native runtime workers directory."""

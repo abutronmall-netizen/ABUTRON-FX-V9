@@ -75,6 +75,16 @@ def seal_credential(cid,plaintext):
   return destination
  finally:
   temporary.unlink(missing_ok=True)
+def ensure_worker_accessible(worker_path):
+ # ProtectSystem=strict + DynamicUser=yes gives the service an unprivileged
+ # dynamic UID. ReadOnlyPaths= only marks a path read-only; it does NOT
+ # grant read/execute access to unprivileged users. The worker directory
+ # and script must be world-readable+executable so the dynamic service
+ # identity can open and exec the worker script after a reboot.
+ wd=Path(WORKER_DIR)
+ wd.chmod(0o755)
+ wp=Path(worker_path)
+ wp.chmod(0o755)
 def launch_worker(cid,broker,mode,encrypted):
  if (broker not in ("Deriv","FP Markets","IC Markets")
      or mode not in ("DEMO","LIVE")
@@ -84,6 +94,7 @@ def launch_worker(cid,broker,mode,encrypted):
  chosen=(FP_WORKER if broker=="FP Markets" else
          DERIV_LIVE_READONLY_WORKER if broker=="Deriv" and mode=="LIVE" else
          DERIV_50_100_WORKER if broker=="Deriv" else WORKER)
+ ensure_worker_accessible(chosen)
  # A previous transient failed unit is not reused, and new unit metadata is
  # retained rather than automatically garbage-collected.
  subprocess.run(["systemctl","reset-failed",unit(cid)+".service"],timeout=6,
@@ -96,7 +107,6 @@ def launch_worker(cid,broker,mode,encrypted):
      "--property=ProtectSystem=strict","--property=ProtectHome=yes",
      "--property=PrivateTmp=yes","--property=PrivateDevices=yes",
      "--property=NoNewPrivileges=yes",
-     "--property=ReadOnlyPaths="+WORKER_DIR,
      "--property=MemoryMax=1800M","--property=TasksMax=170",
      "--property=UMask=0077",
      *(["--property=SupplementaryGroups=abutron-fp-boot-assets"]
@@ -112,11 +122,21 @@ def maintenance_reexec_seen():
         timeout=6,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
   return eventlog.returncode==0 and b"apt-daily-upgrade.service" in eventlog.stdout[-12000:]
  except (OSError,subprocess.SubprocessError):return False
+_reboot_trigger_cache=None
 def reboot_recently_detected():
  # Detect a recent host reboot so DEMO sessions stuck in ERROR after a
  # reboot are recovered. Uses the kernel boot_id: a change since the last
  # recorded boot_id means the host rebooted. Falls back to uptime check.
  # This complements (does not replace) the maintenance_reexec_seen path.
+ #
+ # The result is cached for the lifetime of the process: once a reboot is
+ # detected, every account checked in the same monitoring cycle (and every
+ # subsequent check until the process restarts) receives True. Without this
+ # cache, the marker is updated on the first call and subsequent accounts
+ # in the same cycle see an unchanged boot_id and incorrectly get False.
+ global _reboot_trigger_cache
+ if _reboot_trigger_cache is not None:
+  return _reboot_trigger_cache
  try:
   boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip()
   marker=ROOT/"last_boot_id"
@@ -124,13 +144,17 @@ def reboot_recently_detected():
    previous=marker.read_text().strip()
    if previous and previous!=boot_id:
     marker.write_text(boot_id)
+    _reboot_trigger_cache=True
     return True
    return False
   else:
    marker.write_text(boot_id)
    # First observation: use uptime as a secondary signal.
    uptime_s=float(Path("/proc/uptime").read_text().split()[0])
-   return uptime_s<=REBOOT_RECOVERY_WINDOW_S
+   result=uptime_s<=REBOOT_RECOVERY_WINDOW_S
+   if result:
+    _reboot_trigger_cache=True
+   return result
  except (OSError,ValueError,subprocess.SubprocessError):
   return False
 def recovery_trigger_active():
