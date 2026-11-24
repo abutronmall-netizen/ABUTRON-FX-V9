@@ -39,14 +39,15 @@ PATCH_MARKER = "# ABUTRON-ISSUE65-WORKER-ACCESS-RECONCILED"
 ENSURE_WORKER_ACCESSIBLE_FUNC = '''
 def ensure_worker_accessible(worker_path):
  # ABUTRON-ISSUE65-WORKER-ACCESS-RECONCILED
- # ProtectSystem=strict + DynamicUser=yes gives the service an unprivileged
- # dynamic UID. ReadOnlyPaths= only marks a path read-only; it does NOT
- # grant read/execute access to unprivileged users. The worker directory
- # and script must be world-readable+executable so the dynamic service
- # identity can open and exec the worker script after a reboot.
- # Scoped to DEMO workers: the Issue #65 defect affects DEMO session
- # recovery. LIVE workers are outside the recovery scope and must not have
- # their filesystem permissions modified by this recovery path.
+ # The session manager sees /opt read-only under ProtectSystem=strict.
+ # Deployment sets these modes; avoid issuing chmod on already-correct paths.
+ for path in (Path(worker_path).parent, Path(worker_path)):
+  if (path.stat().st_mode & 0o7777) != 0o755:
+   path.chmod(0o755)
+'''
+
+# Exact previous helper shape, also used by the original broad DEMO patch.
+LEGACY_HELPER = '''def ensure_worker_accessible(worker_path):
  wd=Path(worker_path).parent
  wd.chmod(0o755)
  wp=Path(worker_path)
@@ -76,9 +77,10 @@ def patched_source(source):
     uses = [node for node in ast.walk(module) if isinstance(node, ast.Name)
             and node.id == "ensure_worker_accessible"]
     if helpers or uses or PATCH_MARKER in source:
-        expected_helper = ast.parse(ENSURE_WORKER_ACCESSIBLE_FUNC).body[0]
+        old_helper = ast.dump(ast.parse(LEGACY_HELPER).body[0])
+        current_helper = ast.dump(ast.parse(ENSURE_WORKER_ACCESSIBLE_FUNC).body[0])
         if (len(helpers) != 1 or len(uses) != 1 or source.count(PATCH_MARKER) != 1
-                or ast.dump(helpers[0]) != ast.dump(expected_helper)):
+                or ast.dump(helpers[0]) not in (old_helper, current_helper)):
             raise ValueError("Unrecognized pre-existing worker access helper or marker")
         index = launch.body.index(selection) + 1
         if index >= len(launch.body):
@@ -87,13 +89,17 @@ def patched_source(source):
         for guard in (GUARD, OLD_GUARD):
             expected = ast.parse(guard + "\n " + call).body[0]
             if ast.dump(existing) == ast.dump(expected):
-                if guard == GUARD:
-                    return source
-                lines[existing.lineno - 1:existing.end_lineno] = [
-                    indent + GUARD + "\n", indent + " " + call + "\n"]
+                if guard == OLD_GUARD:
+                    lines[existing.lineno - 1:existing.end_lineno] = [
+                        indent + GUARD + "\n", indent + " " + call + "\n"]
                 break
         else:
             raise ValueError("Unrecognized worker access call")
+        helper = helpers[0]
+        if ast.dump(helper) == old_helper:
+            if helper.end_lineno >= launch.lineno:
+                raise ValueError("Unexpected legacy helper location")
+            lines[helper.lineno - 1:helper.end_lineno] = [ENSURE_WORKER_ACCESSIBLE_FUNC.lstrip("\n")]
     else:
         lines[selection.end_lineno:selection.end_lineno] = [
             indent + GUARD + "\n", indent + " " + call + "\n"]

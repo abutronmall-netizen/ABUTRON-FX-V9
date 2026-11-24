@@ -15,7 +15,7 @@ import runpy
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -315,3 +315,32 @@ def test_other_chosen_assignments_untouched(production_manager):
     production_manager.write_text(decoy + PRODUCTION_MANAGER)
     assert _run_reconcile(production_manager)[0] == 0
     assert production_manager.read_text().startswith(decoy)
+
+def test_prepared_read_only_worker_paths(production_manager, tmp_path):
+    assert _run_reconcile(production_manager)[0] == 0
+    helper = runpy.run_path(str(production_manager))["ensure_worker_accessible"]
+    worker = tmp_path / "workers" / "worker.py"
+    worker.parent.mkdir()
+    worker.touch()
+    worker.parent.chmod(0o755)
+    worker.chmod(0o755)
+    with patch.object(Path, "chmod", side_effect=OSError(30, "Read-only file system")):
+        helper(str(worker))
+
+
+def test_upgrade_unconditional_chmod(production_manager):
+    assert _run_reconcile(production_manager)[0] == 0
+    current = production_manager.read_text()
+    start = current.index("def ensure_worker_accessible")
+    end = current.index("def launch_worker", start)
+    old_helper = """def ensure_worker_accessible(worker_path):
+ # ABUTRON-ISSUE65-WORKER-ACCESS-RECONCILED
+ wd=Path(worker_path).parent
+ wd.chmod(0o755)
+ wp=Path(worker_path)
+ wp.chmod(0o755)
+
+"""
+    production_manager.write_text(current[:start] + old_helper + current[end:])
+    assert _run_reconcile(production_manager)[0] == 0
+    assert production_manager.read_text() == current
