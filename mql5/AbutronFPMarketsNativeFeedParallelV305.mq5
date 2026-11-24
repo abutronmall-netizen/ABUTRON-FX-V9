@@ -88,8 +88,9 @@ void Catalog(const string nonce,const string owner,const string server,const str
  FileFlush(f);FileClose(f);
 }
 void Bars(const string nonce,const string owner,const string server,const string login,const string mode){
- int f=FileOpen("ABUTRON_FP_BARS_V305_"+nonce+".txt",
-   FILE_WRITE|FILE_TXT|FILE_ANSI);
+ string target="ABUTRON_FP_BARS_V305_"+nonce+".txt";
+ string temporary=target+".tmp";
+ int f=FileOpen(temporary,FILE_WRITE|FILE_TXT|FILE_ANSI);
  if(f==INVALID_HANDLE)return;
  FileWriteString(f,"ABUTRON_FP_BARS_V1\n"+nonce+"\n"+owner+"\n"+server+
   "\n"+login+"\n"+mode+"\n"+IntegerToString((long)TimeGMT())+"\n");
@@ -115,6 +116,12 @@ void Bars(const string nonce,const string owner,const string server,const string
  }
  FileWriteString(f,"END\t"+IntegerToString(nrows)+"\n");
  FileFlush(f);FileClose(f);
+ if(nrows>0 && AccountOK(server,login,mode))
+ {
+   if(!FileMove(temporary,0,target,FILE_REWRITE))
+     Print("ABUTRON_FP_BARS_PUBLISH_FAILED code=",GetLastError());
+ }
+ else FileDelete(temporary);
 }
 void Quotes(const string nonce,const string owner,const string server,const string login,const string mode){
  int f=FileOpen("ABUTRON_FP_QUOTES_V305_"+nonce+".txt",
@@ -275,6 +282,8 @@ void PublishV9Cost(const string nonce,const string owner,
 string FP_NONCE="",FP_OWNER="",FP_SERVER="",FP_LOGIN="",FP_MODE="";
 bool FP_READY=false;
 datetime FP_LAST=0;
+datetime FP_BAR_LAST=0;
+long FP_BAR_BUCKET=-1;
 bool FP_ANNOUNCED_OFFLINE=false;
 // Read-only broker-history indicator attachment. In this isolated terminal
 // profile, MT5 discards indicator entries during chart initialization.
@@ -470,7 +479,7 @@ void OnTimer(){
  EnsureFPHistoryIndicator();
  EnsureV3Indicator();
  // Separate 20s cost refresh maintains the consumer's 65s freshness.
- // Existing catalog/quote/bars cadence is unchanged.
+ // Catalog and quote cadence is unchanged; DEMO bars refresh independently.
  if(FP_MODE=="DEMO" && TimeLocal()-FP_COST_LAST>=20){
    PublishV9Cost(FP_NONCE,FP_OWNER,FP_SERVER,FP_LOGIN,FP_MODE);
    FP_COST_LAST=TimeLocal();
@@ -478,8 +487,20 @@ void OnTimer(){
  if(TimeLocal()-FP_LAST>=60){
    Catalog(FP_NONCE,FP_OWNER,FP_SERVER,FP_LOGIN,FP_MODE);
    Quotes(FP_NONCE,FP_OWNER,FP_SERVER,FP_LOGIN,FP_MODE);
-   Bars(FP_NONCE,FP_OWNER,FP_SERVER,FP_LOGIN,FP_MODE);
+   if(FP_MODE!="DEMO") Bars(FP_NONCE,FP_OWNER,FP_SERVER,FP_LOGIN,FP_MODE);
    FP_LAST=TimeLocal();
+ }
+ // DEMO read-only bar publication has its own cadence. A new M5 UTC
+ // bucket prompts a refresh; 15-second retry covers delayed first ticks.
+ if(FP_MODE=="DEMO")
+ {
+   long bucket=(long)TimeGMT()/300;
+   if(bucket!=FP_BAR_BUCKET || TimeLocal()-FP_BAR_LAST>=15)
+   {
+     Bars(FP_NONCE,FP_OWNER,FP_SERVER,FP_LOGIN,FP_MODE);
+     FP_BAR_BUCKET=bucket;
+     FP_BAR_LAST=TimeLocal();
+   }
  }
 }
 void OnDeinit(const int reason){
