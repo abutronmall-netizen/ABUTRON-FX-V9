@@ -1,0 +1,19 @@
+// ABUTRON V9 PR37 Native Writer — EXECUTION PRESET
+// Apply via MT5: Chart -> Expert Advisor properties -> Presets -> Load
+// This preset enables order dispatch (InpExposureOnly=false) with
+// trailing stops active. Risk invariants are enforced by the V9
+// RiskGate on the Python side and the EA's own validation — this
+// preset only enables the execution path, never bypasses risk.
+
+InpConnectionId=""
+InpBrokerServer=""
+InpActivationSeed=0
+InpActivationSecret=""
+InpExposureOnly=false
+InpTradeMagic=20261120
+InpTrailingEnabled=true
+InpTrailingAtrMult=2.0
+InpManagedCharts=0
+InpRiskFraction=0.15
+InpRiskFractionPct=15
+InpExportPeriod=PERIOD_M5

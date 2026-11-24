@@ -8,6 +8,7 @@ blocks decisions until resolved.
 """
 from __future__ import annotations
 
+import calendar
 import statistics
 from dataclasses import dataclass
 from typing import List, Optional
@@ -32,26 +33,37 @@ class ClockState:
         return "BROKER_CLOCK_OFFSET_UNVERIFIED"
 
 
+def _utc_epoch(timestamp_str: str) -> float:
+    """Parse a ``YYYY-MM-DDTHH:MM:SSZ`` UTC string into an epoch timestamp.
+
+    Uses ``calendar.timegm`` (UTC) — NOT ``time.mktime`` (local time).
+    ``time.mktime`` interprets the struct as local time, which produces
+    a wrong offset whenever the system timezone is not UTC, causing
+    BROKER_CLOCK_OFFSET_UNVERIFIED for non-UTC hosts.
+    """
+    import time as _time
+    st = _time.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%SZ")
+    return float(calendar.timegm(st))
+
+
 class ClockOffsetEstimator:
     def __init__(self):
         self._states: dict[str, ClockState] = {}
 
     def estimate(self, broker: str, candles: List[Candle],
                  now_utc: str) -> ClockState:
-        """Estimate offset from closed bar close-times vs local time."""
+        """Estimate offset from closed bar close-times vs UTC time."""
         if not candles:
             state = ClockState(broker, None, 0.0, 0, False,
                                "NO_CLOCK_SAMPLE")
             self._states[broker] = state
             return state
-        import time
-        now_ts = time.mktime(time.strptime(now_utc, "%Y-%m-%dT%H:%M:%SZ"))
+        now_ts = _utc_epoch(now_utc)
         # Use the most recent closed candle's close_time; broker bars
         # close on the broker clock, which should align with UTC.
         latest = max(candles, key=lambda c: c.close_time)
         try:
-            close_ts = time.mktime(time.strptime(latest.close_time,
-                                                 "%Y-%m-%dT%H:%M:%SZ"))
+            close_ts = _utc_epoch(latest.close_time)
         except ValueError:
             state = ClockState(broker, None, 0.0, 0, False,
                                "BAD_SAMPLE_TIMESTAMP")

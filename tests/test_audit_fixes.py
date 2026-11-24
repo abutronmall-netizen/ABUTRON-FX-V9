@@ -116,11 +116,13 @@ def test_provision_secret_writes_file(monkeypatch):
     from abutron.events import EventLog
     monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "provisioned-secret-abc")
     with tempfile.TemporaryDirectory() as tmpdir:
+        files_dir = os.path.join(tmpdir, "MQL5", "Files")
+        os.makedirs(files_dir, exist_ok=True)
         log = EventLog(os.path.join(tmpdir, "events.jsonl"))
         gw = SingleWriterGateway(log)
-        result = gw.provision_secret("conn-001", tmpdir)
+        result = gw.provision_secret("conn-001", files_dir)
         assert result is True
-        secret_path = os.path.join(tmpdir, "ABUTRON_ACTIVATION_SECRET.txt")
+        secret_path = os.path.join(files_dir, "ABUTRON_ACTIVATION_SECRET.txt")
         assert os.path.exists(secret_path)
         with open(secret_path) as fh:
             assert fh.read().strip() == "provisioned-secret-abc"
@@ -143,11 +145,13 @@ def test_provision_secret_sets_restrictive_permissions(monkeypatch):
     from abutron.events import EventLog
     monkeypatch.setenv("ABUTRON_ACTIVATION_SECRET", "secret-xyz")
     with tempfile.TemporaryDirectory() as tmpdir:
+        files_dir = os.path.join(tmpdir, "MQL5", "Files")
+        os.makedirs(files_dir, exist_ok=True)
         log = EventLog(os.path.join(tmpdir, "events.jsonl"))
         gw = SingleWriterGateway(log)
-        result = gw.provision_secret("conn-001", tmpdir)
+        result = gw.provision_secret("conn-001", files_dir)
         assert result is True
-        secret_path = os.path.join(tmpdir, "ABUTRON_ACTIVATION_SECRET.txt")
+        secret_path = os.path.join(files_dir, "ABUTRON_ACTIVATION_SECRET.txt")
         mode = stat.S_IMODE(os.stat(secret_path).st_mode)
         assert mode == 0o600, f"expected 0600, got {oct(mode)}"
 
@@ -186,10 +190,12 @@ def test_arm_succeeds_with_provisioning(monkeypatch):
         with open(ea_path, "wb") as f:
             f.write(b"fake-ea-binary")
         expected_sha = hashlib.sha256(b"fake-ea-binary").hexdigest()
+        files_dir = os.path.join(tmpdir, "MQL5", "Files")
+        os.makedirs(files_dir, exist_ok=True)
         status = gw.arm(connection_id="conn-003", ea_path=ea_path,
                         expected_sha256=expected_sha,
                         activation_revision="rev1", broker="fpmarkets",
-                        mql5_files_dir=tmpdir)
+                        mql5_files_dir=files_dir)
         assert status.armed is True, "arm must succeed with secret provisioning"
 
 

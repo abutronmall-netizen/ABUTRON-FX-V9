@@ -1,0 +1,25 @@
+[Unit]
+Description=ABUTRON V9 authenticated Deriv DEMO 6207 CRM activation authority
+After=abutron-client-mt5-manager.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Environment=PYTHONPATH=/opt/abutron-v9-execution-repair/V9-10794e2/src
+ExecStart=/usr/bin/python3 -B /opt/abutron-v9-native-runtime/activation_6207.py --ack
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apex-signup
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=200M
+TimeoutStartSec=20

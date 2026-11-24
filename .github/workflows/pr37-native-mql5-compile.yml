@@ -1,0 +1,191 @@
+name: ABUTRON PR37 Native MetaEditor Compile (QA Only)
+
+on:
+  push:
+    branches: [arena/*]
+    paths:
+      - 'mql5/ApexNativeWriter.mq5'
+      - 'scripts/generate_issue38_exposure_probe.py'
+      - '.github/workflows/pr37-native-mql5-compile.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mql5/ApexNativeWriter.mq5'
+      - 'scripts/generate_issue38_exposure_probe.py'
+      - '.github/workflows/pr37-native-mql5-compile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compile-native-ea:
+    name: Compile MQL5 with signed MetaQuotes MetaEditor (no broker)
+    runs-on: windows-2022
+    timeout-minutes: 22
+    outputs:
+      apex_ex5_sha256: ${{ steps.compile.outputs.apex_ex5_sha256 }}
+      apex_probe_ex5_sha256: ${{ steps.compile_probe.outputs.apex_probe_ex5_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Obtain and signature-verify official MetaTrader installer
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          $url = 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe'
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          $signature = Get-AuthenticodeSignature -FilePath $setup
+          if ($signature.Status -ne 'Valid' -or
+              $null -eq $signature.SignerCertificate -or
+              $signature.SignerCertificate.Subject -notmatch 'MetaQuotes') {
+            throw 'Official MetaEditor installer Authenticode verification failed'
+          }
+          Write-Host 'Verified installer signature; no broker credentials provided.'
+
+      - name: Install isolated MetaEditor (no broker profile)
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'mt5setup.exe'
+          $install = Join-Path $env:RUNNER_TEMP 'AbutronMT5CompilerQA'
+          New-Item -ItemType Directory -Force -Path $install | Out-Null
+          $args = @('/auto', ('/path:"{0}"' -f $install))
+          $proc = Start-Process -FilePath $setup -ArgumentList $args -Wait -PassThru
+          $compiler = Join-Path $install 'metaeditor64.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            throw "MetaEditor missing after installer (exit code $($proc.ExitCode))"
+          }
+          Write-Host 'Official MetaEditor installed to isolated runner temp directory.'
+
+      - name: Native compilation with compiler diagnostics
+        id: compile
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = Join-Path $env:RUNNER_TEMP 'AbutronMT5CompilerQA\metaeditor64.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeWriter.mq5'
+          $log = [IO.Path]::ChangeExtension($source, '.log')
+          $ex5 = [IO.Path]::ChangeExtension($source, '.ex5')
+          & $compiler "/compile:$source" '/log'
+          # MetaEditor may return a positive count on successful CLI compilation.
+          # Trust its actual log and EX5 artifact rather than a process exit code.
+          # The GUI MetaEditor process can return before the compiler worker
+          # flushes its UTF-16 log. Wait for the definitive Result line.
+          $deadline = (Get-Date).AddMinutes(3)
+          $report = ''
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $log) {
+              $report = Get-Content -LiteralPath $log -Encoding Unicode -Raw
+              if ($report -match '(?mi)^Result:') { break }
+            }
+            Start-Sleep -Milliseconds 750
+          }
+          if (-not $report -or $report -notmatch '(?mi)^Result:') {
+            throw 'MetaEditor did not produce a complete native compilation report'
+          }
+          Write-Host $report
+          if ($report -notmatch '(?mi)Result:\s*0 errors') {
+            throw 'Native MetaEditor reported errors or did not finish compiling'
+          }
+          if (-not (Test-Path -LiteralPath $ex5)) {
+            throw 'MetaEditor reported success but EX5 binary is missing'
+          }
+          $hash = (Get-FileHash -LiteralPath $ex5 -Algorithm SHA256).Hash
+          "ApexNativeWriter.ex5 SHA256 $hash" |
+            Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeWriter.ex5.sha256.txt')
+          Write-Host "Native EX5 built in CI. SHA256=$hash"
+          Write-Host 'NO LIVE, DEMO OR PRODUCTION MT5 ACCOUNT ATTACHED.'
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "apex_ex5_sha256=$hash"
+
+      - name: Retain native compiler diagnostics (never auto deploy EX5)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abutron-pr37-native-metaeditor-qa
+          if-no-files-found: warn
+          path: |
+            mql5/ApexNativeWriter.log
+            mql5/ApexNativeWriter.ex5.sha256.txt
+
+      - name: Archive compiled EX5 for isolated DEMO QA (never auto-deploy)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abutron-pr37-native-ex5-qa
+          retention-days: 7
+          if-no-files-found: error
+          path: mql5/ApexNativeWriter.ex5
+
+
+      - name: Generate no-order DEMO exposure probe (OrderSend removed)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/generate_issue38_exposure_probe.py --source mql5/ApexNativeWriter.mq5 --output mql5/ApexNativeExposureProbe.mq5
+
+      - name: Native compile no-order DEMO exposure probe
+        id: compile_probe
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = Join-Path $env:RUNNER_TEMP 'AbutronMT5CompilerQA\metaeditor64.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeExposureProbe.mq5'
+          $log = [IO.Path]::ChangeExtension($source, '.log')
+          $ex5 = [IO.Path]::ChangeExtension($source, '.ex5')
+          & $compiler "/compile:$source" '/log'
+          $deadline = (Get-Date).AddMinutes(3)
+          $report = ''
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $log) {
+              $report = Get-Content -LiteralPath $log -Encoding Unicode -Raw
+              if ($report -match '(?mi)^Result:') { break }
+            }
+            Start-Sleep -Milliseconds 750
+          }
+          if (-not $report -or $report -notmatch '(?mi)Result:\s*0 errors,\s*0 warnings') {
+            throw "No-order native probe compile failed: $report"
+          }
+          if (-not (Test-Path -LiteralPath $ex5)) {
+            throw 'No-order exposure-only EX5 missing'
+          }
+          $hash = (Get-FileHash -LiteralPath $ex5 -Algorithm SHA256).Hash
+          "ApexNativeExposureProbe.ex5 SHA256 $hash" |
+            Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'mql5\ApexNativeExposureProbe.ex5.sha256.txt')
+          Write-Host $report
+          Write-Host "NO_ORDER_EXPOSURE_PROBE_SHA256=$hash"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "apex_probe_ex5_sha256=$hash"
+
+      - name: Archive NO-ORDER exposure probe for isolated DEMO evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abutron-issue38-no-order-ex5-qa
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            mql5/ApexNativeExposureProbe.ex5
+            mql5/ApexNativeExposureProbe.log
+            mql5/ApexNativeExposureProbe.ex5.sha256.txt
+
+      - name: Commit SHA256 pins to branch
+        if: success() && github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add mql5/ApexNativeWriter.ex5.sha256.txt mql5/ApexNativeExposureProbe.ex5.sha256.txt
+          $changed = git diff --cached --name-only
+          if ($changed) {
+            git commit -m "ci: record EX5 SHA256 pins from native compile"
+            git push
+            Write-Host 'SHA256 pins committed and pushed.'
+          } else {
+            Write-Host 'No SHA256 changes to commit.'
+          }

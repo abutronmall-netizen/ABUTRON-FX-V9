@@ -84,6 +84,17 @@ CANDLE_OPEN_SECONDS = 300          # M5
 ENGINE_TICK_SECONDS = int(os.getenv("ABUTRON_ENGINE_TICK", "30"))
 HEARTBEAT_STALE_SECONDS = int(os.getenv("ABUTRON_HEARTBEAT_STALE", "90"))
 
+# Issue #36: exposure certifications expire if not refreshed by the broker
+# worker. A stale certification is treated as uncertified (fail-closed), so
+# the dispatcher blocks on BLOCKED_INCOMPLETE_EXPOSURE until the worker
+# publishes a fresh authenticated broker snapshot.
+EXPOSURE_CERT_TTL_SECONDS = int(os.getenv("ABUTRON_EXPOSURE_CERT_TTL", "300"))
+
+# Issue #36: a broker exposure snapshot must be fresh. The nonce embeds a
+# unix timestamp; a snapshot older than this window is rejected (replay
+# protection), so a captured old snapshot cannot certify exposure.
+EXPOSURE_SNAPSHOT_FRESH_SECONDS = int(os.getenv("ABUTRON_SNAPSHOT_FRESH", "60"))
+
 # ---------------------------------------------------------------------------
 # Wine / MT5 terminal runtime (Ubuntu host)
 # ---------------------------------------------------------------------------
@@ -108,7 +119,7 @@ FP_SYMBOL_SUFFIX_HINT = os.getenv("ABUTRON_FP_SYMBOL_SUFFIX", ".r")
 # ---------------------------------------------------------------------------
 # Gemma LLM advisory (optional; advisory only — never on the order path)
 # ---------------------------------------------------------------------------
-GEMMA_ENABLED = os.getenv("ABUTRON_GEMMA_ENABLED", "false").lower() in ("1", "true", "yes")
+GEMMA_ENABLED = os.getenv("ABUTRON_GEMMA_ENABLED", "true").lower() in ("1", "true", "yes")
 GEMMA_BASE_URL = os.getenv("ABUTRON_GEMMA_BASE_URL", "http://127.0.0.1:11434/v1")
 GEMMA_MODEL = os.getenv("ABUTRON_GEMMA_MODEL", "gemma2:9b")
 GEMMA_TIMEOUT_S = float(os.getenv("ABUTRON_GEMMA_TIMEOUT", "20"))
@@ -116,7 +127,7 @@ GEMMA_MAX_RETRIES = int(os.getenv("ABUTRON_GEMMA_MAX_RETRIES", "2"))
 
 # Multi-agent debate layer (TradingAgents pattern; advisory only)
 # Bull/bear debate + risk debators + research-manager synthesis.
-DEBATE_ENABLED = os.getenv("ABUTRON_DEBATE_ENABLED", "false").lower() in (
+DEBATE_ENABLED = os.getenv("ABUTRON_DEBATE_ENABLED", "true").lower() in (
     "1", "true", "yes")
 DEBATE_ROUNDS = int(os.getenv("ABUTRON_DEBATE_ROUNDS", "1"))
 DEBATE_MAX_CALLS = int(os.getenv("ABUTRON_DEBATE_MAX_CALLS", "8"))
@@ -129,13 +140,13 @@ DEBATE_MAX_CALLS = int(os.getenv("ABUTRON_DEBATE_MAX_CALLS", "8"))
 # certified. When ON, the RiskGate (which delegates to the existing
 # RiskGuard) enforces the hard invariants before any candidate is
 # produced. The fail-closed posture is preserved through all phases.
-AGENTIC_ENGINE_ENABLED = os.getenv("ABUTRON_AGENTIC_ENGINE", "false").lower() in (
+AGENTIC_ENGINE_ENABLED = os.getenv("ABUTRON_AGENTIC_ENGINE", "true").lower() in (
     "1", "true", "yes")
 
 # Hardened pre-trade RiskGuard (kweinmeister pattern; fail-closed, opt-in)
 # When enabled, an independent hard-limit gate runs on every READY candidate
 # before it is stored for the single-writer dispatcher.
-RISKGUARD_ENABLED = os.getenv("ABUTRON_RISKGUARD_ENABLED", "false").lower() in (
+RISKGUARD_ENABLED = os.getenv("ABUTRON_RISKGUARD_ENABLED", "true").lower() in (
     "1", "true", "yes")
 
 # Portal

@@ -23,12 +23,15 @@ from .writer_gateway import SingleWriterGateway
 class NativeDispatcher:
     def __init__(self, event_log: EventLog,
                  gateway: SingleWriterGateway,
-                 receipt_mgr: ReceiptManager):
+                 receipt_mgr: ReceiptManager,
+                 owner_native_authority: Any = None):
         self.log = event_log
         self.gateway = gateway
         self.receipts = receipt_mgr
+        self.owner_native_authority = owner_native_authority
 
-    def dispatch_account(self, connection_id: str) -> Dict[str, Any]:
+    def dispatch_account(self, connection_id: str,
+                         candidate_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """Dispatch all RESERVED candidates for one account.
 
         Before sending, each candidate is gated by the owner-wide
@@ -36,6 +39,11 @@ class NativeDispatcher:
         aggregate stop risk cannot be verified against real contract
         specs — or exceeds the approved portfolio ceiling — the
         candidate is blocked before any native order is sent.
+
+        ``candidate_ids`` optionally scopes dispatch to only the
+        candidates reserved by the current agentic decision pass,
+        preventing a production tick from submitting unrelated older
+        queue items or another owner's candidates.
         """
         account = db.engine_db.get_account(connection_id)
         if account is None:
@@ -51,22 +59,38 @@ class NativeDispatcher:
             # Never authorize an order from registry-estimated stop risk.
             # Only independently reconciled, account-bound MT5 position
             # inventories and OrderCalcProfit stop losses may open headroom.
-            from ..risk.risk_engine import RiskEngine
-            exposure = RiskEngine(self.log).aggregate_owner_risk(owner_id)
+            if self.owner_native_authority is not None:
+                from ..risk.owner_native_authority import NativeOwnerRiskError
+                try:
+                    exposure = self.owner_native_authority.current_owner(connection_id)
+                    if exposure["owner_id"] != owner_id:
+                        raise NativeOwnerRiskError("CRM_OWNER_ID_CHANGED")
+                except (NativeOwnerRiskError, OSError, ValueError, KeyError) as exc:
+                    exposure = {"owner_risk_certified": False,
+                                "cap_exceeded": None,
+                                "issues": [type(exc).__name__ + ":" + str(exc)[:90]]}
+            else:
+                from ..risk.risk_engine import RiskEngine
+                exposure = RiskEngine(self.log).aggregate_owner_risk(owner_id)
             if (exposure.get("owner_risk_certified") is not True
                     or exposure.get("cap_exceeded") is not False):
                 # Block all RESERVED candidates for this owner — do NOT
                 # send any order until exposure is reconciled.
                 blocked = self._block_for_incomplete_exposure(
-                    connection_id, owner_id, exposure)
+                    connection_id, owner_id, exposure, candidate_ids)
                 return {"connection_id": connection_id, "sent": 0,
                         "blocked": blocked,
                         "error": "BLOCKED_INCOMPLETE_EXPOSURE",
                         "exposure": exposure}
 
-        # Collect reserved (RESERVED state) candidates
-        candidates = [self._load_candidate(cid)
-                      for cid in self._reserved_candidate_ids(connection_id)]
+        # Collect reserved (RESERVED state) candidates.
+        # A production agentic tick may submit only its own reservations,
+        # never unrelated older queue items or another owner's candidates.
+        eligible_ids = self._reserved_candidate_ids(connection_id)
+        if candidate_ids is not None:
+            allowed = set(candidate_ids)
+            eligible_ids = [cid for cid in eligible_ids if cid in allowed]
+        candidates = [self._load_candidate(cid) for cid in eligible_ids]
         results = {"connection_id": connection_id, "sent": 0,
                    "ack": 0, "unknown": 0, "rejected": 0,
                    "details": []}
@@ -90,7 +114,9 @@ class NativeDispatcher:
 
     def _block_for_incomplete_exposure(self, connection_id: str,
                                        owner_id: str,
-                                       exposure: Dict) -> List[str]:
+                                       exposure: Dict,
+                                       candidate_ids: Optional[List[str]] = None
+                                       ) -> List[str]:
         """Block all RESERVED candidates when exposure is incomplete/unsafe.
 
         Sets candidate state to BLOCKED_INCOMPLETE_EXPOSURE and logs
@@ -99,7 +125,10 @@ class NativeDispatcher:
         blocked_ids = []
         from .state import state_machine
         from ..events import make_event
+        allowed = set(candidate_ids) if candidate_ids is not None else None
         for cid in self._reserved_candidate_ids(connection_id):
+            if allowed is not None and cid not in allowed:
+                continue
             cand = self._load_candidate(cid)
             if cand is None:
                 continue
@@ -133,15 +162,28 @@ class NativeDispatcher:
         outcome = sent.get("outcome")
 
         if outcome == "ACK":
+            # Use the ACTUAL native execution price and volume from the
+            # broker's OrderSend result (res.price, res.volume), not the
+            # model's proposed price/volume. The EA writes these into the
+            # receipt file and returns them in the socket response.
+            receipt_ref = sent.get("receipt_ref", {})
+            actual_price = float(receipt_ref.get("price", 0.0) or 0.0)
+            actual_volume = float(receipt_ref.get("volume", 0.0) or 0.0)
+            if actual_price <= 0:
+                # Fall back to candidate price only if the EA did not
+                # report the actual fill (older EA versions).
+                actual_price = float(candidate.get("trigger_price",
+                                                   candidate.get("price", 0.0)))
+            if actual_volume <= 0:
+                actual_volume = float(candidate.get("volume", 0.0))
             self.receipts.record_native_receipt(
                 candidate_id=candidate["candidate_id"],
                 connection_id=cid, mt5_login=account["mt5_login"],
                 symbol=candidate["symbol"], direction=candidate["direction"],
-                native_ticket=sent["receipt_ref"].get("ticket", 0),
-                broker_deal_id=sent["receipt_ref"].get("deal", ""),
-                volume=candidate["volume"],
-                fill_price=candidate.get("trigger_price",
-                                         candidate.get("price", 0.0)),
+                native_ticket=receipt_ref.get("ticket", 0),
+                broker_deal_id=receipt_ref.get("deal", ""),
+                volume=actual_volume,
+                fill_price=actual_price,
                 stop_loss=candidate["stop_loss"],
                 take_profit=candidate["take_profit"],
                 commission=0.0, swap=0.0,
@@ -151,28 +193,41 @@ class NativeDispatcher:
                     "outcome": "ACK", "receipt": sent["receipt_ref"]}
 
         if outcome == "UNKNOWN":
+            native_request_id = str(sent.get("request_id") or "")
+            unknown_reason = str(sent.get("reason") or "SEND_UNKNOWN")
+            if native_request_id:
+                unknown_reason = "REQUEST_ID=" + native_request_id + ";" + unknown_reason
             rid = self.receipts.record_unknown(
                 candidate_id=candidate["candidate_id"], connection_id=cid,
                 mt5_login=account["mt5_login"],
                 symbol=candidate["symbol"],
                 direction=candidate["direction"],
                 volume=candidate["volume"],
-                reason_code=sent.get("reason", "SEND_UNKNOWN"))
+                reason_code=unknown_reason)
             db.engine_db.set_candidate_state(candidate["candidate_id"], "UNKNOWN",
-                                          sent.get("reason", "SEND_UNKNOWN"))
+                                          unknown_reason)
             return {"candidate_id": candidate["candidate_id"],
                     "outcome": "UNKNOWN", "receipt_id": rid}
 
-        # REJECTED
+        # REJECTED — expose the actual MT5 return code from the EA's
+        # native receipt so operators can diagnose OrderCheck failures.
+        receipt_ref = sent.get("receipt_ref", {}) or {}
+        reject_reason = sent.get("reason", "REJECTED")
+        mt5_retcode = receipt_ref.get("reason", "") or reject_reason
         db.engine_db.set_candidate_state(candidate["candidate_id"], "REJECTED",
-                                      sent.get("reason", "REJECTED"))
+                                      mt5_retcode)
         self.log.append(make_event(
             "dispatch.rejected", connection_id=cid, broker=broker,
             order_request_id=candidate["candidate_id"],
             symbol=candidate["symbol"], execution_state="REJECTED",
-            reason_code=sent.get("reason", "REJECTED")))
+            reason_code=mt5_retcode,
+            payload={"mt5_return_code": mt5_retcode,
+                     "native_reason": receipt_ref.get("reason", ""),
+                     "broker_deal_id": receipt_ref.get("deal", "")}))
         return {"candidate_id": candidate["candidate_id"],
-                "outcome": "REJECTED", "reason": sent.get("reason")}
+                "outcome": "REJECTED",
+                "reason": mt5_retcode,
+                "mt5_return_code": mt5_retcode}
 
     def _reserved_candidate_ids(self, connection_id: str) -> List[str]:
         from sqlalchemy import select

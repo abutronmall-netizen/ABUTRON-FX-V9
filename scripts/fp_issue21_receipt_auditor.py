@@ -25,7 +25,11 @@ RECON = Path("/var/lib/abutron-fp-execution/reconciliation/latest.json")
 HISTORY = Path("/var/lib/apex/operator-live/fp-native-history.json")
 STATE = Path("/var/lib/abutron-fp0512-issue21-scanner/state.json")
 HASH64 = re.compile(r"[a-f0-9]{64}\Z")
-MAX_FILES = 10000
+# Capacity for the growing evidence archive. The original hardcoded
+# 10000 limit rejected accounts with >10,000 native evidence files
+# (FP 0512 had 10,043). Raise to a generous ceiling that still bounds
+# memory while allowing multi-year evidence accumulation.
+MAX_FILES = int(os.environ.get("ABUTRON_ISSUE21_MAX_FILES", "500000"))
 BATCH_SIZE = 250
 
 
