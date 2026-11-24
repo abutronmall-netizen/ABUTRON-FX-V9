@@ -11,11 +11,11 @@ Verifies that the reconciliation script:
 """
 from __future__ import annotations
 
-import importlib.util
-import json
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -78,7 +78,7 @@ def launch_worker(cid,broker,mode,encrypted):
      "--property=MemoryMax=1800M","--property=TasksMax=170",
      "--property=UMask=0077",
      *(["--property=SupplementaryGroups=abutron-fp-boot-assets"]
-       if (broker,mode)==(FP_MARKETS_DEMO) else []),
+       if (broker,mode)==("FP Markets","DEMO") else []),
      "/usr/bin/python3","-B",chosen],check=True,timeout=20,
      stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 def maintenance_reexec_seen():
@@ -115,8 +115,8 @@ class TestReconciliationPatch:
         rc, out, err = _run_reconcile(production_manager, "--dry-run")
 
         assert rc == 0
-        assert "Injected ensure_worker_accessible()" in out
-        assert "Injected ensure_worker_accessible(chosen) call" in out
+        assert "+def ensure_worker_accessible(" in out
+        assert "+  ensure_worker_accessible(chosen)" in out
         assert "Verification passed" in out
         # File unchanged after dry-run
         assert production_manager.read_text() == original
@@ -135,7 +135,7 @@ class TestReconciliationPatch:
         assert "def ensure_worker_accessible" in patched
         assert "ABUTRON-ISSUE65-WORKER-ACCESS-RECONCILED" in patched
         # Call site injected, scoped to DEMO
-        assert 'if mode=="DEMO":' in patched
+        assert 'if (broker, mode) == ("Deriv", "DEMO"):' in patched
         assert "ensure_worker_accessible(chosen)" in patched
         # Original code preserved
         assert "def fp_reconnect_logic" in patched
@@ -236,8 +236,8 @@ class TestReconciliationPatch:
         assert rc == 1
         assert "not found" in out.lower() or "not found" in err.lower()
 
-    def test_call_site_scoped_to_demo_only(self, production_manager):
-        """The call site is inside an if mode=="DEMO" guard, not unconditional."""
+    def test_call_site_scoped_to_deriv_demo_only(self, production_manager):
+        """The call site is inside an Deriv DEMO guard, not unconditional."""
         rc, out, err = _run_reconcile(production_manager)
         assert rc == 0
 
@@ -245,8 +245,8 @@ class TestReconciliationPatch:
         # Find the call site context
         idx = patched.index("ensure_worker_accessible(chosen)")
         context_before = patched[max(0, idx - 50):idx]
-        assert 'if mode=="DEMO":' in context_before, (
-            "ensure_worker_accessible must be guarded by if mode==DEMO"
+        assert 'if (broker, mode) == ("Deriv", "DEMO"):' in context_before, (
+            "ensure_worker_accessible requires the Deriv DEMO guard"
         )
 
     def test_ensure_function_derives_dir_from_path(self, production_manager):
@@ -265,3 +265,53 @@ class TestReconciliationPatch:
         # Should use Path(worker_path).parent, not a WORKER_DIR constant
         assert "Path(worker_path).parent" in func_body
         assert "WORKER_DIR" not in func_body
+
+@pytest.mark.parametrize("broker,mode,selected,expect_access", [
+    ("Deriv", "DEMO", "DERIV_50_100_WORKER", True),
+    ("Deriv", "LIVE", "DERIV_LIVE_READONLY_WORKER", False),
+    ("FP Markets", "DEMO", "FP_WORKER", False),
+    ("FP Markets", "LIVE", "FP_WORKER", False),
+    ("IC Markets", "DEMO", "WORKER", False),
+])
+def test_launch_effects(production_manager, tmp_path, broker, mode, selected, expect_access):
+    assert _run_reconcile(production_manager)[0] == 0
+    ns = runpy.run_path(str(production_manager))["launch_worker"].__globals__
+    mock_runner = Mock()
+    ns["subprocess"] = mock_runner
+    worker_dir = tmp_path / "worker"
+    worker_dir.mkdir(mode=0o700)
+    script = worker_dir / "example.py"
+    script.touch(mode=0o600)
+    ns[selected] = str(script)
+    ns["launch_worker"]("cid", broker, mode, ns["sealed_path"]("cid"))
+    assert script.stat().st_mode & 0o777 == (0o755 if expect_access else 0o600)
+    assert worker_dir.stat().st_mode & 0o777 == (0o755 if expect_access else 0o700)
+    argv = mock_runner.run.call_args.args[0]
+    assert argv[-1] == str(script)
+    fp_group = "--property=SupplementaryGroups=abutron-fp-boot-assets"
+    assert (fp_group in argv) == ((broker, mode) == ("FP Markets", "DEMO"))
+
+
+def test_upgrade_previous_guard(production_manager):
+    assert _run_reconcile(production_manager)[0] == 0
+    corrected = production_manager.read_text()
+    old = corrected.replace('if (broker, mode) == ("Deriv", "DEMO"):',
+                            'if mode=="DEMO":')
+    assert corrected != old
+    production_manager.write_text(old)
+    assert _run_reconcile(production_manager)[0] == 0
+    assert production_manager.read_text() == corrected
+
+
+def test_marker_without_valid_patch_is_rejected(production_manager):
+    text = "# ABUTRON-ISSUE65-WORKER-ACCESS-RECONCILED\n" + PRODUCTION_MANAGER
+    production_manager.write_text(text)
+    assert _run_reconcile(production_manager)[0] != 0
+    assert production_manager.read_text() == text
+
+
+def test_other_chosen_assignments_untouched(production_manager):
+    decoy = "def another():\n chosen=(WORKER)\n return chosen\n"
+    production_manager.write_text(decoy + PRODUCTION_MANAGER)
+    assert _run_reconcile(production_manager)[0] == 0
+    assert production_manager.read_text().startswith(decoy)
