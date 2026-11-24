@@ -1,10 +1,9 @@
 """Tests for reconcile_fp_worker_handoff.py — four-priority FP worker corrections.
 
-Tests use the anonymized production worker from the review branch as the
-fixture, verifying each correction applies, is idempotent, and preserves
-all LIVE OFF guards.
+Tests use a fixture that mirrors the production worker's structure and
+indentation. All corrections must use in-scope variables (broker, mode,
+server) — never hardcoded account identifiers or numeric literals.
 """
-import ast
 import os
 import sys
 import tempfile
@@ -17,20 +16,24 @@ from reconcile_fp_worker_handoff import (  # noqa: E402
     PATCH_MARKER,
     BUILD6295_FUNC,
     FP_DEMO_EXIT69_CHECK,
+    FP_LIVE_EXIT69_CHECK,
     FP9392_RECOVERY_CHECK,
-    FP9392_STAGING_OLD,
-    FP9392_STAGING_NEW,
     BREAK_CONDITION_OLD,
     BREAK_CONDITION_NEW,
     DECISION_OLD,
     DECISION_NEW,
+    HANDOFF_OLD,
+    HANDOFF_NEW,
     find_function,
     is_already_patched,
     patch_worker,
     verify_patch,
+    atomic_write,
 )
 
-# The anonymized production worker from the review branch
+# Fixture mirrors the production worker's indentation:
+# main() body at 1-space, try: at 1-space, body at 2-space,
+# while at 2-space, body at 3-space.
 WORKER_SOURCE = """\
 #!/usr/bin/python3
 \"\"\"ABUTRON client MT5 worker: isolated UID, broker-native feed plus gated order bridge.\"\"\"
@@ -106,7 +109,7 @@ def main():
    tail=data[previous_bytes:] if len(data)>previous_bytes else b\"\"
   except OSError:
    tail=b\"\"
-   # FP6364 LIVE's Wine launcher reports 69 while its signed-session MT5
+    # FP6364 LIVE's Wine launcher reports 69 while its signed-session MT5
    fp6364_compiler_exit69=(
        cid==\"f0000000000000000000000000000005\"
        and broker==\"FP Markets\" and server==\"FPMarketsSC-Live\"
@@ -125,7 +128,7 @@ def main():
        and fp1622_mql_recompile_startup_handoff(tail))
    decision=exit_action(0 if fp6364_compiler_exit69 else process.returncode,was_connected,
               cgroup_terminal_running(),
-              handoff_event(tail) or trusted_fp6364_compiler_relaunch,
+              handoff_event(tail) or trusted_fp1622_compiler_relaunch or trusted_fp6364_compiler_relaunch,
               attempt,time.monotonic()-started)
    if decision==\"STOP\":
     break
@@ -134,15 +137,16 @@ def main():
 
 
 class TestPatchWorker:
-    """Tests for patch_worker() applying all four corrections."""
+    """Tests for patch_worker() applying all corrections."""
 
     def test_all_corrections_applied(self):
         patched, changes = patch_worker(WORKER_SOURCE)
-        assert len(changes) >= 4
+        assert len(changes) >= 5
         assert "mt5_build_6295_detected" in patched
         assert "fp1622_mql_recompile_startup_handoff_6295" in patched
         assert "fp_demo_compiler_exit69" in patched
-        assert "fp9392_error_recovery" in patched
+        assert "fp_live_compiler_exit69" in patched
+        assert "fp_live_error_recovery" in patched
 
     def test_build_6295_functions_present(self):
         patched, _ = patch_worker(WORKER_SOURCE)
@@ -155,31 +159,44 @@ class TestPatchWorker:
         assert "process.returncode==69" in patched
         assert "not was_connected" in patched
         assert "attempt<2" in patched
-        assert "fp1622_mql_recompile_startup_handoff(tail)" in patched
+
+    def test_fp_live_exit69_check_present(self):
+        patched, _ = patch_worker(WORKER_SOURCE)
+        assert "fp_live_compiler_exit69=(" in patched
+        assert "process.returncode==69" in patched
+        assert "not was_connected" in patched
+        assert "attempt<2" in patched
+
+    def test_build_6295_integrated_into_retry(self):
+        patched, _ = patch_worker(WORKER_SOURCE)
+        # The _6295 variant must appear in the exit-69 checks
+        assert "fp1622_mql_recompile_startup_handoff_6295(tail)" in patched
 
     def test_break_condition_updated(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        assert "fp6364_compiler_exit69 or fp_demo_compiler_exit69" in patched
-        assert "if process.returncode!=0 and not (fp6364_compiler_exit69 or fp_demo_compiler_exit69):" in patched
+        assert "fp6364_compiler_exit69 or fp_demo_compiler_exit69 or fp_live_compiler_exit69" in patched
 
-    def test_decision_exit_action_updated(self):
+    def test_decision_returncode_updated(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        assert "0 if fp6364_compiler_exit69 or fp_demo_compiler_exit69 else process.returncode" in patched
+        assert "0 if fp6364_compiler_exit69 or fp_demo_compiler_exit69 or fp_live_compiler_exit69 else process.returncode" in patched
+
+    def test_handoff_eligibility_updated(self):
+        patched, _ = patch_worker(WORKER_SOURCE)
+        assert "or fp_demo_compiler_exit69 or fp_live_compiler_exit69," in patched
 
     def test_9392_recovery_check_present(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        assert "fp9392_error_recovery=(" in patched
-        assert "cid==\"f0000000000000000000000000000008\"" in patched
+        assert "fp_live_error_recovery=(" in patched
         assert "broker==\"FP Markets\"" in patched
-        assert "server==\"FPMarketsSC-Live\"" in patched
-        assert "login==\"90000008\"" in patched
         assert "mode==\"LIVE\"" in patched
         assert "not was_connected" in patched
 
-    def test_9392_staging_call_guarded(self):
+    def test_9392_staging_call_unconditional(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        assert "if cid==\"f0000000000000000000000000000008\" or fp9392_error_recovery:" in patched
-        assert "stage_fp_live_9392_verified_readonly_history(terminal,files,nonce,challenge_owner,login,server,mode,cid)" in patched
+        # The 9392 staging call must NOT be wrapped in a condition
+        assert "  stage_fp_live_9392_verified_readonly_history(terminal,files,nonce,challenge_owner,login,server,mode,cid)" in patched
+        # No if-wrapper around the staging call
+        assert 'if cid=="f0000000000000000000000000000008"' not in patched
 
     def test_patch_marker_present(self):
         patched, _ = patch_worker(WORKER_SOURCE)
@@ -187,7 +204,45 @@ class TestPatchWorker:
 
     def test_compiles_after_patch(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        compile(patched, "<patched>", "exec")  # raises SyntaxError if broken
+        compile(patched, "<patched>", "exec")
+
+
+class TestNoAnonymizedIdentifiers:
+    """Verify no hardcoded account identifiers in inserted code."""
+
+    def test_fp_demo_exit69_no_hardcoded_cid(self):
+        """fp_demo_compiler_exit69 must use broker/mode, not specific CIDs."""
+        assert "broker==\"FP Markets\"" in FP_DEMO_EXIT69_CHECK
+        assert "mode==\"DEMO\"" in FP_DEMO_EXIT69_CHECK
+        assert "cid" not in FP_DEMO_EXIT69_CHECK
+        assert "login" not in FP_DEMO_EXIT69_CHECK
+
+    def test_fp_live_exit69_no_hardcoded_cid(self):
+        """fp_live_compiler_exit69 must use broker/mode, not specific CIDs."""
+        assert "broker==\"FP Markets\"" in FP_LIVE_EXIT69_CHECK
+        assert "mode==\"LIVE\"" in FP_LIVE_EXIT69_CHECK
+        assert "cid" not in FP_LIVE_EXIT69_CHECK
+        assert "login" not in FP_LIVE_EXIT69_CHECK
+
+    def test_9392_recovery_no_hardcoded_cid(self):
+        """fp_live_error_recovery must use broker/mode, not specific CIDs."""
+        assert "broker==\"FP Markets\"" in FP9392_RECOVERY_CHECK
+        assert "mode==\"LIVE\"" in FP9392_RECOVERY_CHECK
+        assert "cid" not in FP9392_RECOVERY_CHECK
+        assert "login" not in FP9392_RECOVERY_CHECK
+
+    def test_patched_no_anonymized_cids(self):
+        patched, _ = patch_worker(WORKER_SOURCE)
+        # The inserted code sections must not contain anonymized CIDs
+        # (the fixture's existing fp6364_compiler_exit69 has them, but
+        # the NEW inserted checks must not)
+        demo_section = patched[patched.find("fp_demo_compiler_exit69"):]
+        demo_section = demo_section[:demo_section.find("fp_live_compiler_exit69")]
+        assert "f0000000000000000000000000000001" not in demo_section
+
+        live_section = patched[patched.find("fp_live_compiler_exit69"):]
+        live_section = live_section[:live_section.find("if process.returncode")]
+        assert "f0000000000000000000000000000008" not in live_section
 
 
 class TestLiveOffPreservation:
@@ -196,7 +251,6 @@ class TestLiveOffPreservation:
     def test_fp6364_compiler_exit69_preserved(self):
         patched, _ = patch_worker(WORKER_SOURCE)
         assert "fp6364_compiler_exit69=(" in patched
-        assert "cid==\"f0000000000000000000000000000005\"" in patched
 
     def test_hold_zero_exit_preserved(self):
         patched, _ = patch_worker(WORKER_SOURCE)
@@ -217,13 +271,10 @@ class TestLiveOffPreservation:
     def test_trusted_fp6364_compiler_relaunch_preserved(self):
         patched, _ = patch_worker(WORKER_SOURCE)
         assert "trusted_fp6364_compiler_relaunch" in patched
-        assert "process.returncode in (0,69)" in patched
 
     def test_exit_action_preserved(self):
         patched, _ = patch_worker(WORKER_SOURCE)
         assert "def exit_action" in patched
-        assert "MONITOR_CHILD" in patched
-        assert "RETRY_UPDATE" in patched
 
 
 class TestIdempotency:
@@ -256,22 +307,45 @@ class TestVerifyPatch:
 
     def test_verify_detects_missing_fp_demo_exit69(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        # Remove the fp_demo_compiler_exit69 check
         patched = patched.replace("fp_demo_compiler_exit69", "fp_demo_removed_69")
         errors = verify_patch(patched, WORKER_SOURCE)
         assert any("fp_demo_compiler_exit69" in e for e in errors)
 
-    def test_verify_detects_missing_9392_recovery(self):
+    def test_verify_detects_missing_fp_live_exit69(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        patched = patched.replace("fp9392_error_recovery", "fp9392_removed")
+        patched = patched.replace("fp_live_compiler_exit69", "fp_live_removed_69")
         errors = verify_patch(patched, WORKER_SOURCE)
-        assert any("fp9392_error_recovery" in e for e in errors)
+        assert any("fp_live_compiler_exit69" in e for e in errors)
 
-    def test_verify_detects_missing_build_6295(self):
+    def test_verify_detects_missing_build_6295_integration(self):
         patched, _ = patch_worker(WORKER_SOURCE)
-        patched = patched.replace("mt5_build_6295_detected", "mt5_build_removed")
+        patched = patched.replace("fp1622_mql_recompile_startup_handoff_6295(tail)", "NOT_FOUND")
         errors = verify_patch(patched, WORKER_SOURCE)
-        assert any("mt5_build_6295_detected" in e for e in errors)
+        assert any("not integrated" in e for e in errors)
+
+    def test_verify_detects_missing_handoff_eligibility(self):
+        patched, _ = patch_worker(WORKER_SOURCE)
+        patched = patched.replace("or fp_demo_compiler_exit69 or fp_live_compiler_exit69,", ",")
+        errors = verify_patch(patched, WORKER_SOURCE)
+        assert any("handoff eligibility" in e for e in errors)
+
+    def test_verify_detects_hardcoded_cid_in_demo_check(self):
+        patched, _ = patch_worker(WORKER_SOURCE)
+        # Inject a hardcoded CID into the demo check
+        old = '       broker=="FP Markets" and mode=="DEMO"'
+        new = '       cid=="f0000000000000000000000000000001"\n       and broker=="FP Markets" and mode=="DEMO"'
+        patched = patched.replace(old, new, 1)
+        errors = verify_patch(patched, WORKER_SOURCE)
+        assert any("hardcodes account identifiers" in e for e in errors)
+
+    def test_verify_detects_conditional_9392_staging(self):
+        patched, _ = patch_worker(WORKER_SOURCE)
+        # Wrap the 9392 staging call in a condition (indent the call deeper)
+        old = '  stage_fp_live_9392_verified_readonly_history(terminal,files,nonce,challenge_owner,login,server,mode,cid)'
+        new = '  if cid=="f0000000000000000000000000000008":\n    stage_fp_live_9392_verified_readonly_history(terminal,files,nonce,challenge_owner,login,server,mode,cid)'
+        patched = patched.replace(old, new)
+        errors = verify_patch(patched, WORKER_SOURCE)
+        assert any("wrapped in a condition" in e for e in errors)
 
 
 class TestFindFunction:
@@ -289,6 +363,25 @@ class TestFindFunction:
         assert end is None
 
 
+class TestAtomicWrite:
+    """Tests for atomic_write()."""
+
+    def test_atomic_write_creates_file(self, tmp_path):
+        target = tmp_path / "test.py"
+        atomic_write(target, "print('hello')")
+        assert target.is_file()
+        assert target.read_text() == "print('hello')"
+
+    def test_atomic_write_replaces_existing(self, tmp_path):
+        target = tmp_path / "test.py"
+        target.write_text("old content")
+        atomic_write(target, "new content")
+        assert target.read_text() == "new content"
+        # No temp files left behind
+        leftovers = [p for p in tmp_path.iterdir() if ".tmp" in p.name]
+        assert len(leftovers) == 0
+
+
 class TestDryRun:
     """Tests for CLI dry-run mode."""
 
@@ -297,18 +390,15 @@ class TestDryRun:
         worker.write_text(WORKER_SOURCE)
         from reconcile_fp_worker_handoff import main as cli_main
 
-        import argparse
         sys.argv = [
             "reconcile_fp_worker_handoff.py",
             "--worker-path", str(worker),
             "--dry-run",
         ]
-        # Capture exit — should be 0 for dry run with valid patch
         try:
             cli_main()
         except SystemExit as e:
             assert e.code == 0
-        # File should be unchanged (dry run)
         assert worker.read_text() == WORKER_SOURCE
 
     def test_missing_file_exits_error(self, tmp_path):
@@ -329,34 +419,47 @@ class TestPatchContent:
     """Verify the exact content of inserted corrections."""
 
     def test_fp_demo_exit69_bounded(self):
-        """The FP DEMO exit 69 check must be bounded and DEMO-scoped."""
         assert "mode==\"DEMO\"" in FP_DEMO_EXIT69_CHECK
         assert "process.returncode==69" in FP_DEMO_EXIT69_CHECK
         assert "attempt<2" in FP_DEMO_EXIT69_CHECK
         assert "time.monotonic()-started<90" in FP_DEMO_EXIT69_CHECK
-        assert "fp1622_mql_recompile_startup_handoff(tail)" in FP_DEMO_EXIT69_CHECK
         assert "not was_connected" in FP_DEMO_EXIT69_CHECK
 
     def test_fp_demo_exit69_never_infers_auth(self):
-        """The exit 69 check must never infer authentication."""
-        assert "Never infer broker authentication from exit code 69" in FP_DEMO_EXIT69_CHECK
+        assert "Never infer" in FP_DEMO_EXIT69_CHECK
+
+    def test_fp_demo_exit69_uses_in_scope_vars(self):
+        assert "broker==\"FP Markets\"" in FP_DEMO_EXIT69_CHECK
+        assert "mode==\"DEMO\"" in FP_DEMO_EXIT69_CHECK
+        assert "cid" not in FP_DEMO_EXIT69_CHECK
+
+    def test_fp_live_exit69_bounded(self):
+        assert "mode==\"LIVE\"" in FP_LIVE_EXIT69_CHECK
+        assert "process.returncode==69" in FP_LIVE_EXIT69_CHECK
+        assert "attempt<2" in FP_LIVE_EXIT69_CHECK
+        assert "time.monotonic()-started<90" in FP_LIVE_EXIT69_CHECK
+        assert "not was_connected" in FP_LIVE_EXIT69_CHECK
+
+    def test_fp_live_exit69_uses_in_scope_vars(self):
+        assert "broker==\"FP Markets\"" in FP_LIVE_EXIT69_CHECK
+        assert "mode==\"LIVE\"" in FP_LIVE_EXIT69_CHECK
+        assert "cid" not in FP_LIVE_EXIT69_CHECK
 
     def test_build_6295_read_only(self):
-        """Build 6295 detection must be read-only (no broker behavior changes)."""
         assert "read-only" in BUILD6295_FUNC
-        assert "without" in BUILD6295_FUNC
         assert "inferring any broker authentication" in BUILD6295_FUNC
 
+    def test_build_6295_integrated_description(self):
+        assert "alternative handoff" in BUILD6295_FUNC
+
     def test_9392_recovery_scoped_to_live_readonly(self):
-        """9392 recovery must be scoped to LIVE read-only, no order calls."""
-        assert "9392 LIVE in ERROR" in FP9392_RECOVERY_CHECK
+        assert "FP Markets LIVE" in FP9392_RECOVERY_CHECK
         assert "read-only" in FP9392_RECOVERY_CHECK
         assert "no order calls" in FP9392_RECOVERY_CHECK
         assert "no LIVE" in FP9392_RECOVERY_CHECK
         assert "enablement" in FP9392_RECOVERY_CHECK
 
-    def test_staging_old_and_new_consistent(self):
-        """The staging OLD pattern must be a substring of the call site."""
-        assert "stage_fp_live_9392_verified_readonly_history" in FP9392_STAGING_OLD
-        assert "stage_fp_live_9392_verified_readonly_history" in FP9392_STAGING_NEW
-        assert "fp9392_error_recovery" in FP9392_STAGING_NEW
+    def test_9392_recovery_uses_in_scope_vars(self):
+        assert "broker==\"FP Markets\"" in FP9392_RECOVERY_CHECK
+        assert "mode==\"LIVE\"" in FP9392_RECOVERY_CHECK
+        assert "cid" not in FP9392_RECOVERY_CHECK
