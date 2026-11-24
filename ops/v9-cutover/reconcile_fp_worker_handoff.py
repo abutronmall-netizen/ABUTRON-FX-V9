@@ -85,16 +85,19 @@ FP_DEMO_EXIT69_CHECK = '''   # FP DEMO accounts: the Wine launcher may report ex
 '''
 
 # --------------------------------------------------------------------------- #
-# Correction 1+3: FP LIVE exit code 69 for accounts beyond FP6364
-# (covers 9392). Uses in-scope variables, no hardcoded identifiers.
-# Bounded by the same compiler-handoff detection. Never infers auth.
+# Correction 1+3: FP LIVE exit code 69 — scoped to read-only configured
+# accounts (9392). Uses the ABUTRON9392_READONLY profile marker present
+# in args for read-only accounts, not a hardcoded CID. Bounded by the
+# same compiler-handoff detection. Never infers auth.
 # --------------------------------------------------------------------------- #
-FP_LIVE_EXIT69_CHECK = '''   # FP LIVE accounts beyond FP6364 (e.g. 9392): same compiler-handoff
-   # exit code 69 as FP6364 LIVE. Bounded by the same journal detection.
-   # Scoped to FP Markets LIVE with the compiler handoff — never infer
-   # broker authentication from exit code 69. Uses in-scope variables.
+FP_LIVE_EXIT69_CHECK = '''   # FP LIVE read-only accounts (9392): same compiler-handoff exit
+   # code 69 as FP6364 LIVE. Scoped to accounts configured for read-only
+   # operation via the ABUTRON9392_READONLY profile marker in args —
+   # not a platform-wide LIVE change. Bounded by the same journal
+   # detection. Never infer broker authentication from exit code 69.
    fp_live_compiler_exit69=(
        broker=="FP Markets" and mode=="LIVE"
+       and "ABUTRON9392_READONLY" in " ".join(args)
        and process.returncode==69 and not was_connected
        and attempt<2 and time.monotonic()-started<90
        and (fp1622_mql_recompile_startup_handoff(tail)
@@ -268,10 +271,10 @@ def verify_patch(text, original_text):
             if "cid" in demo_section or "login" in demo_section:
                 errors.append("fp_demo_compiler_exit69 hardcodes account identifiers — must use in-scope variables")
 
-    # Check 5: FP LIVE exit code 69 check present (covers 9392)
+    # Check 5: FP LIVE exit code 69 check present (scoped to read-only)
     if "fp_live_compiler_exit69" not in text:
         errors.append("fp_live_compiler_exit69 check not found (9392 exit code 69 unaddressed)")
-    # Verify no hardcoded CID in the LIVE check section
+    # Verify scope is restricted to read-only configured accounts
     live_section_start = text.find("fp_live_compiler_exit69=(")
     if live_section_start > 0:
         live_section_end = text.find("if process.returncode", live_section_start)
@@ -279,6 +282,8 @@ def verify_patch(text, original_text):
             live_section = text[live_section_start:live_section_end]
             if "cid" in live_section or "login" in live_section:
                 errors.append("fp_live_compiler_exit69 hardcodes account identifiers — must use in-scope variables")
+            if "ABUTRON9392_READONLY" not in live_section:
+                errors.append("fp_live_compiler_exit69 not scoped to read-only configured accounts (missing ABUTRON9392_READONLY profile check)")
 
     # Check 6: Break condition updated
     if "fp6364_compiler_exit69 or fp_demo_compiler_exit69 or fp_live_compiler_exit69" not in text:
@@ -351,14 +356,18 @@ def verify_patch(text, original_text):
 def atomic_write(path, content):
     """Write content to path via temp file + os.replace (atomic).
 
-    Preserves file ownership, permissions, and timestamps via
-    shutil.copystat so the patched file matches the original's
-    access metadata.
+    Preserves file ownership (UID/GID via os.chown), permissions, and
+    timestamps via shutil.copystat so the patched file matches the
+    original's access metadata.
     """
     tmp = path.with_suffix(path.suffix + ".tmp-fpcorr")
     tmp.write_text(content)
     if path.exists():
-        # Preserve mode, ownership, timestamps, and extended attributes
+        stat = path.stat()
+        # Preserve owner UID and group GID — shutil.copystat does NOT
+        # copy ownership, so os.chown is required explicitly.
+        os.chown(tmp, stat.st_uid, stat.st_gid)
+        # Preserve mode, timestamps, and extended attributes
         shutil.copystat(path, tmp)
     else:
         tmp.chmod(0o755)

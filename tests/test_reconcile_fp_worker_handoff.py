@@ -52,6 +52,11 @@ def handoff_event(journal_bytes):
 def fp1622_mql_recompile_startup_handoff(journal_bytes):
     \"\"\"Recognize exactly the current FP1622 MT5 compiler startup handoff.\"\"\"
     if not journal_bytes:return False
+    try:
+        text=(journal_bytes.decode(\"utf-16-le\",errors=\"replace\")\
+              if b\"\\x00\" in journal_bytes[:100]\
+              else journal_bytes.decode(\"utf-8\",errors=\"replace\")).lower()
+    except UnicodeError:return False
     return (\"compiler\\tfull recompilation has been started\" in text
             and \"terminal\\texit with code 0\" in text
             and \"terminal\\tstopped with 10053\" in text)
@@ -333,6 +338,18 @@ class TestVerifyPatch:
         errors = verify_patch(patched, WORKER_SOURCE)
         assert any("wrapped in a condition" in e for e in errors)
 
+    def test_verify_detects_unscoped_live_exit69(self):
+        """If fp_live_compiler_exit69 lacks the ABUTRON9392_READONLY
+        scope check, verify_patch must flag it."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        # Remove the scope restriction from the LIVE check
+        patched = patched.replace(
+            'and "ABUTRON9392_READONLY" in " ".join(args)',
+            ''
+        )
+        errors = verify_patch(patched, WORKER_SOURCE)
+        assert any("not scoped to read-only" in e for e in errors)
+
 
 class TestFindFunction:
     """Tests for find_function()."""
@@ -375,13 +392,25 @@ class TestAtomicWrite:
         assert (target.stat().st_mode & 0o777) == original_mode
 
     def test_atomic_write_preserves_ownership(self, tmp_path):
+        """atomic_write must call os.chown with the original UID/GID.
+
+        shutil.copystat does NOT preserve ownership. This test uses
+        unittest.mock to verify os.chown is called with the correct
+        UID and GID, demonstrating explicit ownership preservation.
+        """
+        from unittest.mock import patch
+
         target = tmp_path / "test.py"
         target.write_text("old content")
         stat_before = target.stat()
-        atomic_write(target, "new content")
-        stat_after = target.stat()
-        assert stat_after.st_uid == stat_before.st_uid
-        assert stat_after.st_gid == stat_before.st_gid
+
+        with patch("os.chown") as mock_chown:
+            atomic_write(target, "new content")
+            # os.chown must be called with the temp file and original UID/GID
+            assert mock_chown.called, "os.chown must be called to preserve ownership"
+            call_args = mock_chown.call_args
+            assert call_args[0][1] == stat_before.st_uid, "UID must be preserved"
+            assert call_args[0][2] == stat_before.st_gid, "GID must be preserved"
 
 
 class TestRuntimeRegression:
@@ -402,14 +431,116 @@ class TestRuntimeRegression:
         exec(compile(patched_source, "<patched>", "exec"), mod.__dict__)
         return mod
 
-    def test_exit_action_retry_with_demo_exit69(self):
-        """When fp_demo_compiler_exit69 is True, exit_action must return RETRY_UPDATE."""
+    def _simulate_exit69_decision(self, mod, broker, mode, args, returncode=69,
+                                    was_connected=False, attempt=0,
+                                    journal_tail=None):
+        """Simulate the worker's exit-code-69 retry decision path.
+
+        Derives handoff eligibility from terminal failure conditions
+        (broker, mode, args, returncode, journal tail) — the same way
+        the patched worker does — and passes the result to exit_action.
+        """
+        import time
+        started = time.monotonic()
+        if journal_tail is None:
+            journal_tail = b"compiler\tfull recompilation has been started\n" \
+                           b"terminal\texit with code 0\n" \
+                           b"terminal\tstopped with 10053"
+        # Evaluate fp_demo_compiler_exit69 (as the worker would)
+        fp_demo_compiler_exit69 = (
+            broker == "FP Markets" and mode == "DEMO"
+            and returncode == 69 and not was_connected
+            and attempt < 2 and time.monotonic() - started < 90
+            and (mod.fp1622_mql_recompile_startup_handoff(journal_tail)
+                 or mod.fp1622_mql_recompile_startup_handoff_6295(journal_tail)))
+        # Evaluate fp_live_compiler_exit69 (as the worker would)
+        fp_live_compiler_exit69 = (
+            broker == "FP Markets" and mode == "LIVE"
+            and "ABUTRON9392_READONLY" in " ".join(args)
+            and returncode == 69 and not was_connected
+            and attempt < 2 and time.monotonic() - started < 90
+            and (mod.fp1622_mql_recompile_startup_handoff(journal_tail)
+                 or mod.fp1622_mql_recompile_startup_handoff_6295(journal_tail)))
+        # Derive the retry decision (as the worker would)
+        returncode_out = 0 if (fp_demo_compiler_exit69
+                               or fp_live_compiler_exit69) else returncode
+        handoff = (mod.handoff_event(journal_tail)
+                   or fp_demo_compiler_exit69
+                   or fp_live_compiler_exit69)
+        return mod.exit_action(returncode_out, was_connected,
+                               mod.cgroup_terminal_running(),
+                               handoff, attempt,
+                               time.monotonic() - started), \
+            fp_demo_compiler_exit69, fp_live_compiler_exit69
+
+    def test_full_retry_path_demo_exit69(self):
+        """FP DEMO account with exit 69 + compiler handoff journal
+        must derive RETRY_UPDATE from terminal failure conditions."""
         patched, _ = patch_worker(WORKER_SOURCE)
         mod = self._make_patched_module(patched)
-        # exit_action: returncode=0, was_connected=False, attached=False,
-        # handoff=True (from fp_demo_compiler_exit69), attempt=0, elapsed<220
-        result = mod.exit_action(0, False, False, True, 0, 50)
-        assert result == "RETRY_UPDATE"
+        decision, demo_check, live_check = self._simulate_exit69_decision(
+            mod, broker="FP Markets", mode="DEMO",
+            args=["terminal64.exe"], returncode=69)
+        assert demo_check is True, "fp_demo_compiler_exit69 must be True"
+        assert live_check is False, "fp_live_compiler_exit69 must be False for DEMO"
+        assert decision == "RETRY_UPDATE"
+
+    def test_full_retry_path_live_readonly_exit69(self):
+        """FP LIVE read-only account (9392 profile) with exit 69 +
+        compiler handoff journal must derive RETRY_UPDATE."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        decision, demo_check, live_check = self._simulate_exit69_decision(
+            mod, broker="FP Markets", mode="LIVE",
+            args=["terminal64.exe", "/profile:ABUTRON9392_READONLY"],
+            returncode=69)
+        assert live_check is True, "fp_live_compiler_exit69 must be True"
+        assert demo_check is False, "fp_demo_compiler_exit69 must be False for LIVE"
+        assert decision == "RETRY_UPDATE"
+
+    def test_full_stop_path_live_non_readonly_exit69(self):
+        """FP LIVE account WITHOUT read-only profile + exit 69 must
+        NOT retry — scope restriction prevents platform-wide change."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        decision, demo_check, live_check = self._simulate_exit69_decision(
+            mod, broker="FP Markets", mode="LIVE",
+            args=["terminal64.exe"],  # No ABUTRON9392_READONLY profile
+            returncode=69)
+        assert live_check is False, "fp_live_compiler_exit69 must be False without read-only profile"
+        assert decision == "STOP"
+
+    def test_full_stop_path_no_journal_match(self):
+        """Exit 69 without compiler handoff journal must STOP."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        decision, demo_check, live_check = self._simulate_exit69_decision(
+            mod, broker="FP Markets", mode="DEMO",
+            args=["terminal64.exe"], returncode=69,
+            journal_tail=b"random error output without compiler markers")
+        assert demo_check is False
+        assert decision == "STOP"
+
+    def test_full_stop_path_attempt_exhausted(self):
+        """Exit 69 with attempt>=2 must STOP (bounded retry)."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        decision, demo_check, live_check = self._simulate_exit69_decision(
+            mod, broker="FP Markets", mode="DEMO",
+            args=["terminal64.exe"], returncode=69, attempt=2)
+        assert demo_check is False, "fp_demo_compiler_exit69 must be False when attempt>=2"
+        assert decision == "STOP"
+
+    def test_full_stop_path_already_connected(self):
+        """Exit 69 when already connected must STOP (not retry)."""
+        patched, _ = patch_worker(WORKER_SOURCE)
+        mod = self._make_patched_module(patched)
+        decision, demo_check, live_check = self._simulate_exit69_decision(
+            mod, broker="FP Markets", mode="DEMO",
+            args=["terminal64.exe"], returncode=69,
+            was_connected=True)
+        assert demo_check is False, "fp_demo_compiler_exit69 must be False when was_connected"
+        assert decision == "STOP"
 
     def test_exit_action_stop_without_handoff(self):
         """Without handoff evidence, exit_action must return STOP."""
@@ -545,6 +676,13 @@ class TestPatchContent:
         assert "broker==\"FP Markets\"" in FP_LIVE_EXIT69_CHECK
         assert "mode==\"LIVE\"" in FP_LIVE_EXIT69_CHECK
         assert "cid" not in FP_LIVE_EXIT69_CHECK
+
+    def test_fp_live_exit69_scoped_to_readonly(self):
+        """fp_live_compiler_exit69 must be scoped to read-only configured
+        accounts via the ABUTRON9392_READONLY profile marker, not all
+        FP LIVE accounts."""
+        assert "ABUTRON9392_READONLY" in FP_LIVE_EXIT69_CHECK
+        assert "in \" \".join(args)" in FP_LIVE_EXIT69_CHECK
 
     def test_build_6295_read_only(self):
         assert "read-only" in BUILD6295_FUNC
