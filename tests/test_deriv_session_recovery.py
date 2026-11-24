@@ -50,7 +50,7 @@ def _reset_reboot_cache():
     The cache is module-level and persists across tests; without this reset
     a test that sets the cache would leak into subsequent tests.
     """
-    mgr._reboot_detected_at = None
+    mgr._reboot_boot_time = None
     yield
 
 
@@ -71,12 +71,12 @@ class TestRebootDetection:
 
         monkeypatch.setattr(Path, "read_text", fake_read_text)
 
-    def _write_marker(self, tmp_path, boot_id, detected_at):
+    def _write_marker(self, tmp_path, boot_id, boot_time):
         """Write a reboot_recovery.json marker file."""
         marker = tmp_path / "reboot_recovery.json"
         marker.write_text(json.dumps({
             "boot_id": boot_id,
-            "reboot_detected_at": detected_at,
+            "boot_time": boot_time,
         }))
         return marker
 
@@ -84,12 +84,13 @@ class TestRebootDetection:
         """A boot_id change since the last recorded one = reboot detected."""
         monkeypatch.setattr(mgr, "ROOT", tmp_path)
         self._write_marker(tmp_path, "boot-old", time.time())
-        self._patch_boot_id(monkeypatch, "boot-new\n")
+        # Short uptime so computed boot_time is within the recovery window
+        self._patch_boot_id(monkeypatch, "boot-new\n", uptime_text="30.0 100000.0")
 
         assert mgr.reboot_recently_detected() is True
         marker = json.loads((tmp_path / "reboot_recovery.json").read_text())
         assert marker["boot_id"] == "boot-new"
-        assert marker["reboot_detected_at"] is not None
+        assert marker["boot_time"] is not None
 
     def test_same_boot_id_does_not_trigger(self, tmp_path, monkeypatch):
         """Same boot_id as last recorded with expired window = no reboot."""
@@ -109,7 +110,8 @@ class TestRebootDetection:
         """
         monkeypatch.setattr(mgr, "ROOT", tmp_path)
         self._write_marker(tmp_path, "boot-old", time.time())
-        self._patch_boot_id(monkeypatch, "boot-new\n")
+        # Short uptime so computed boot_time is within the recovery window
+        self._patch_boot_id(monkeypatch, "boot-new\n", uptime_text="30.0 100000.0")
 
         # First account detects the reboot
         assert mgr.reboot_recently_detected() is True
@@ -132,7 +134,7 @@ class TestRebootDetection:
 
         # In-memory cache is also set to the old timestamp (simulating a
         # long-running process that detected the reboot 24h ago)
-        mgr._reboot_detected_at = old_ts
+        mgr._reboot_boot_time = old_ts
 
         # After the window, the trigger must return False
         assert mgr.reboot_recently_detected() is False
@@ -163,7 +165,7 @@ class TestRebootDetection:
         self._patch_boot_id(monkeypatch, "boot-current\n")
 
         # Simulate manager restart: in-memory cache is None (fresh process)
-        mgr._reboot_detected_at = None
+        mgr._reboot_boot_time = None
 
         # Must still detect the reboot from the persisted marker
         assert mgr.reboot_recently_detected() is True
@@ -175,7 +177,42 @@ class TestRebootDetection:
         old_ts = time.time() - 99999
         self._write_marker(tmp_path, "boot-current", old_ts)
         self._patch_boot_id(monkeypatch, "boot-current\n")
-        mgr._reboot_detected_at = None  # fresh process
+        mgr._reboot_boot_time = None  # fresh process
+
+        assert mgr.reboot_recently_detected() is False
+
+    def test_window_anchored_to_boot_not_detection(self, tmp_path, monkeypatch):
+        """Regression test: window anchored to actual boot time, not detection.
+
+        A late-starting manager (e.g. starts 600s after boot) must not
+        extend the recovery window beyond 15 minutes from the actual boot.
+        The window is computed from boot_time = now - uptime, so even if
+        detection happens late, the trigger expires at boot_time + 900s.
+        """
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        # Simulate a host that booted 800 seconds ago (within the 900s window
+        # but close to expiry). The manager is "detecting" now, but the boot
+        # was 800s ago — only 100s of recovery window remain.
+        self._patch_boot_id(monkeypatch, "boot-late\n",
+                            uptime_text="800.0 200000.0")
+
+        # First observation: boot_time = now - 800s, which is within window
+        assert mgr.reboot_recently_detected() is True
+        marker = json.loads((tmp_path / "reboot_recovery.json").read_text())
+        # boot_time should be now - 800, not now (detection time)
+        expected_boot_time = time.time() - 800
+        assert abs(marker["boot_time"] - expected_boot_time) < 5
+
+    def test_late_detection_does_not_extend_window(self, tmp_path, monkeypatch):
+        """A manager starting 950s after boot gets NO recovery window.
+
+        If the host booted 950s ago, even though the manager is just now
+        starting, the window (900s from boot) has already expired. The
+        trigger must return False — detection time must not extend it.
+        """
+        monkeypatch.setattr(mgr, "ROOT", tmp_path)
+        self._patch_boot_id(monkeypatch, "boot-late\n",
+                            uptime_text="950.0 200000.0")
 
         assert mgr.reboot_recently_detected() is False
 
@@ -189,7 +226,8 @@ class TestRebootDetection:
         assert mgr.reboot_recently_detected() is False
 
         # Now boot_id changes (new reboot after the window)
-        self._patch_boot_id(monkeypatch, "boot-new\n")
+        # Short uptime so the new boot_time is within the window
+        self._patch_boot_id(monkeypatch, "boot-new\n", uptime_text="30.0 100000.0")
         assert mgr.reboot_recently_detected() is True
 
     def test_first_observation_short_uptime_triggers(self, tmp_path, monkeypatch):
@@ -200,7 +238,7 @@ class TestRebootDetection:
         assert mgr.reboot_recently_detected() is True
         marker = json.loads((tmp_path / "reboot_recovery.json").read_text())
         assert marker["boot_id"] == "boot-first"
-        assert marker["reboot_detected_at"] is not None
+        assert marker["boot_time"] is not None
 
     def test_first_observation_long_uptime_no_trigger(self, tmp_path, monkeypatch):
         """First observation with long uptime = no reboot (already running long)."""
@@ -372,8 +410,8 @@ class TestRecoverOfflineDemoReboot:
         # with a fresh timestamp (within window)
         def fake_reboot_detected():
             # Detection already cached with a recent timestamp
-            if mgr._reboot_detected_at is None:
-                mgr._reboot_detected_at = time.time()
+            if mgr._reboot_boot_time is None:
+                mgr._reboot_boot_time = time.time()
             return True
 
         monkeypatch.setattr(mgr, "reboot_recently_detected",

@@ -126,10 +126,10 @@ def maintenance_reexec_seen():
         timeout=6,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
   return eventlog.returncode==0 and b"apt-daily-upgrade.service" in eventlog.stdout[-12000:]
  except (OSError,subprocess.SubprocessError):return False
-_reboot_detected_at=None
-def _write_reboot_marker(boot_id,detected_at):
+_reboot_boot_time=None
+def _write_reboot_marker(boot_id,boot_time):
  marker=ROOT/"reboot_recovery.json"
- marker.write_text(json.dumps({"boot_id":boot_id,"reboot_detected_at":detected_at}))
+ marker.write_text(json.dumps({"boot_id":boot_id,"boot_time":boot_time}))
 def _read_reboot_marker():
  marker=ROOT/"reboot_recovery.json"
  try:
@@ -138,6 +138,13 @@ def _read_reboot_marker():
  except (OSError,ValueError,json.JSONDecodeError):
   return None
  return None
+def _compute_boot_time(now):
+ # Derive the actual host boot time from uptime: boot_time = now - uptime_s.
+ # This anchors the recovery window to the real boot moment, not to when the
+ # manager process happens to start detecting. A late-starting manager
+ # therefore cannot extend the window beyond REBOOT_RECOVERY_WINDOW_S after boot.
+ uptime_s=float(Path("/proc/uptime").read_text().split()[0])
+ return now-uptime_s
 def reboot_recently_detected():
  # Detect a recent host reboot so DEMO sessions stuck in ERROR after a
  # reboot are recovered. Uses the kernel boot_id: a change since the last
@@ -145,49 +152,51 @@ def reboot_recently_detected():
  # This complements (does not replace) the maintenance_reexec_seen path.
  #
  # BOUNDED + RESTART-CONSISTENT:
- #  - The trigger is only active for REBOOT_RECOVERY_WINDOW_S after the
- #    reboot was detected. After the window, it returns False.
- #  - The detection timestamp is persisted to disk so a manager restart
- #    within the window retains recovery eligibility.
- #  - The in-memory cache stores the detection timestamp; once the window
- #    expires, the cache is cleared and re-evaluated from the disk marker.
+ #  - The trigger is only active for REBOOT_RECOVERY_WINDOW_S from the
+ #    actual host boot time (not from detection time). A late-starting
+ #    manager cannot extend the window beyond 15 minutes after boot.
+ #  - The boot time is persisted to disk so a manager restart within the
+ #    window retains recovery eligibility.
+ #  - The in-memory cache stores the boot time; once the window expires,
+ #    the cache is cleared and re-evaluated from the disk marker.
  #  - All accounts checked within the window receive True (multi-account fix).
- global _reboot_detected_at
+ global _reboot_boot_time
  now=time.time()
- # In-memory cache: still within the window?
- if _reboot_detected_at is not None:
-  if now-_reboot_detected_at<=REBOOT_RECOVERY_WINDOW_S:
+ # In-memory cache: still within the window from boot time?
+ if _reboot_boot_time is not None:
+  if now-_reboot_boot_time<=REBOOT_RECOVERY_WINDOW_S:
    return True
   # Window expired — clear so we re-evaluate from the disk marker
-  _reboot_detected_at=None
+  _reboot_boot_time=None
  try:
   boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip()
   marker_data=_read_reboot_marker()
   if marker_data and marker_data.get("boot_id"):
    previous_boot=marker_data["boot_id"]
-   detected_at=marker_data.get("reboot_detected_at")
+   boot_time=marker_data.get("boot_time")
    if previous_boot!=boot_id:
-    # boot_id changed: new reboot detected
-    _write_reboot_marker(boot_id,now)
-    _reboot_detected_at=now
-    return True
-   # Same boot — check if a prior detection is still within the window
-   if detected_at and now-detected_at<=REBOOT_RECOVERY_WINDOW_S:
-    _reboot_detected_at=detected_at
+    # boot_id changed: new reboot detected. Compute boot time from uptime
+    # so the window is anchored to the actual boot, not this detection.
+    new_boot_time=_compute_boot_time(now)
+    _write_reboot_marker(boot_id,new_boot_time)
+    _reboot_boot_time=new_boot_time
+    return now-new_boot_time<=REBOOT_RECOVERY_WINDOW_S
+   # Same boot — check if still within the window from boot time
+   if boot_time and now-boot_time<=REBOOT_RECOVERY_WINDOW_S:
+    _reboot_boot_time=boot_time
     return True
    # Same boot, window expired — no active reboot recovery
    return False
   else:
    # No marker or no boot_id recorded — first observation.
-   uptime_s=float(Path("/proc/uptime").read_text().split()[0])
-   if uptime_s<=REBOOT_RECOVERY_WINDOW_S:
-    # Fresh boot within the window: record and trigger
-    _write_reboot_marker(boot_id,now)
-    _reboot_detected_at=now
+   boot_time=_compute_boot_time(now)
+   _write_reboot_marker(boot_id,boot_time)
+   if now-boot_time<=REBOOT_RECOVERY_WINDOW_S:
+    # Fresh boot within the window: trigger
+    _reboot_boot_time=boot_time
     return True
-   # Not a fresh boot: record boot_id only, no detection
-  _write_reboot_marker(boot_id,None)
-  return False
+   # Not a fresh boot: marker recorded for future boot_id comparisons
+   return False
  except (OSError,ValueError,json.JSONDecodeError,subprocess.SubprocessError):
   return False
 def recovery_trigger_active():
